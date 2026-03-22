@@ -12,10 +12,11 @@ PLANNER_INSTRUCTIONS = """\
 You are a software architect agent. Your job is to analyze codebases and create concise implementation plans.
 
 ## How to research
-1. Rank files by relevance (use rank_files) to identify where to focus
-2. Explore the codebase structure (use list_directory, glob_search, read_file)
-3. Search for relevant code patterns (use grep_search, semantic_search)
-4. Analyze code structure and dependencies (use code_structure, find_dependencies)
+1. ALWAYS read the project's README.md first if it exists to understand the project context (use read_file)
+2. Rank files by relevance (use rank_files) to identify where to focus
+3. Explore the codebase structure (use list_directory, glob_search, read_file)
+4. Search for relevant code patterns (use grep_search, semantic_search)
+5. Analyze code structure and dependencies (use code_structure, find_dependencies)
 
 ## Output format — STRICT
 
@@ -41,13 +42,37 @@ Your output MUST follow this exact structure. No other format is accepted:
 """
 
 
-def create_planner(model_id: str = "claude-sonnet-4-5-20250929") -> Agent:
+def create_planner(model_id: str = "claude-sonnet-4-5-20250929", extra_instructions: str = "") -> Agent:
     """Create and return the planner agent."""
+    import os
+    import subprocess
+    from arc.tools.codebase import get_project_tree
+    
+    cwd = os.getcwd()
+    env_parts = []
+    
+    tree_text = get_project_tree(cwd, max_depth=3)
+    if tree_text:
+        env_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
+        
+    try:
+        git_status = subprocess.run(["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2).stdout.strip()
+        if git_status:
+            env_parts.append(f"Git status:\n{git_status}")
+    except Exception:
+        pass
+        
+    env_context = "\n\n".join(env_parts)
+    
+    instructions = f"{PLANNER_INSTRUCTIONS}\n\n## Environment Context\n{env_context}"
+    
+    if extra_instructions:
+        instructions = f"{instructions}\n\n{extra_instructions}"
     return Agent(
         name="Planner",
         model=Claude(id=model_id, max_tokens=4096, cache_system_prompt=True),
         tools=[read_file, glob_search, grep_search, list_directory, web_search, web_fetch,
                semantic_search, code_structure, find_dependencies, rank_files],
-        instructions=PLANNER_INSTRUCTIONS,
+        instructions=instructions,
         markdown=True,
     )

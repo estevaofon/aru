@@ -156,10 +156,21 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
             s = max(start_line, 1) - 1  # Convert to 0-indexed
             e = end_line if end_line > 0 else total_lines
             e = min(e, total_lines)
+            
+            # Cap the maximum lines returned to prevent huge context blowouts
+            max_lines = 1000
+            truncated = False
+            if e - s > max_lines:
+                e = s + max_lines
+                truncated = True
+                
             selected = lines[s:e]
             numbered = [f"{s + i + 1:4d} | {line}" for i, line in enumerate(selected)]
             header = f"[Lines {s + 1}-{e} of {total_lines}]\n"
-            return header + "".join(numbered)
+            result = header + "".join(numbered)
+            if truncated:
+                result += f"\n\n[WARNING] Output truncated to {max_lines} lines. Use a smaller range to read further."
+            return result
 
         # Full file mode with size limit
         if file_size > max_size:
@@ -376,7 +387,11 @@ def glob_search(pattern: str, directory: str = ".") -> str:
 
     if not matches:
         return f"No files matched pattern: {pattern}"
-    return "\n".join(sorted(matches))
+        
+    matches.sort()
+    if len(matches) > 100:
+        return "\n".join(matches[:100]) + f"\n... and {len(matches) - 100} more matches (use a more specific pattern to narrow results)"
+    return "\n".join(matches)
 
 
 def grep_search(pattern: str, directory: str = ".", file_glob: str = "") -> str:
@@ -440,6 +455,49 @@ def list_directory(directory: str = ".") -> str:
         return f"Error: Directory not found: {directory}"
     except Exception as e:
         return f"Error listing directory: {e}"
+
+
+def get_project_tree(root_dir: str, max_depth: int = 3, max_files_per_dir: int = 30) -> str:
+    """Generate a fast, text-based directory tree respecting .gitignore rules."""
+    import os
+    from arc.tools.gitignore import walk_filtered
+
+    lines = []
+    root_dir = os.path.abspath(root_dir)
+    
+    if not os.path.exists(root_dir):
+        return ""
+
+    for dirpath, dirs, files in walk_filtered(root_dir):
+        rel_path = os.path.relpath(dirpath, root_dir)
+        
+        # Calculate depth
+        if rel_path == ".":
+            depth = 0
+            lines.append(os.path.basename(root_dir) + "/")
+        else:
+            depth = rel_path.count(os.sep) + 1
+            if depth > max_depth:
+                dirs.clear()  # Stop descending
+                continue
+            
+            indent = "  " * depth
+            lines.append(f"{indent}{os.path.basename(dirpath)}/")
+            
+        # Add files
+        file_indent = "  " * (depth + 1)
+        sorted_files = sorted(files)
+        for i, f in enumerate(sorted_files):
+            if i >= max_files_per_dir:
+                lines.append(f"{file_indent}... ({len(files) - max_files_per_dir} more files)")
+                break
+            lines.append(f"{file_indent}{f}")
+            
+    result = "\n".join(lines)
+    if len(result) > 15000:
+        return result[:15000] + "\n... [Tree truncated due to size]"
+    return result
+
 
 
 import atexit

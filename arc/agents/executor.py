@@ -23,6 +23,7 @@ unrelated files simultaneously. Each sub-agent runs autonomously with the same t
 You can call delegate_task multiple times in a single response to run sub-agents in parallel.
 
 Guidelines:
+- ALWAYS read the project's README.md first if it exists to understand the project context
 - Read files before editing them
 - Use edit_file for targeted changes (preferred over rewriting entire files)
 - Use write_file only for new files or complete rewrites
@@ -38,12 +39,36 @@ When given a plan, execute it step by step. When given a direct task, figure out
 """
 
 
-def create_executor(model_id: str = "claude-sonnet-4-5-20250929") -> Agent:
+def create_executor(model_id: str = "claude-sonnet-4-5-20250929", extra_instructions: str = "") -> Agent:
     """Create and return the executor agent."""
+    import os
+    import subprocess
+    from arc.tools.codebase import get_project_tree
+    
+    cwd = os.getcwd()
+    env_parts = []
+    
+    tree_text = get_project_tree(cwd, max_depth=3)
+    if tree_text:
+        env_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
+        
+    try:
+        git_status = subprocess.run(["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2).stdout.strip()
+        if git_status:
+            env_parts.append(f"Git status:\n{git_status}")
+    except Exception:
+        pass
+        
+    env_context = "\n\n".join(env_parts)
+    
+    instructions = f"{EXECUTOR_INSTRUCTIONS}\n\n## Environment Context\n{env_context}"
+    
+    if extra_instructions:
+        instructions = f"{instructions}\n\n{extra_instructions}"
     return Agent(
         name="Executor",
         model=Claude(id=model_id, max_tokens=8192, cache_system_prompt=True),
         tools=ALL_TOOLS,
-        instructions=EXECUTOR_INSTRUCTIONS,
+        instructions=instructions,
         markdown=True,
     )

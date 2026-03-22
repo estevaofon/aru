@@ -27,6 +27,7 @@ from rich.text import Text
 
 from arc.agents.executor import create_executor
 from arc.agents.planner import create_planner
+from arc.config import AgentConfig, load_config, render_command_template
 
 console = Console()
 
@@ -53,10 +54,13 @@ A coding agent powered by Claude + Agno.
 - `/exec [task]` — Execute the current plan, or a specific task
 - `/model [sonnet|opus|haiku]` — Switch model (default: sonnet)
 - `/sessions` — List recent sessions
+- `/commands` — List custom commands from .agents/commands/
+- `/skills` — List skills from .agents/skills/
 - `! <command>` — Run a shell command directly
 - `/quit` — Exit
 
-**CLI flags:** `--resume [id]` to continue a session, `--list` to show sessions.
+**Config:** Place `AGENTS.md` in project root for custom instructions. \
+Use `.agents/commands/` and `.agents/skills/` for custom commands and skills.
 
 Or just type naturally — arc will decide whether to plan or execute.
 Paste code freely — multi-line paste is detected automatically. Type a message about the paste, then Enter to send.
@@ -68,6 +72,8 @@ SLASH_COMMANDS = [
     ("/exec", "Execute the current plan, or a specific task", "/exec [task]"),
     ("/model", "Switch model (sonnet, opus, haiku)", "/model [name]"),
     ("/sessions", "List recent sessions", "/sessions"),
+    ("/commands", "List custom commands", "/commands"),
+    ("/skills", "List available skills", "/skills"),
     ("/quit", "Exit arc", "/quit"),
 ]
 
@@ -75,12 +81,15 @@ SLASH_COMMANDS = [
 class SlashCommandCompleter(Completer):
     """Show slash commands only when '/' is typed as the first character."""
 
+    def __init__(self, custom_commands: dict | None = None):
+        self._custom_commands = custom_commands or {}
+
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
         # Only complete when '/' is the first character
         if not text.startswith("/"):
             return
-        # Match commands that start with what the user typed
+        # Built-in commands
         for cmd, description, usage in SLASH_COMMANDS:
             if cmd.startswith(text):
                 yield Completion(
@@ -88,6 +97,16 @@ class SlashCommandCompleter(Completer):
                     start_position=-len(text),
                     display=HTML(f"<b>{cmd}</b>"),
                     display_meta=description,
+                )
+        # Custom commands from .agents/commands/
+        for name, cmd_def in self._custom_commands.items():
+            slash_name = f"/{name}"
+            if slash_name.startswith(text):
+                yield Completion(
+                    slash_name,
+                    start_position=-len(text),
+                    display=HTML(f"<b>{slash_name}</b>"),
+                    display_meta=cmd_def.description,
                 )
 
 
@@ -116,7 +135,7 @@ class PasteState:
         return user_text
 
 
-def _create_prompt_session(paste_state: PasteState) -> PromptSession:
+def _create_prompt_session(paste_state: PasteState, config: AgentConfig | None = None) -> PromptSession:
     """Create a prompt_toolkit session with smart paste detection."""
     bindings = KeyBindings()
 
@@ -125,11 +144,12 @@ def _create_prompt_session(paste_state: PasteState) -> PromptSession:
         """Escape+Enter inserts a newline for manual multi-line editing."""
         event.current_buffer.insert_text("\n")
 
+    custom_cmds = config.commands if config else {}
     session = PromptSession(
         key_bindings=bindings,
         multiline=False,
         enable_open_in_editor=False,
-        completer=SlashCommandCompleter(),
+        completer=SlashCommandCompleter(custom_cmds),
         complete_while_typing=True,
     )
 
@@ -168,8 +188,14 @@ unrelated files simultaneously. You can call delegate_task multiple times in a s
 Be concise and direct. Focus on doing the work, not explaining what you'll do.
 When creating or updating multiple independent files, use write_files to batch them in a single call instead of calling write_file repeatedly.
 When making independent edits across files, use edit_files to batch them in a single call instead of calling edit_file repeatedly.
+ALWAYS read the project's README.md first if it exists to understand the project context.
 NEVER create documentation files (*.md) unless the user explicitly asks for them. This includes README.md, CHANGELOG.md, CONTRIBUTING.md, SETUP.md, and any other markdown files. A single README.md with basic usage is acceptable only when creating a new project from scratch — nothing more. Focus on writing working code, not documentation.
 The current working directory is: {cwd}
+
+## Environment Context
+{env_context}
+
+{extra_instructions}
 
 {context}
 """
@@ -468,12 +494,36 @@ class SessionStore:
         return None
 
 
-def create_general_agent(session: Session):
+def create_general_agent(session: Session, config: AgentConfig | None = None):
     """Create the general-purpose agent."""
     from agno.agent import Agent
     from agno.models.anthropic import Claude
 
     from arc.tools.codebase import ALL_TOOLS
+
+    # Gather quick environment context
+    env_context_parts = []
+    try:
+        import subprocess
+        import os
+        from arc.tools.codebase import get_project_tree
+        
+        cwd = os.getcwd()
+        
+        # Inject fast project tree
+        tree_text = get_project_tree(cwd, max_depth=3)
+        if tree_text:
+            env_context_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
+            
+        git_status = subprocess.run(["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2).stdout.strip()
+        if git_status:
+            env_context_parts.append("Git status (modified/untracked):\n" + git_status)
+    except Exception:
+        pass
+        
+    env_context = "\n\n".join(env_context_parts) if env_context_parts else "No additional environment context."
+
+    extra = config.get_extra_instructions() if config else ""
 
     return Agent(
         name="Arc",
@@ -481,6 +531,8 @@ def create_general_agent(session: Session):
         tools=ALL_TOOLS,
         instructions=GENERAL_INSTRUCTIONS.format(
             cwd=os.getcwd(),
+            env_context=env_context,
+            extra_instructions=extra,
             context=session.get_context_summary(),
         ),
         markdown=True,
@@ -876,6 +928,17 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
     store = SessionStore()
 
+    # Load project configuration (AGENTS.md, .agents/commands, .agents/skills)
+    config = load_config()
+    if config.agents_md:
+        console.print("[dim]Loaded AGENTS.md[/dim]")
+    if config.commands:
+        console.print(f"[dim]Loaded {len(config.commands)} custom command(s): {', '.join(f'/{k}' for k in config.commands)}[/dim]")
+    if config.skills:
+        console.print(f"[dim]Loaded {len(config.skills)} skill(s): {', '.join(config.skills.keys())}[/dim]")
+
+    extra_instructions = config.get_extra_instructions()
+
     # Resume or create session
     if resume_id:
         if resume_id == "last":
@@ -911,7 +974,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     planner = None
     executor = None
     paste_state = PasteState()
-    prompt_session = _create_prompt_session(paste_state)
+    prompt_session = _create_prompt_session(paste_state, config)
 
     while True:
         try:
@@ -987,6 +1050,26 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 console.print(f"\n[dim]Resume with: arc --resume <id>[/dim]")
             continue
 
+        if user_input.lower() == "/commands":
+            if not config.commands:
+                console.print("[dim]No custom commands found. Add .md files to .agents/commands/[/dim]")
+            else:
+                console.print("[bold]Custom commands:[/bold]\n")
+                for name, cmd_def in config.commands.items():
+                    console.print(f"  [bold cyan]/{name}[/bold cyan]  [dim]{cmd_def.description}[/dim]")
+                console.print(f"\n[dim]Source: .agents/commands/[/dim]")
+            continue
+
+        if user_input.lower() == "/skills":
+            if not config.skills:
+                console.print("[dim]No skills found. Add .md files to .agents/skills/[/dim]")
+            else:
+                console.print("[bold]Available skills:[/bold]\n")
+                for name, skill in config.skills.items():
+                    console.print(f"  [bold cyan]{name}[/bold cyan]  [dim]{skill.description}[/dim]")
+                console.print(f"\n[dim]Source: .agents/skills/[/dim]")
+            continue
+
         if user_input.startswith("! "):
             cmd = user_input[2:].strip()
             if not cmd:
@@ -1002,7 +1085,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
             console.print("[bold magenta]Planning...[/bold magenta]")
             if planner is None:
-                planner = create_planner(session.model_id)
+                planner = create_planner(session.model_id, extra_instructions)
 
             context = session.get_context_summary()
             prompt = task
@@ -1024,7 +1107,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     console.print("[bold green]Executing plan...[/bold green]")
 
                     def make_executor():
-                        return create_executor(session.model_id)
+                        return create_executor(session.model_id, extra_instructions)
 
                     result = await execute_plan_steps(session, make_executor)
                     if result:
@@ -1045,7 +1128,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     step.status = "pending"
 
                 def make_executor():
-                    return create_executor(session.model_id)
+                    return create_executor(session.model_id, extra_instructions)
 
                 result = await execute_plan_steps(session, make_executor)
                 if result:
@@ -1056,7 +1139,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             else:
                 console.print("[bold green]Executing...[/bold green]")
 
-                executor = create_executor(session.model_id)
+                executor = create_executor(session.model_id, extra_instructions)
                 context = session.get_context_summary()
                 prompt = task
                 if context:
@@ -1067,8 +1150,30 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     session.add_message("user", f"/exec {task}")
                     session.add_message("assistant", f"[Execution]\n{result}")
 
+        elif user_input.startswith("/") and not user_input.startswith("//"):
+            # Check for custom commands from .agents/commands/
+            parts = user_input[1:].split(None, 1)
+            cmd_name = parts[0].lower()
+            cmd_args = parts[1] if len(parts) > 1 else ""
+
+            if cmd_name in config.commands:
+                cmd_def = config.commands[cmd_name]
+                prompt = render_command_template(cmd_def.template, cmd_args)
+                console.print(f"[bold magenta]Running /{cmd_name}...[/bold magenta]")
+
+                agent = create_general_agent(session, config)
+                session.add_message("user", user_input)
+                result = await run_agent_capture(agent, prompt, session)
+                if result:
+                    session.add_message("assistant", result)
+            else:
+                console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
+                console.print(f"[dim]Built-in: /plan, /exec, /model, /sessions, /commands, /skills, /quit[/dim]")
+                if config.commands:
+                    console.print(f"[dim]Custom: {', '.join(f'/{k}' for k in config.commands)}[/dim]")
+
         else:
-            agent = create_general_agent(session)
+            agent = create_general_agent(session, config)
             session.add_message("user", user_input)
             result = await run_agent_capture(agent, user_input, session)
             if result:

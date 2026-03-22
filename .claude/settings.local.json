@@ -16,7 +16,8 @@
       "Bash(find D:OneDriveDocumentospython_projectsarc -name *template* -o -name *instruction*)",
       "Bash(grep -r \"cache\\\\|Cache\\\\|prompt_caching\\\\|CACHE\\\\|token\" /d/OneDrive/Documentos/python_projects/arc/arc/*.py /d/OneDrive/Documentos/python_projects/arc/arc/tools/*.py)",
       "Bash(pip show:*)",
-      "Bash(python -c \"from agno.models.anthropic import Claude; help\\(Claude.__init__\\)\")"
+      "Bash(python -c \"from agno.models.anthropic import Claude; help\\(Claude.__init__\\)\")",
+      "Bash(ls:*)"
     ]
   }
 }
