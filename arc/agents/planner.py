@@ -35,7 +35,8 @@ Your output MUST follow this exact structure. No other format is accepted:
 - Be extremely concise. Every word must earn its place.
 - Each step must be self-contained enough that an executor agent can complete it independently.
 - Include relevant file paths and specific code references in each step.
-- Prefer more small steps over fewer large ones.
+- Adjust step granularity based on task complexity. Do not overcomplicate simple tasks with multiple small steps; use fewer, broader steps instead.
+- Avoid adding explicit testing or verification steps for trivial changes. The executor will handle basic validation.
 - Never include documentation files (*.md) unless the user explicitly asked for them.
 - Do not plan creation of README.md, CHANGELOG.md, SETUP.md, CONTRIBUTING.md, or similar files.
 - The deliverable is working code, not documentation.
