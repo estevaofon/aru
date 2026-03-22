@@ -8,6 +8,7 @@ dependencies = [
     "agno",
     "anthropic",
     "python-dotenv>=1.2.2",
+    "prompt-toolkit>=3.0",
     "rich",
     "sqlalchemy>=2.0.48",
 ]

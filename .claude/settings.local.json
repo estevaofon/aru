@@ -5,7 +5,8 @@
       "Bash(gh api:*)",
       "Bash(cd:*)",
       "Bash(uv add:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(uv sync:*)"
     ]
   }
 }

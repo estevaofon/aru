@@ -4,6 +4,10 @@ import os
 import subprocess
 import sys
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -18,6 +22,11 @@ from arc.agents.planner import create_planner
 console = Console()
 
 
+def _sanitize_input(text: str) -> str:
+    """Remove lone UTF-16 surrogates that Windows clipboard can introduce."""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 WELCOME = """\
 # arc
 
@@ -30,7 +39,71 @@ A coding agent powered by Claude + Agno.
 - `/quit` — Exit
 
 Or just type naturally — arc will decide whether to plan or execute.
+Paste code freely — multi-line paste is detected automatically. Type a message about the paste, then Enter to send.
 """
+
+
+class PasteState:
+    """Tracks pasted content so the user can annotate it."""
+
+    def __init__(self):
+        self.pasted_content: str | None = None
+        self.line_count: int = 0
+
+    def set(self, content: str):
+        lines = content.splitlines()
+        self.pasted_content = content
+        self.line_count = len(lines)
+
+    def clear(self):
+        self.pasted_content = None
+        self.line_count = 0
+
+    def build_message(self, user_text: str) -> str:
+        """Combine user annotation with pasted content."""
+        if self.pasted_content and user_text.strip():
+            return f"{user_text.strip()}\n\n```\n{self.pasted_content}\n```"
+        if self.pasted_content:
+            return self.pasted_content
+        return user_text
+
+
+def _create_prompt_session(paste_state: PasteState) -> PromptSession:
+    """Create a prompt_toolkit session with smart paste detection."""
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Escape, Keys.Enter)
+    def _newline(event):
+        """Escape+Enter inserts a newline for manual multi-line editing."""
+        event.current_buffer.insert_text("\n")
+
+    @bindings.add(Keys.BracketedPaste)
+    def _handle_paste(event):
+        """Intercept multi-line pastes: store content and show line count."""
+        data = event.data
+        lines = data.splitlines()
+        if len(lines) > 1:
+            paste_state.set(data)
+            # Clear the buffer and let user type an annotation
+            event.current_buffer.reset()
+        else:
+            # Single-line paste: just insert normally
+            event.current_buffer.insert_text(data)
+
+    def _get_toolbar():
+        if paste_state.pasted_content:
+            return HTML(
+                f'  <b><style bg="ansiblue" fg="ansiwhite"> {paste_state.line_count} lines pasted </style></b>'
+                f'  <i><style fg="ansigray">Type a message about this paste, or press Enter to send as-is</style></i>'
+            )
+        return ""
+
+    return PromptSession(
+        key_bindings=bindings,
+        multiline=False,
+        enable_open_in_editor=False,
+        bottom_toolbar=_get_toolbar,
+    )
 
 GENERAL_INSTRUCTIONS = """\
 You are arc, an AI coding assistant. You help users with software engineering tasks.
@@ -38,6 +111,7 @@ You are arc, an AI coding assistant. You help users with software engineering ta
 You have access to tools for reading, writing, and editing files, searching the codebase, and running shell commands.
 
 Be concise and direct. Focus on doing the work, not explaining what you'll do.
+NEVER create documentation files (*.md) unless the user explicitly asks for them. This includes README.md, CHANGELOG.md, CONTRIBUTING.md, SETUP.md, and any other markdown files. A single README.md with basic usage is acceptable only when creating a new project from scratch — nothing more. Focus on writing working code, not documentation.
 The current working directory is: {cwd}
 
 {context}
@@ -193,13 +267,30 @@ def run_cli():
     session = Session()
     planner = None
     executor = None
+    paste_state = PasteState()
+    prompt_session = _create_prompt_session(paste_state)
 
     while True:
         try:
-            user_input = console.input("[bold cyan]arc>[/bold cyan] ").strip()
+            paste_state.clear()
+            user_text = prompt_session.prompt(
+                HTML("<b><cyan>arc&gt;</cyan></b> "),
+                multiline=False,
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Bye![/dim]")
             break
+
+        user_input = _sanitize_input(paste_state.build_message(user_text))
+
+        if paste_state.pasted_content and user_text:
+            console.print(
+                f"[dim] {paste_state.line_count} lines pasted[/dim]  [cyan]{user_text}[/cyan]"
+            )
+        elif paste_state.pasted_content:
+            console.print(
+                f"[dim] {paste_state.line_count} lines pasted[/dim]"
+            )
 
         if not user_input:
             continue

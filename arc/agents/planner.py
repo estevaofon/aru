@@ -19,6 +19,8 @@ Your plan should include:
 - Step-by-step implementation order
 - Key considerations or risks
 
+IMPORTANT: Never include documentation files (*.md) in the plan unless the user explicitly asked for them. Do not plan creation of README.md, CHANGELOG.md, SETUP.md, CONTRIBUTING.md, or similar files. At most, plan a single README.md with basic usage when creating a new project from scratch. The deliverable is working code, not documentation.
+
 Be concise and actionable. Output the plan in markdown format.
 """
 

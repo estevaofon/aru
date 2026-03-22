@@ -20,6 +20,8 @@ Guidelines:
 - Run tests after making changes when applicable
 - Keep changes minimal and focused on the task
 - Do not add unnecessary comments, docstrings, or refactoring beyond what was asked
+- NEVER create documentation files (*.md) unless the user explicitly asks for them. This includes README.md, CHANGELOG.md, CONTRIBUTING.md, SETUP.md, and any other markdown files. A single README.md with basic usage is acceptable only when creating a new project from scratch — nothing more.
+- Focus on writing working code, not documentation. The code IS the deliverable.
 
 When given a plan, execute it step by step. When given a direct task, figure out what needs to be done and do it.
 """
