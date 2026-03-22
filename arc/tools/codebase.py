@@ -66,7 +66,7 @@ def _format_diff(old_string: str, new_string: str) -> Group:
     if new_string:
         for line in new_string.splitlines():
             parts.append(Text.assemble(
-                ("+ " + line, "green"),
+                ("+ " + line, "white on green"),
             ))
     return Group(*parts)
 

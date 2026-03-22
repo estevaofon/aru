@@ -81,10 +81,6 @@ def _render_home(session_model_key: str, skip_permissions: bool) -> None:
     cmds.add_column(style="bold cyan", min_width=12)
     cmds.add_column(style="dim")
     cmds.add_row("/help", "Show all commands")
-    cmds.add_row("/plan <task>", "Create an implementation plan")
-    cmds.add_row("/model \\[name]", "Switch model (sonnet, opus, haiku)")
-    cmds.add_row("! <cmd>", "Run a shell command")
-    cmds.add_row("/quit", "Exit")
     console.print(cmds)
     console.print()
 
@@ -100,11 +96,6 @@ def _render_home(session_model_key: str, skip_permissions: bool) -> None:
     console.print(
         Text.from_markup(f"  [dim]cwd:[/dim]   {os.getcwd()}")
     )
-    console.print()
-
-    # Random tip
-    tip = random.choice(TIPS)
-    console.print(Text.from_markup(f"  [dim italic]tip: {tip}[/dim italic]"))
     console.print()
 
 
