@@ -17,6 +17,8 @@ Guidelines:
 - Read files before editing them
 - Use edit_file for targeted changes (preferred over rewriting entire files)
 - Use write_file only for new files or complete rewrites
+- When creating or updating multiple independent files, use write_files to batch them in a single call instead of calling write_file repeatedly
+- When making independent edits across files, use edit_files to batch them in a single call instead of calling edit_file repeatedly
 - Run tests after making changes when applicable
 - Keep changes minimal and focused on the task
 - Do not add unnecessary comments, docstrings, or refactoring beyond what was asked

@@ -38,6 +38,40 @@ def write_file(file_path: str, content: str) -> str:
         return f"Error writing file: {e}"
 
 
+def write_files(files: list[dict]) -> str:
+    """Write multiple files at once. Use this instead of multiple write_file calls when creating
+    or updating several files that don't depend on each other (e.g. scaffolding a project).
+
+    Each entry in the list must have 'path' and 'content' keys.
+
+    Args:
+        files: List of dicts with 'path' (file path) and 'content' (file content) keys.
+               Example: [{"path": "src/main.py", "content": "print('hello')"}, {"path": "src/utils.py", "content": "..."}]
+    """
+    results = []
+    errors = []
+    for entry in files:
+        path = entry.get("path", "")
+        content = entry.get("content", "")
+        if not path:
+            errors.append("Error: missing 'path' in entry")
+            continue
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            results.append(path)
+        except Exception as e:
+            errors.append(f"Error writing {path}: {e}")
+
+    parts = []
+    if results:
+        parts.append(f"Successfully wrote {len(results)} files: {', '.join(results)}")
+    if errors:
+        parts.append("\n".join(errors))
+    return "\n".join(parts) or "No files to write."
+
+
 def edit_file(file_path: str, old_string: str, new_string: str) -> str:
     """Replace an exact string in a file. The old_string must appear exactly once.
 
@@ -64,6 +98,69 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         return f"Error: File not found: {file_path}"
     except Exception as e:
         return f"Error editing file: {e}"
+
+
+def edit_files(edits: list[dict]) -> str:
+    """Apply multiple find-and-replace edits across files in a single call. Use this instead of
+    multiple edit_file calls when making independent edits to different files (or multiple edits
+    to the same file, applied in order).
+
+    Each entry must have 'path', 'old_string', and 'new_string' keys.
+
+    Args:
+        edits: List of dicts with 'path' (file path), 'old_string' (text to find), and 'new_string' (replacement).
+               Example: [{"path": "src/main.py", "old_string": "foo", "new_string": "bar"}]
+    """
+    results = []
+    errors = []
+    # Cache file contents to support multiple edits to the same file
+    cache: dict[str, str] = {}
+
+    for entry in edits:
+        path = entry.get("path", "")
+        old = entry.get("old_string", "")
+        new = entry.get("new_string", "")
+        if not path or not old:
+            errors.append(f"Error: missing 'path' or 'old_string' in entry")
+            continue
+        try:
+            if path not in cache:
+                with open(path, "r", encoding="utf-8") as f:
+                    cache[path] = f.read()
+
+            content = cache[path]
+            count = content.count(old)
+            if count == 0:
+                errors.append(f"{path}: old_string not found")
+                continue
+            if count > 1:
+                errors.append(f"{path}: old_string found {count} times, must be unique")
+                continue
+
+            cache[path] = content.replace(old, new, 1)
+            results.append(path)
+        except FileNotFoundError:
+            errors.append(f"{path}: file not found")
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+
+    # Flush all modified files
+    written = set()
+    for path, content in cache.items():
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            written.add(path)
+        except Exception as e:
+            errors.append(f"Error writing {path}: {e}")
+
+    parts = []
+    if results:
+        unique = list(dict.fromkeys(results))  # preserve order, dedupe
+        parts.append(f"Successfully applied {len(results)} edits across {len(unique)} files: {', '.join(unique)}")
+    if errors:
+        parts.append("\n".join(errors))
+    return "\n".join(parts) or "No edits to apply."
 
 
 def glob_search(pattern: str, directory: str = ".") -> str:
@@ -209,7 +306,9 @@ def bash(command: str, timeout: int = 120, working_directory: str = "") -> str:
 ALL_TOOLS = [
     read_file,
     write_file,
+    write_files,
     edit_file,
+    edit_files,
     glob_search,
     grep_search,
     list_directory,
