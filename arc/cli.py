@@ -1,17 +1,21 @@
 """Interactive CLI for arc - a Claude Code clone."""
 
 import os
+import random
 import subprocess
 import sys
+import time
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from rich.console import Console
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.measure import Measurement
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
@@ -198,6 +202,90 @@ def run_shell(command: str):
     console.print()
 
 
+THINKING_PHRASES = [
+    "Thinking...",
+    "Cooking...",
+    "Working...",
+    "Making magic...",
+    "Brewing ideas...",
+    "Crunching code...",
+    "Connecting the dots...",
+    "Crafting a plan...",
+    "On it...",
+    "Diving deep...",
+    "Almost there...",
+    "Putting pieces together...",
+    "Wiring things up...",
+    "Spinning up neurons...",
+    "Loading creativity...",
+]
+
+
+class StatusBar:
+    """A bottom status bar that cycles through fun phrases.
+
+    Renders as a thin separator line + spinner text.  Rich's Live calls
+    ``__rich_console__`` on every refresh tick, so we rotate the phrase
+    based on wall-clock time — no extra threads needed.
+    """
+
+    def __init__(self, interval: float = 3.0):
+        self._interval = interval
+        self._phrases = list(THINKING_PHRASES)
+        random.shuffle(self._phrases)
+        self._index = 0
+        self._last_switch = time.monotonic()
+        self._override: str | None = None
+
+    @property
+    def current_text(self) -> str:
+        if self._override is not None:
+            return self._override
+        return self._phrases[self._index % len(self._phrases)]
+
+    def set_text(self, text: str):
+        self._override = text
+
+    def resume_cycling(self):
+        self._override = None
+        self._last_switch = time.monotonic()
+
+    def _maybe_rotate(self):
+        now = time.monotonic()
+        if now - self._last_switch >= self._interval:
+            self._last_switch = now
+            self._index += 1
+            if self._index >= len(self._phrases):
+                random.shuffle(self._phrases)
+                self._index = 0
+            self._override = None
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        self._maybe_rotate()
+        spinner = Spinner("dots", text=f"[dim]{self.current_text}[/dim]", style="cyan")
+        yield from spinner.__rich_console__(console, options)
+
+    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
+        return Measurement(1, options.max_width)
+
+
+class StreamingDisplay:
+    """Combines streamed content on top with a persistent status bar at the bottom."""
+
+    def __init__(self, status_bar: StatusBar):
+        self.status_bar = status_bar
+        self.content: Markdown | None = None
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if self.content is not None:
+            yield self.content
+            yield Text()  # blank line separator
+        yield self.status_bar
+
+    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
+        return Measurement(1, options.max_width)
+
+
 def run_agent_capture(agent, message: str) -> str | None:
     """Run agent with streaming display and capture the final content."""
     from agno.run.agent import (
@@ -208,11 +296,13 @@ def run_agent_capture(agent, message: str) -> str | None:
     )
 
     console.print()
-    content_parts = []
     final_content = None
 
     try:
-        with Live(Spinner("dots", text="Thinking..."), console=console, refresh_per_second=10) as live:
+        status = StatusBar(interval=3.0)
+        display = StreamingDisplay(status)
+
+        with Live(display, console=console, refresh_per_second=10) as live:
             accumulated = ""
             for event in agent.run(message, stream=True):
                 if isinstance(event, ToolCallStartedEvent):
@@ -222,21 +312,32 @@ def run_agent_capture(agent, message: str) -> str | None:
                         tool_args = ", ".join(
                             f"{k}={repr(v)[:60]}" for k, v in event.tool_args.items()
                         )
-                    live.update(Spinner("dots", text=f"Calling {tool_name}({tool_args})..."))
+                    status.set_text(f"Calling {tool_name}({tool_args})...")
+                    live.update(display)
+
                 elif isinstance(event, ToolCallCompletedEvent):
                     tool_name = event.tool_name if hasattr(event, "tool_name") else "tool"
-                    live.update(Spinner("dots", text=f"{tool_name} done. Thinking..."))
+                    status.set_text(f"{tool_name} done.")
+                    live.update(display)
+                    # Resume cycling after a brief pause on next tick
+                    status.resume_cycling()
+
                 elif isinstance(event, RunContentEvent):
                     if hasattr(event, "content") and event.content:
                         accumulated += event.content
-                        live.update(Markdown(accumulated))
+                        display.content = Markdown(accumulated)
+                        live.update(display)
+
                 elif isinstance(event, RunCompletedEvent):
                     if hasattr(event, "content") and event.content:
                         final_content = event.content
-                        live.update(Markdown(final_content))
 
-        if not final_content and accumulated:
+        # Print final content cleanly outside Live context
+        if final_content:
+            console.print(Markdown(final_content))
+        elif accumulated:
             final_content = accumulated
+            console.print(Markdown(accumulated))
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
