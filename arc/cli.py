@@ -222,14 +222,8 @@ When creating or updating multiple independent files, use write_files to batch t
 When making independent edits across files, use edit_files to batch them in a single call instead of calling edit_file repeatedly.
 ALWAYS read the project's README.md first if it exists to understand the project context.
 NEVER create documentation files (*.md) unless the user explicitly asks for them. This includes README.md, CHANGELOG.md, CONTRIBUTING.md, SETUP.md, and any other markdown files. A single README.md with basic usage is acceptable only when creating a new project from scratch — nothing more. Focus on writing working code, not documentation.
-The current working directory is: {cwd}
-
-## Environment Context
-{env_context}
 
 {extra_instructions}
-
-{context}
 """
 
 
@@ -533,28 +527,6 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
 
     from arc.tools.codebase import ALL_TOOLS
 
-    # Gather quick environment context
-    env_context_parts = []
-    try:
-        import subprocess
-        import os
-        from arc.tools.codebase import get_project_tree
-        
-        cwd = os.getcwd()
-        
-        # Inject fast project tree
-        tree_text = get_project_tree(cwd, max_depth=3)
-        if tree_text:
-            env_context_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
-            
-        git_status = subprocess.run(["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2).stdout.strip()
-        if git_status:
-            env_context_parts.append("Git status (modified/untracked):\n" + git_status)
-    except Exception:
-        pass
-        
-    env_context = "\n\n".join(env_context_parts) if env_context_parts else "No additional environment context."
-
     extra = config.get_extra_instructions() if config else ""
 
     return Agent(
@@ -562,10 +534,7 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         model=Claude(id=session.model_id, max_tokens=8192, cache_system_prompt=True),
         tools=ALL_TOOLS,
         instructions=GENERAL_INSTRUCTIONS.format(
-            cwd=os.getcwd(),
-            env_context=env_context,
             extra_instructions=extra,
-            context=session.get_context_summary(),
         ),
         markdown=True,
     )
@@ -820,11 +789,41 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         display = StreamingDisplay(status)
         current_tool_label: str | None = None
 
+        dynamic_parts = []
+        import os
+        cwd = os.getcwd()
+        dynamic_parts.append(f"The current working directory is: {cwd}")
+
+        if session:
+            env_context_parts = []
+            import subprocess
+            from arc.tools.codebase import get_project_tree
+            tree_text = get_project_tree(cwd, max_depth=3)
+            if tree_text:
+                env_context_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
+                
+            try:
+                git_status = subprocess.run(["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2).stdout.strip()
+                if git_status:
+                    env_context_parts.append(f"Git status:\n{git_status}")
+            except Exception:
+                pass
+                
+            if env_context_parts:
+                dynamic_parts.append("## Environment Context\n" + "\n\n".join(env_context_parts))
+                
+            ctx_summary = session.get_context_summary()
+            if ctx_summary:
+                dynamic_parts.append(ctx_summary)
+
+        dynamic_context = "\n\n".join(dynamic_parts)
+        run_message = f"{dynamic_context}\n\n---\n\n## Current Task/Message\n{message}"
+
         with Live(display, console=console, refresh_per_second=10) as live:
             set_live(live)
             set_display(display)
             accumulated = ""
-            async for event in agent.arun(message, stream=True):
+            async for event in agent.arun(run_message, stream=True, stream_events=True):
                 if isinstance(event, ToolCallStartedEvent):
                     tool_name = event.tool_name if hasattr(event, "tool_name") else "tool"
                     tool_args = event.tool_args if hasattr(event, "tool_args") else None
@@ -1143,10 +1142,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             if planner is None:
                 planner = create_planner(session.model_id, extra_instructions)
 
-            context = session.get_context_summary()
+            # No need to manually inject session context into prompt; run_agent_capture will do it.
             prompt = task
-            if context:
-                prompt = f"{task}\n\n---\nContext from this session:\n{context}"
 
             plan_content = await run_agent_capture(planner, prompt, session)
 
