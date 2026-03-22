@@ -7,7 +7,9 @@
       "Bash(uv add:*)",
       "Bash(uv run:*)",
       "Bash(uv sync:*)",
-      "Bash(find /d/OneDrive/Documentos/python_projects/arc/arc -type f -name *.py)"
+      "Bash(find /d/OneDrive/Documentos/python_projects/arc/arc -type f -name *.py)",
+      "Bash(wc:*)",
+      "Bash(python -c \"from arc.cli import SlashCommandCompleter, SLASH_COMMANDS; print\\(''OK -'', len\\(SLASH_COMMANDS\\), ''commands''\\)\")"
     ]
   }
 }

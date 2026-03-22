@@ -9,6 +9,8 @@ import subprocess
 import threading
 import textwrap
 
+from arc.tools.gitignore import is_ignored, walk_filtered
+
 import httpx
 
 from rich.console import Console, Group
@@ -123,15 +125,59 @@ def _ask_permission(action: str, details: str | Text | Group) -> bool:
         return allowed
 
 
-def read_file(file_path: str) -> str:
+def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 100_000) -> str:
     """Read the contents of a file.
 
     Args:
         file_path: Path to the file to read (absolute or relative to working directory).
+        start_line: First line to read (1-indexed, inclusive). 0 means from the beginning.
+        end_line: Last line to read (1-indexed, inclusive). 0 means to the end.
+        max_size: Maximum file size in bytes before truncation. Defaults to 100KB. Ignored when line range is specified.
     """
     try:
+        # Check if file exists and get size
+        file_size = os.path.getsize(file_path)
+
+        # Detect binary files by checking for null bytes in the first 1KB
+        with open(file_path, "rb") as f:
+            sample = f.read(1024)
+        if b"\x00" in sample:
+            return f"Error: Binary file detected ({file_size} bytes): {file_path}"
+
+        # Read with line range support
         with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
+
+        total_lines = len(lines)
+
+        if start_line > 0 or end_line > 0:
+            # Line range mode (1-indexed, inclusive)
+            s = max(start_line, 1) - 1  # Convert to 0-indexed
+            e = end_line if end_line > 0 else total_lines
+            e = min(e, total_lines)
+            selected = lines[s:e]
+            numbered = [f"{s + i + 1:4d} | {line}" for i, line in enumerate(selected)]
+            header = f"[Lines {s + 1}-{e} of {total_lines}]\n"
+            return header + "".join(numbered)
+
+        # Full file mode with size limit
+        if file_size > max_size:
+            # Read up to max_size bytes worth of lines
+            accumulated = []
+            char_count = 0
+            for i, line in enumerate(lines):
+                char_count += len(line)
+                if char_count > max_size:
+                    break
+                accumulated.append(f"{i + 1:4d} | {line}")
+            lines_shown = len(accumulated)
+            return (
+                "".join(accumulated)
+                + f"\n\n[WARNING] File truncated at ~{max_size:,} bytes ({file_size:,} total, "
+                + f"{lines_shown}/{total_lines} lines shown). "
+                + "Use start_line/end_line to read specific sections."
+            )
+
         numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
         return "".join(numbered)
     except FileNotFoundError:
@@ -320,9 +366,7 @@ def glob_search(pattern: str, directory: str = ".") -> str:
         directory: Directory to search in. Defaults to current directory.
     """
     matches = []
-    for root, dirs, files in os.walk(directory):
-        # Skip hidden and common ignored directories
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git", "venv", ".venv")]
+    for root, dirs, files in walk_filtered(directory):
         for filename in files:
             filepath = os.path.join(root, filename)
             rel_path = os.path.relpath(filepath, directory)
@@ -350,8 +394,7 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "") -> str:
         return f"Invalid regex pattern: {e}"
 
     results = []
-    for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git", "venv", ".venv")]
+    for root, dirs, files in walk_filtered(directory):
         for filename in files:
             if file_glob and not fnmatch.fnmatch(filename, file_glob):
                 continue
@@ -379,10 +422,13 @@ def list_directory(directory: str = ".") -> str:
         directory: Directory to list. Defaults to current directory.
     """
     try:
-        entries = os.listdir(directory)
+        abs_dir = os.path.abspath(directory)
+        entries = os.listdir(abs_dir)
         result = []
         for entry in sorted(entries):
-            full_path = os.path.join(directory, entry)
+            if is_ignored(entry, abs_dir):
+                continue
+            full_path = os.path.join(abs_dir, entry)
             if os.path.isdir(full_path):
                 result.append(f"📁 {entry}/")
             else:
@@ -393,6 +439,29 @@ def list_directory(directory: str = ".") -> str:
         return f"Error: Directory not found: {directory}"
     except Exception as e:
         return f"Error listing directory: {e}"
+
+
+import atexit
+
+# ── Process tracking ──────────────────────────────────────────────
+# Keep references to long-running background processes so we can kill
+# them when the main ARC process exits (avoid zombie / ghost processes).
+_tracked_processes: list[subprocess.Popen] = []
+
+
+def _register_process(process: subprocess.Popen):
+    """Track a background process for cleanup on exit."""
+    _tracked_processes.append(process)
+
+
+def _cleanup_processes():
+    """Kill all tracked background processes on exit."""
+    for proc in _tracked_processes:
+        if proc.poll() is None:  # still running
+            _kill_process_tree(proc)
+
+
+atexit.register(_cleanup_processes)
 
 
 BACKGROUND_PATTERNS = (
@@ -408,6 +477,30 @@ BACKGROUND_PATTERNS = (
 )
 
 
+def _kill_process_tree(process: subprocess.Popen):
+    """Kill a process and all its children. On Windows, process.kill() only
+    kills the shell wrapper — child processes (e.g. npm → node) keep running.
+    Use taskkill /T to kill the entire tree."""
+    import sys
+    pid = process.pid
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            import signal
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        # Fallback to basic kill
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
 def _is_long_running(command: str) -> bool:
     """Detect commands that start servers or long-running processes."""
     cmd = command.strip()
@@ -417,13 +510,13 @@ def _is_long_running(command: str) -> bool:
     return any(pattern in cmd for pattern in BACKGROUND_PATTERNS)
 
 
-def run_command(command: str, timeout: int = 120, working_directory: str = "") -> str:
+def run_command(command: str, timeout: int = 60, working_directory: str = "") -> str:
     """Execute a shell command and return its output. Use this for any system operation:
     git commands, running tests, installing packages, building projects, checking processes, etc.
 
     Args:
         command: The shell command to execute (e.g. 'git status', 'python -m pytest', 'npm install').
-        timeout: Max seconds to wait for the command to finish. Defaults to 120.
+        timeout: Max seconds to wait for the command to finish. Defaults to 60.
         working_directory: Directory to run the command in. Defaults to current working directory.
     """
     cwd = working_directory or os.getcwd()
@@ -474,6 +567,9 @@ def run_command(command: str, timeout: int = 120, working_directory: str = "") -
                 # Process already finished (likely an error)
                 return f"Process exited immediately (code {exit_code}):\n{output}"
 
+            # Track so it gets killed when ARC exits
+            _register_process(process)
+
             return (
                 f"Process running in background (PID {process.pid}).\n"
                 f"Initial output ({startup_seconds}s):\n{output}"
@@ -482,14 +578,18 @@ def run_command(command: str, timeout: int = 120, working_directory: str = "") -
             return f"Error starting background process: {e}"
 
     try:
-        process = subprocess.Popen(
-            command,
+        import sys as _sys
+        popen_kwargs = dict(
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
         )
+        if _sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        process = subprocess.Popen(command, **popen_kwargs)
         stdout, stderr = process.communicate(timeout=timeout)
 
         parts = []
@@ -502,14 +602,16 @@ def run_command(command: str, timeout: int = 120, working_directory: str = "") -
 
         return "\n".join(parts).strip() or "(no output)"
     except subprocess.TimeoutExpired:
-        # Capture any partial output before killing
-        process.kill()
-        stdout, stderr = process.communicate()
+        # Kill the entire process tree, not just the shell wrapper
+        _kill_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except Exception:
+            stdout, stderr = "", ""
         partial = (stdout or "") + (stderr or "")
         partial = partial.strip()
         msg = f"Error: Command timed out after {timeout} seconds."
         if partial:
-            # Show last 20 lines so the agent can diagnose
             tail = "\n".join(partial.splitlines()[-20:])
             msg += f"\nLast output:\n{tail}"
         msg += "\nHint: if this is a server/long-running process, it will be detected and run in background automatically."
@@ -592,7 +694,7 @@ def _is_safe_command(command: str) -> bool:
     return any(cmd == prefix or cmd.startswith(prefix + " ") for prefix in SAFE_COMMAND_PREFIXES)
 
 
-def bash(command: str, timeout: int = 120, working_directory: str = "") -> str:
+def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
     """Execute a bash command. This is your primary tool for interacting with the system.
     Use it for:
     - Running tests: 'python -m pytest tests/'
@@ -604,7 +706,7 @@ def bash(command: str, timeout: int = 120, working_directory: str = "") -> str:
 
     Args:
         command: The bash command to execute.
-        timeout: Max seconds to wait. Defaults to 120.
+        timeout: Max seconds to wait. Defaults to 60.
         working_directory: Directory to run in. Defaults to current working directory.
     """
     cwd = working_directory or os.getcwd()
@@ -711,6 +813,11 @@ def _next_subagent_id() -> int:
         return _SUBAGENT_COUNTER
 
 
+# Import new tools
+from arc.tools.indexer import semantic_search
+from arc.tools.ast_tools import code_structure, find_dependencies
+from arc.tools.ranker import rank_files
+
 # Tools available to sub-agents (no delegate_task to prevent infinite nesting)
 _SUBAGENT_TOOLS = [
     read_file,
@@ -723,6 +830,10 @@ _SUBAGENT_TOOLS = [
     list_directory,
     bash,
     web_fetch,
+    semantic_search,
+    code_structure,
+    find_dependencies,
+    rank_files,
 ]
 
 
@@ -788,4 +899,8 @@ ALL_TOOLS = [
     bash,
     web_fetch,
     delegate_task,
+    semantic_search,
+    code_structure,
+    find_dependencies,
+    rank_files,
 ]
