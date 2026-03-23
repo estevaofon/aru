@@ -316,9 +316,10 @@ class Session:
         self.cwd: str = os.getcwd()
         self.created_at: str = time.strftime("%Y-%m-%d %H:%M:%S")
         self.updated_at: str = self.created_at
-        # Token usage tracking
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
+        self.total_cache_read_tokens: int = 0
+        self.total_cache_write_tokens: int = 0
         self.api_calls: int = 0
 
     @property
@@ -354,6 +355,8 @@ class Session:
             return
         self.total_input_tokens += getattr(metrics, "input_tokens", 0) or 0
         self.total_output_tokens += getattr(metrics, "output_tokens", 0) or 0
+        self.total_cache_read_tokens += getattr(metrics, "cache_read_tokens", 0) or 0
+        self.total_cache_write_tokens += getattr(metrics, "cache_write_tokens", 0) or 0
         self.api_calls += 1
 
     @property
@@ -361,7 +364,10 @@ class Session:
         total = self.total_input_tokens + self.total_output_tokens
         if total == 0:
             return ""
-        return f"tokens: {total:,} (in: {self.total_input_tokens:,} / out: {self.total_output_tokens:,}) | calls: {self.api_calls}"
+        metrics_str = f"in: {self.total_input_tokens:,} / out: {self.total_output_tokens:,}"
+        if self.total_cache_read_tokens > 0:
+            metrics_str += f" / cached: {self.total_cache_read_tokens:,}"
+        return f"tokens: {total:,} ({metrics_str}) | calls: {self.api_calls}"
 
     def add_message(self, role: str, content: str):
         self.history.append({"role": role, "content": content})
