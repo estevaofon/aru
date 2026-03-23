@@ -8,9 +8,11 @@ Supports:
 Follows the Gemini .agents convention for cross-platform compatibility.
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -41,6 +43,7 @@ class AgentConfig:
     agents_md: str = ""
     commands: dict[str, CustomCommand] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
+    permissions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_instructions(self) -> bool:
@@ -197,6 +200,19 @@ def load_config(cwd: str | None = None) -> AgentConfig:
     if agents_dir.is_dir():
         config.commands = _load_commands(agents_dir)
         config.skills = _load_skills(agents_dir)
+
+    # Load opencode-style config (arc.json or .arc/config.json)
+    config_paths = [root / "arc.json", root / ".arc" / "config.json"]
+    for config_path in config_paths:
+        if config_path.is_file():
+            try:
+                content = config_path.read_text(encoding="utf-8")
+                data = json.loads(content)
+                if isinstance(data, dict) and "permission" in data:
+                    config.permissions = data["permission"]
+                break
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                pass
 
     return config
 

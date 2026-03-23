@@ -1,0 +1,9 @@
+{
+    "permission": {
+        "allow": [
+            "git *",
+            "npm *",
+            "pytest *"
+        ]
+    }
+}

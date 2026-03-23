@@ -50,6 +50,46 @@ def _sanitize_input(text: str) -> str:
     return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
+_MENTION_RE = re.compile(r'(?<!\S)@([a-zA-Z0-9_./\\-]+)')
+_MENTION_MAX_SIZE = 30_000  # bytes, same limit as read_file
+
+
+def _resolve_mentions(text: str, cwd: str) -> str:
+    """Resolve @file mentions by appending file contents to the message."""
+    matches = list(_MENTION_RE.finditer(text))
+    if not matches:
+        return text
+
+    appendix_parts = []
+    seen = set()
+    for m in matches:
+        rel_path = m.group(1)
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        abs_path = os.path.join(cwd, rel_path)
+        if not os.path.isfile(abs_path):
+            continue
+        try:
+            size = os.path.getsize(abs_path)
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(_MENTION_MAX_SIZE)
+            if size > _MENTION_MAX_SIZE:
+                appendix_parts.append(
+                    f"\n\n---\nContents of {rel_path} (truncated to {_MENTION_MAX_SIZE // 1000}KB):\n```\n{content}\n```"
+                )
+            else:
+                appendix_parts.append(
+                    f"\n\n---\nContents of {rel_path}:\n```\n{content}\n```"
+                )
+        except OSError:
+            continue
+
+    if appendix_parts:
+        return text + "".join(appendix_parts)
+    return text
+
+
 TIPS = [
     "Type naturally — arc decides whether to plan or execute.",
     "Use /plan to break down complex tasks before executing.",
@@ -142,6 +182,88 @@ class SlashCommandCompleter(Completer):
                 )
 
 
+class FileMentionCompleter(Completer):
+    """Show file/directory suggestions when '@' is typed."""
+
+    def get_completions(self, document: Document, complete_event):
+        text = document.text_before_cursor
+        # Find the last '@' that is either at start or preceded by whitespace
+        idx = text.rfind("@")
+        if idx < 0:
+            return
+        if idx > 0 and not text[idx - 1].isspace():
+            return
+
+        partial = text[idx + 1:]  # e.g. "arc/con" from "@arc/con"
+        # Split into directory part and name prefix
+        if "/" in partial or "\\" in partial:
+            # Normalize to forward slashes
+            normalized = partial.replace("\\", "/")
+            dir_part, name_prefix = normalized.rsplit("/", 1)
+            search_dir = os.path.join(os.getcwd(), dir_part)
+            rel_prefix = dir_part + "/"
+        else:
+            dir_part = ""
+            name_prefix = partial
+            search_dir = os.getcwd()
+            rel_prefix = ""
+
+        if not os.path.isdir(search_dir):
+            return
+
+        from arc.tools.gitignore import is_ignored
+        cwd = os.getcwd()
+
+        try:
+            entries = sorted(os.listdir(search_dir))
+        except OSError:
+            return
+
+        count = 0
+        for entry in entries:
+            if count >= 50:  # limit suggestions
+                break
+            if not entry.lower().startswith(name_prefix.lower()):
+                continue
+
+            full_path = os.path.join(search_dir, entry)
+            rel_path = os.path.relpath(full_path, cwd).replace("\\", "/")
+
+            # Skip gitignored entries
+            if is_ignored(rel_path, cwd):
+                continue
+            # Skip hidden files/dirs
+            if entry.startswith("."):
+                continue
+
+            is_dir = os.path.isdir(full_path)
+            display_text = rel_prefix + entry + ("/" if is_dir else "")
+            meta = "dir" if is_dir else ""
+
+            yield Completion(
+                display_text,
+                start_position=-len(partial),
+                display=HTML(f"<b>@{display_text}</b>"),
+                display_meta=meta,
+            )
+            count += 1
+
+
+class ArcCompleter(Completer):
+    """Merges slash-command and @file completions."""
+
+    def __init__(self, custom_commands: dict | None = None):
+        self._slash = SlashCommandCompleter(custom_commands)
+        self._mention = FileMentionCompleter()
+
+    def get_completions(self, document: Document, complete_event):
+        text = document.text_before_cursor
+        if text.startswith("/"):
+            yield from self._slash.get_completions(document, complete_event)
+        elif "@" in text:
+            yield from self._mention.get_completions(document, complete_event)
+
+
 class PasteState:
     """Tracks pasted content so the user can annotate it."""
 
@@ -181,7 +303,7 @@ def _create_prompt_session(paste_state: PasteState, config: AgentConfig | None =
         key_bindings=bindings,
         multiline=False,
         enable_open_in_editor=False,
-        completer=SlashCommandCompleter(custom_cmds),
+        completer=ArcCompleter(custom_cmds),
         complete_while_typing=True,
     )
 
@@ -982,7 +1104,7 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
 
 async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     """Main REPL loop."""
-    from arc.tools.codebase import set_console, set_model_id, set_skip_permissions, reset_allowed_actions
+    from arc.tools.codebase import set_console, set_model_id, set_skip_permissions, reset_allowed_actions, set_permission_rules
     set_console(console)
     set_skip_permissions(skip_permissions)
 
@@ -996,6 +1118,10 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         console.print(f"[dim]Loaded {len(config.commands)} custom command(s): {', '.join(f'/{k}' for k in config.commands)}[/dim]")
     if config.skills:
         console.print(f"[dim]Loaded {len(config.skills)} skill(s): {', '.join(config.skills.keys())}[/dim]")
+    permission_allow = config.permissions.get("allow", [])
+    if permission_allow:
+        set_permission_rules(permission_allow)
+        console.print(f"[dim]Loaded {len(permission_allow)} permission rule(s)[/dim]")
 
     extra_instructions = config.get_extra_instructions()
 
@@ -1047,6 +1173,13 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             break
 
         user_input = _sanitize_input(paste_state.build_message(user_text))
+
+        # Resolve @file mentions
+        resolved = _resolve_mentions(user_input, os.getcwd())
+        if resolved != user_input:
+            injected = resolved.count("Contents of ")
+            console.print(f"[dim]Attached {injected} file(s) from @ mentions[/dim]")
+            user_input = resolved
 
         if paste_state.pasted_content and user_text:
             console.print(

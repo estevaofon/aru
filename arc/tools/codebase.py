@@ -25,6 +25,7 @@ _permission_lock = threading.Lock()  # Serialize permission prompts
 _allowed_actions: set[str] = set()   # Actions auto-approved via "allow all"
 _display = None    # Reference to the active StreamingDisplay
 _model_id: str = "claude-sonnet-4-5-20250929"  # Current model for sub-agents
+_permission_rules: list[str] = []  # User-defined glob patterns from arc.json
 
 
 def set_skip_permissions(value: bool):
@@ -53,6 +54,12 @@ def set_console(console: Console):
     """Share the main console instance to avoid conflicts with Live display."""
     global _console
     _console = console
+
+
+def set_permission_rules(rules: list[str]):
+    """Set user-defined permission rules (glob patterns) from arc.json."""
+    global _permission_rules
+    _permission_rules = list(rules)
 
 
 def _format_diff(old_string: str, new_string: str) -> Group:
@@ -765,7 +772,9 @@ def _is_safe_command(command: str) -> bool:
     parts = _shell_split(cmd, ("|",))
     if parts:
         return all(_is_safe_command(p) for p in parts)
-    return any(cmd == prefix or cmd.startswith(prefix + " ") for prefix in SAFE_COMMAND_PREFIXES)
+    if any(cmd == prefix or cmd.startswith(prefix + " ") for prefix in SAFE_COMMAND_PREFIXES):
+        return True
+    return any(fnmatch.fnmatch(cmd, rule) for rule in _permission_rules)
 
 
 def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
