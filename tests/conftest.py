@@ -1,11 +1,16 @@
 """Pytest configuration and shared fixtures."""
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Iterator
 
 import pytest
+
+# Prevent arc.cli from wrapping sys.stdout/stderr on Windows during tests,
+# which would break pytest's capture mechanism.
+sys._called_from_test = True
 
 
 @pytest.fixture

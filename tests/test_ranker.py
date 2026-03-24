@@ -6,12 +6,20 @@ import time
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from arc.tools.ranker import (
     _extract_keywords,
     _score_name_match,
     _score_recency,
     _get_project_files,
+    _get_semantic_scores,
+    _get_structural_scores,
+    rank_files,
+    WEIGHT_SEMANTIC,
+    WEIGHT_NAME,
+    WEIGHT_STRUCTURAL,
+    WEIGHT_RECENCY,
 )
 
 
@@ -240,3 +248,88 @@ class TestGetProjectFiles:
         # Should use forward slashes
         assert any("nested/deep/file.py" in f for f in files)
         assert all("\\" not in f for f in files)
+
+
+class TestGetSemanticScores:
+    """Test semantic score fetching (graceful fallback)."""
+
+    def test_returns_empty_when_chromadb_missing(self, tmp_path):
+        with patch.dict("sys.modules", {"chromadb": None}):
+            scores = _get_semantic_scores("test query", str(tmp_path))
+            assert scores == {}
+
+    def test_returns_empty_on_exception(self, tmp_path):
+        with patch("arc.tools.indexer._init_client", side_effect=Exception("fail")):
+            scores = _get_semantic_scores("test query", str(tmp_path))
+            assert scores == {}
+
+
+class TestGetStructuralScores:
+    """Test structural dependency scoring."""
+
+    def test_returns_empty_for_nonexistent_files(self, tmp_path):
+        scores = _get_structural_scores(["nonexistent.py"], str(tmp_path))
+        assert scores == {}
+
+    def test_scores_dependencies(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "utils.py").write_text("# utils")
+        (tmp_path / "main.py").write_text("from utils import helper\n")
+
+        scores = _get_structural_scores(["main.py"], str(tmp_path))
+        assert "utils.py" in scores
+
+    def test_limits_to_top_5(self, tmp_path):
+        # Should only trace top 5 files
+        files = [f"file_{i}.py" for i in range(10)]
+        for f in files:
+            (tmp_path / f).write_text("# empty")
+
+        scores = _get_structural_scores(files, str(tmp_path))
+        # Should not raise and should return (possibly empty) dict
+        assert isinstance(scores, dict)
+
+
+class TestRankFiles:
+    """Test the main rank_files function."""
+
+    def test_empty_project(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = rank_files("add authentication")
+        assert "No files found" in result
+
+    def test_ranks_relevant_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "auth.py").write_text("def authenticate(): pass")
+        (tmp_path / "database.py").write_text("def connect_db(): pass")
+        (tmp_path / "config.py").write_text("DEBUG = True")
+
+        result = rank_files("authentication")
+        assert "auth.py" in result
+        # auth.py should rank higher (name match)
+        lines = result.strip().split("\n")
+        ranked_files = [l for l in lines if ". " in l and ".py" in l]
+        if ranked_files:
+            assert "auth.py" in ranked_files[0]
+
+    def test_returns_formatted_output(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "app.py").write_text("code")
+
+        result = rank_files("test task")
+        assert "ranked by relevance" in result.lower() or "Ranking mode" in result
+
+    def test_respects_top_k(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        for i in range(20):
+            (tmp_path / f"file_{i}.py").write_text(f"module {i}")
+
+        result = rank_files("some task", top_k=5)
+        # Count numbered results
+        import re
+        numbered = re.findall(r"^\s+\d+\.", result, re.MULTILINE)
+        assert len(numbered) <= 5
+
+    def test_weights_sum_to_one(self):
+        total = WEIGHT_SEMANTIC + WEIGHT_NAME + WEIGHT_STRUCTURAL + WEIGHT_RECENCY
+        assert abs(total - 1.0) < 0.001

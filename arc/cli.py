@@ -31,7 +31,7 @@ from arc.config import AgentConfig, load_config, render_command_template
 
 import io as _io
 
-if sys.platform == "win32":
+if sys.platform == "win32" and not hasattr(sys, "_called_from_test"):
     sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
