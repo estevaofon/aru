@@ -18,7 +18,8 @@
       "Bash(pip show:*)",
       "Bash(python -c \"from agno.models.anthropic import Claude; help\\(Claude.__init__\\)\")",
       "Bash(ls:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(python -c \":*)"
     ]
   }
 }

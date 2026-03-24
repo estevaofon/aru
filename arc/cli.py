@@ -926,8 +926,8 @@ class StreamingDisplay:
 async def run_agent_capture(agent, message: str, session: "Session | None" = None) -> str | None:
     """Run agent with async streaming display and parallel tool execution."""
     from agno.run.agent import (
-        RunCompletedEvent,
         RunContentEvent,
+        RunOutput,
         ToolCallCompletedEvent,
         ToolCallStartedEvent,
     )
@@ -942,11 +942,16 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         display = StreamingDisplay(status)
         current_tool_label: str | None = None
 
+        run_output = None
         with Live(display, console=console, refresh_per_second=10) as live:
             set_live(live)
             set_display(display)
             accumulated = ""
-            async for event in agent.arun(message, stream=True):
+            async for event in agent.arun(message, stream=True, yield_run_output=True):
+                if isinstance(event, RunOutput):
+                    run_output = event
+                    break
+
                 if isinstance(event, ToolCallStartedEvent):
                     tool_name = event.tool_name if hasattr(event, "tool_name") else "tool"
                     tool_args = event.tool_args if hasattr(event, "tool_args") else None
@@ -978,27 +983,17 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
                         display.set_content(accumulated)
                         live.update(display)
 
-                elif isinstance(event, RunCompletedEvent):
-                    if session and hasattr(event, "metrics"):
-                        session.track_tokens(event.metrics)
-                    if hasattr(event, "content") and event.content:
-                        final_content = event.content
-
         set_live(None)
         set_display(None)
 
+        if run_output and session and hasattr(run_output, "metrics"):
+            session.track_tokens(run_output.metrics)
+
         # Print only un-flushed content
-        if final_content:
-            # RunCompletedEvent returns full content — only print the un-flushed tail
-            if display._flushed_len > 0:
-                remaining = final_content[display._flushed_len:]
-                if remaining:
-                    console.print(Markdown(remaining))
-            else:
-                console.print(Markdown(final_content))
-        elif accumulated[display._flushed_len:]:
-            final_content = accumulated
-            console.print(Markdown(accumulated[display._flushed_len:]))
+        final_content = accumulated or final_content
+        remaining = (final_content or "")[display._flushed_len:]
+        if remaining:
+            console.print(Markdown(remaining))
 
     except KeyboardInterrupt:
         set_live(None)

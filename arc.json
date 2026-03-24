@@ -3,7 +3,13 @@
         "allow": [
             "git *",
             "npm *",
-            "pytest *"
+            "pytest *",
+            "cd *",
+            "find *",
+            "xargs *",
+            "wc *",
+            "tail *",
+            "python *"
         ]
     }
 }
