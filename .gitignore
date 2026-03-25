@@ -17,3 +17,4 @@ wheels/
 .claude/
 .coverage
 arc.bat
+coverage.json

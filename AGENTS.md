@@ -105,27 +105,33 @@ Python: **3.13+**
 
 ### Running Tests
 
-**ALWAYS** activate the virtual environment before running tests:
+The project uses a local `.venv` virtual environment. When using the `bash` tool, **DO NOT** use `source .venv/bin/activate` in subprocesses (it doesn't work and will hang).
 
-```powershell
-# PowerShell (Windows)
-.\.venv\Scripts\activate.ps1
+**For bash tool commands, use one of these patterns:**
 
-# Then run tests
-pytest
-pytest --cov=arc --cov-report=html
+```bash
+# Option 1: Use venv executables directly
+.venv/bin/pytest
+.venv/bin/pytest --cov=arc --cov-report=term-missing
+
+# Option 2: Use python -m if venv is already active in parent shell
+python -m pytest
+python -m pytest --cov=arc --cov-report=term-missing
 ```
+
+**Important:** Always prefer `--cov-report=term-missing` over `--cov-report=html` when running coverage tests. The HTML report consumes significantly more memory and can cause the process to be killed by the OOM killer, especially in memory-constrained environments like WSL2.
+
+**For manual interactive shell usage (not tool calls):**
 
 ```bash
 # Linux/macOS
 source .venv/bin/activate
-
-# Then run tests
 pytest
-pytest --cov=arc --cov-report=html
-```
 
-The project uses a local `.venv` virtual environment. All test commands and development workflows should be executed within this environment.
+# PowerShell (Windows)
+.\.venv\Scripts\activate.ps1
+pytest
+```
 
 ## Conventions
 

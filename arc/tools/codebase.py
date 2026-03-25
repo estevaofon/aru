@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import textwrap
 
@@ -561,7 +562,6 @@ def _kill_process_tree(process: subprocess.Popen):
     """Kill a process and all its children. On Windows, process.kill() only
     kills the shell wrapper — child processes (e.g. npm → node) keep running.
     Use taskkill /T to kill the entire tree."""
-    import sys
     pid = process.pid
     try:
         if sys.platform == "win32":
@@ -623,14 +623,16 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
 
         startup_seconds = 5
         try:
-            process = subprocess.Popen(
-                command,
+            bg_kwargs: dict = dict(
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=cwd,
             )
+            if sys.platform != "win32":
+                bg_kwargs["start_new_session"] = True
+            process = subprocess.Popen(command, **bg_kwargs)
 
             # Read stdout in a thread so we don't block on Windows
             lines: list[str] = []
@@ -673,7 +675,6 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             return f"Error starting background process: {e}"
 
     try:
-        import sys as _sys
         popen_kwargs = dict(
             shell=True,
             stdout=subprocess.PIPE,
@@ -681,8 +682,12 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             text=True,
             cwd=cwd,
         )
-        if _sys.platform == "win32":
+        if sys.platform == "win32":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            # Start in a new process group so _kill_process_tree (os.killpg)
+            # does not accidentally kill the parent process when timing out.
+            popen_kwargs["start_new_session"] = True
 
         process = subprocess.Popen(command, **popen_kwargs)
         stdout, stderr = process.communicate(timeout=timeout)

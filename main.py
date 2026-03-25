@@ -1,5 +1,9 @@
 """arc - A Claude Code clone built with Agno agents."""
 
+import os
+
+os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")  # Suppress ONNX Runtime warnings (e.g. GPU detection on WSL2)
+
 import asyncio
 import sys
 
