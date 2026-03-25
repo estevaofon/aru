@@ -44,6 +44,17 @@ if sys.platform == "win32" and not hasattr(sys, "_called_from_test"):
 
 console = Console()
 
+# Arte ASCII original mantida
+aru_logo = """
+     ██████▖  ██▗████  ██    ██ 
+          ██  ██       ██    ██ 
+    ▗███████  ██       ██    ██ 
+    ██    ██  ██       ██    ██ 
+    ▝████▘██████       ▝████▘██
+"""
+
+neon_green = "#39ff14" # Um verde bem "fósforo brilhante"
+
 # Default model reference (provider/model format)
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
 
@@ -106,13 +117,11 @@ TIPS = [
 
 def _render_home(session: "Session", skip_permissions: bool) -> None:
     """Render a clean home screen inspired by Claude Code."""
-    from art import text2art
     from rich.table import Table
 
-    art = text2art("ARU").rstrip("\n")
     logo = Text("\n")
-    for line in art.split("\n"):
-        logo.append("  " + line + "\n", style="bold cyan")
+    for line in aru_logo.strip("\n").split("\n"):
+        logo.append("  " + line + "\n", style=f"bold {neon_green}")
     console.print(logo)
     console.print(
         Text("  A coding agent powered by multiple LLM providers + Agno", style="dim"),
