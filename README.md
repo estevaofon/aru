@@ -8,7 +8,7 @@ Um assistente de codificação inteligente powered by Claude e Agno agents.
 - **CLI Interativa** — Respostas em streaming, paste multi-linha, gerenciamento de sessões
 - **16 Ferramentas Integradas** — Operações de arquivo, busca de código, shell, busca web, busca semântica, delegação de tarefas
 - **Planejamento de Tarefas** — Quebra de tarefas complexas em etapas com execução automática
-- **Flexibilidade de Modelos** — Alterne entre Sonnet (balanceado), Opus (poderoso) e Haiku (rápido)
+- **Flexibilidade de Modelos** — Anthropic (Sonnet, Opus, Haiku), Ollama (modelos locais), OpenAI, Groq e OpenRouter
 - **Busca Semântica** — Busca de código baseada em embeddings com chromadb
 - **Comandos e Skills Personalizados** — Estenda aru via diretório `.agents/`
 - **Suporte MCP** — Integração com Model Context Protocol servers
@@ -28,6 +28,45 @@ aru
 ```
 
 **Requisitos:** Python 3.13+ e uma [chave de API da Anthropic](https://console.anthropic.com/)
+
+### Instalação Global (rodar `aru` de qualquer lugar)
+
+A forma mais simples de usar o aru globalmente é criar um ambiente virtual dedicado e um script wrapper:
+
+**Windows (.bat):**
+
+1. Crie o ambiente virtual e instale o aru:
+```bash
+python -m venv C:\aru-env
+C:\aru-env\Scripts\pip install -e /caminho/para/aru
+```
+
+2. Crie um arquivo `aru.bat` em uma pasta que esteja no seu `PATH` (ex: `C:\Users\<user>\bin\aru.bat`):
+```bat
+@echo off
+C:\aru-env\Scripts\python -m aru.cli %*
+```
+
+**Linux/macOS (.sh):**
+
+1. Crie o ambiente virtual e instale o aru:
+```bash
+python3 -m venv ~/.aru-env
+~/.aru-env/bin/pip install -e /caminho/para/aru
+```
+
+2. Crie um script `aru` em um diretório no seu `PATH` (ex: `~/.local/bin/aru`):
+```bash
+#!/bin/bash
+~/.aru-env/bin/python -m aru.cli "$@"
+```
+
+3. Torne executável:
+```bash
+chmod +x ~/.local/bin/aru
+```
+
+Agora você pode rodar `aru` de qualquer diretório.
 
 ## Uso
 
@@ -105,6 +144,66 @@ aru> /model opus
 ## Configuração
 
 Aru suporta configuração a nível de projeto através de:
+
+### Modelos e Providers
+
+Por padrão, aru utiliza o **Claude Sonnet 4.5** da Anthropic. Você pode alternar modelos e providers de LLM a qualquer momento:
+
+```bash
+# Alternar modelos Anthropic
+/model anthropic/claude-opus-4
+/model anthropic/claude-haiku-4-5
+
+# Usar Ollama (modelos locais)
+pip install -e ".[ollama]"
+/model ollama/llama3.1
+/model ollama/codellama
+
+# Usar OpenAI
+pip install -e ".[openai]"
+/model openai/gpt-4o
+
+# Usar Groq
+pip install -e ".[groq]"
+/model groq/llama-3.3-70b-versatile
+
+# Instalar todos os providers
+pip install -e ".[all-providers]"
+```
+
+Para usar **Ollama**, basta ter o [Ollama](https://ollama.com/) rodando localmente (`ollama serve`) e instalar a dependência extra. Qualquer modelo instalado no Ollama pode ser utilizado.
+
+Você também pode configurar providers e modelos padrão no `aru.json`:
+
+```json
+{
+  "models": {
+    "default": "ollama/codellama",
+    "small": "ollama/llama3.1"
+  }
+}
+```
+
+### Permissões (aru.json)
+
+O arquivo `aru.json` na raiz do projeto permite configurar permissões para comandos que o aru pode executar sem pedir confirmação:
+
+```json
+{
+  "permission": {
+    "allow": [
+      "git *",
+      "npm *",
+      "pytest *",
+      "python *"
+    ]
+  }
+}
+```
+
+Cada entrada é um padrão glob. Comandos que não se encaixam em nenhum padrão pedirão confirmação antes de executar. Use `--dangerously-skip-permissions` na CLI para pular todas as confirmações (não recomendado para produção).
+
+O `aru.json` também pode ser colocado em `.aru/config.json` como alternativa.
 
 ### AGENTS.md
 Coloque um arquivo `AGENTS.md` na raiz do seu projeto com instruções personalizadas que serão anexadas a todos os prompts do sistema dos agentes.
