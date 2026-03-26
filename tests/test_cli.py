@@ -397,10 +397,17 @@ class TestSessionStore:
         s1.add_message("user", "old msg")
         store.save(s1)
 
-        time.sleep(0.01)
+        # Explicitly set a later timestamp so the test is deterministic
         s2 = Session(session_id="new")
         s2.add_message("user", "new msg")
         store.save(s2)
+        # Overwrite s2's file with a later updated_at to guarantee ordering
+        path = os.path.join(str(tmp_path), "new.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["updated_at"] = "9999-12-31T23:59:59.999"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
 
         last = store.load_last()
         assert last is not None
