@@ -342,23 +342,7 @@ def _create_prompt_session(paste_state: PasteState, config: AgentConfig | None =
 
     return session
 
-GENERAL_INSTRUCTIONS = """\
-You are aru, an AI coding assistant. You help users with software engineering tasks.
-
-You have access to tools for reading, writing, and editing files, searching the codebase, running shell commands, searching the web (web_search) and fetching web pages (web_fetch), and delegating subtasks to sub-agents.
-
-Use delegate_task when you can split work into independent subtasks that benefit from parallel execution. \
-For example, researching one part of the codebase while modifying another, or implementing changes in \
-unrelated files simultaneously. You can call delegate_task multiple times in a single response to run sub-agents in parallel.
-
-Be concise and direct. Focus on doing the work, not explaining what you'll do.
-When creating or updating multiple independent files, use write_files to batch them in a single call instead of calling write_file repeatedly.
-When making independent edits across files, use edit_files to batch them in a single call instead of calling edit_file repeatedly.
-ALWAYS read the project's README.md first if it exists to understand the project context.
-NEVER create documentation files (*.md) unless the user explicitly asks for them. This includes README.md, CHANGELOG.md, CONTRIBUTING.md, SETUP.md, and any other markdown files. A single README.md with basic usage is acceptable only when creating a new project from scratch — nothing more. Focus on writing working code, not documentation.
-
-{extra_instructions}
-"""
+from aru.agents.base import build_instructions as _build_instructions
 
 
 class PlanStep:
@@ -440,6 +424,12 @@ def parse_plan_steps(plan_text: str) -> list[PlanStep]:
 class Session:
     """Holds shared state across the conversation."""
 
+    # Approximate chars-per-token ratio for estimation (conservative)
+    _CHARS_PER_TOKEN = 3.5
+    # History summarization threshold: summarize oldest messages when history exceeds this
+    _HISTORY_SUMMARIZE_THRESHOLD = 12
+    _HISTORY_SUMMARIZE_COUNT = 6  # number of oldest messages to condense
+
     def __init__(self, session_id: str | None = None):
         self.session_id: str = session_id or _generate_session_id()
         self.history: list[dict[str, str]] = []
@@ -455,6 +445,12 @@ class Session:
         self.total_cache_read_tokens: int = 0
         self.total_cache_write_tokens: int = 0
         self.api_calls: int = 0
+        # Context cache — invalidated on file mutations
+        self._cached_tree: str | None = None
+        self._cached_git_status: str | None = None
+        self._context_dirty: bool = True
+        # Token budget (0 = unlimited)
+        self.token_budget: int = 0
 
     @property
     def model_id(self) -> str:
@@ -511,12 +507,84 @@ class Session:
         metrics_str = f"in: {self.total_input_tokens:,} / out: {self.total_output_tokens:,}"
         if self.total_cache_read_tokens > 0:
             metrics_str += f" / cached: {self.total_cache_read_tokens:,}"
-        return f"tokens: {total:,} ({metrics_str}) | calls: {self.api_calls}"
+        summary = f"tokens: {total:,} ({metrics_str}) | calls: {self.api_calls}"
+        if self.token_budget > 0:
+            pct = int(total / self.token_budget * 100)
+            summary += f" | budget: {pct}%"
+        return summary
+
+    def invalidate_context_cache(self):
+        """Mark cached tree/git status as stale. Call after file mutations."""
+        self._context_dirty = True
+
+    def get_cached_tree(self, cwd: str) -> str | None:
+        """Return cached directory tree, regenerating if dirty."""
+        if self._context_dirty or self._cached_tree is None:
+            self._refresh_context_cache(cwd)
+        return self._cached_tree
+
+    def get_cached_git_status(self, cwd: str) -> str | None:
+        """Return cached git status, regenerating if dirty."""
+        if self._context_dirty or self._cached_git_status is None:
+            self._refresh_context_cache(cwd)
+        return self._cached_git_status
+
+    def _refresh_context_cache(self, cwd: str):
+        """Regenerate tree and git status caches."""
+        try:
+            from aru.tools.codebase import get_project_tree
+            self._cached_tree = get_project_tree(cwd, max_depth=3) or None
+        except Exception:
+            self._cached_tree = None
+        try:
+            self._cached_git_status = subprocess.run(
+                ["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2
+            ).stdout.strip() or None
+        except Exception:
+            self._cached_git_status = None
+        self._context_dirty = False
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Fast approximate token count based on character length."""
+        return int(len(text) / Session._CHARS_PER_TOKEN)
+
+    def check_budget_warning(self) -> str | None:
+        """Return a warning string if token usage is approaching the budget."""
+        if self.token_budget <= 0:
+            return None
+        total = self.total_input_tokens + self.total_output_tokens
+        pct = total / self.token_budget * 100
+        if pct >= 95:
+            return f"[bold red]Token budget nearly exhausted ({pct:.0f}%)[/bold red]"
+        if pct >= 80:
+            return f"[yellow]Token budget at {pct:.0f}%[/yellow]"
+        return None
 
     def add_message(self, role: str, content: str):
         self.history.append({"role": role, "content": content})
+        # Summarize oldest messages instead of hard-truncating
+        if len(self.history) > self._HISTORY_SUMMARIZE_THRESHOLD:
+            self._summarize_old_messages()
+        # Hard cap as safety net
         if len(self.history) > 20:
             self.history = self.history[-20:]
+
+    def _summarize_old_messages(self):
+        """Condense the oldest messages into a single summary message."""
+        n = self._HISTORY_SUMMARIZE_COUNT
+        old = self.history[:n]
+        rest = self.history[n:]
+        summary_parts = []
+        for msg in old:
+            role = msg["role"]
+            # Truncate each message to keep summary compact
+            text = msg["content"][:200]
+            if len(msg["content"]) > 200:
+                text += "..."
+            summary_parts.append(f"[{role}]: {text}")
+        summary = "[Conversation summary of earlier messages]\n" + "\n".join(summary_parts)
+        self.history = [{"role": "user", "content": summary}] + rest
         self.updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def to_dict(self) -> dict:
@@ -576,6 +644,26 @@ class Session:
                 style = "red"
             desc = f"[{style}]{step.description}[/{style}]" if style else step.description
             lines.append(f"  {step.checkbox} {desc}")
+        return "\n".join(lines)
+
+    def render_compact_progress(self, current_index: int) -> str:
+        """Render a token-efficient progress view for LLM context.
+
+        Shows completed steps as one-liners and only the current step in full.
+        Pending steps are listed by index only.
+        """
+        if not self.plan_steps:
+            return ""
+        completed = sum(1 for s in self.plan_steps if s.status == "completed")
+        total = len(self.plan_steps)
+        lines = [f"Progress: {completed}/{total} steps done."]
+        for step in self.plan_steps:
+            if step.status == "completed":
+                lines.append(f"  [x] Step {step.index} (done)")
+            elif step.index == current_index:
+                lines.append(f"  [~] Step {step.index}: {step.description} << CURRENT")
+            else:
+                lines.append(f"  [ ] Step {step.index}: {step.description}")
         return "\n".join(lines)
 
 
@@ -679,9 +767,7 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         name="Aru",
         model=create_model(session.model_ref, max_tokens=8192),
         tools=ALL_TOOLS,
-        instructions=GENERAL_INSTRUCTIONS.format(
-            extra_instructions=extra,
-        ),
+        instructions=_build_instructions("general", extra),
         markdown=True,
     )
 
@@ -982,36 +1068,32 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         display = StreamingDisplay(status)
         tracker = display.tool_tracker
 
-        # Build enriched message with environment context
+        # Build enriched message with environment context (using cache)
         dynamic_parts = []
         cwd = os.getcwd()
         dynamic_parts.append(f"The current working directory is: {cwd}")
 
         if session:
             env_context_parts = []
-            try:
-                from aru.tools.codebase import get_project_tree
-                tree_text = get_project_tree(cwd, max_depth=3)
-                if tree_text:
-                    env_context_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
-            except Exception:
-                pass
+            tree_text = session.get_cached_tree(cwd)
+            if tree_text:
+                env_context_parts.append(f"Directory Tree (max depth 3):\n```text\n{tree_text}\n```")
 
-            try:
-                git_status = subprocess.run(
-                    ["git", "status", "-s"], capture_output=True, text=True, cwd=cwd, timeout=2
-                ).stdout.strip()
-                if git_status:
-                    env_context_parts.append(f"Git status:\n{git_status}")
-            except Exception:
-                pass
+            git_status = session.get_cached_git_status(cwd)
+            if git_status:
+                env_context_parts.append(f"Git status:\n{git_status}")
 
             if env_context_parts:
                 dynamic_parts.append("## Environment Context\n" + "\n\n".join(env_context_parts))
 
-            # Include active plan progress in context
+            # Include only compact plan progress (not full plan text)
             if session.current_plan:
                 dynamic_parts.append(f"## Active Plan\nTask: {session.plan_task}\n\n{session.render_plan_progress()}")
+
+            # Token budget warning
+            warning = session.check_budget_warning()
+            if warning:
+                console.print(warning)
 
         dynamic_context = "\n\n".join(dynamic_parts)
         run_message = f"{dynamic_context}\n\n---\n\n## Current Task/Message\n{message}"
@@ -1176,17 +1258,13 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
         console.print(f"[bold yellow]>>> Step {step.index}:[/bold yellow] {step.description}")
 
         # Build step-specific prompt — compact to save tokens
+        # Only show current step + compact progress (not full descriptions of other steps)
+        compact_progress = session.render_compact_progress(step.index)
         step_prompt = (
             f"## Task: {session.plan_task}\n\n"
             f"## Current Step ({step.index}/{len(session.plan_steps)})\n{step.description}\n\n"
-            f"## Plan Progress\n{session.render_plan_progress()}\n"
-        )
-        if completed_context:
-            step_prompt += (
-                f"\nCompleted steps are marked [x] above. Do NOT repeat them."
-            )
-        step_prompt += (
-            "\n\nIMPORTANT: Just execute. Do NOT summarize or recap what you did."
+            f"## Progress\n{compact_progress}\n"
+            "\nIMPORTANT: Just execute this step. Do NOT repeat completed steps or summarize."
         )
 
         # Execute this step
@@ -1241,7 +1319,7 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
 
 async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     """Main REPL loop."""
-    from aru.tools.codebase import set_console, set_model_id, set_small_model_ref, set_skip_permissions, reset_allowed_actions, set_permission_rules
+    from aru.tools.codebase import set_console, set_model_id, set_small_model_ref, set_skip_permissions, reset_allowed_actions, set_permission_rules, set_on_file_mutation
     set_console(console)
     set_skip_permissions(skip_permissions)
 
@@ -1305,6 +1383,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         if config.model_defaults.get("default"):
             session.model_ref = config.model_defaults["default"]
         _render_home(session, skip_permissions)
+
+    # Wire file-mutation callback so context cache (tree/git) is invalidated
+    set_on_file_mutation(session.invalidate_context_cache)
 
     planner = None
     executor = None

@@ -2,45 +2,18 @@
 
 from agno.agent import Agent
 
+from aru.agents.base import build_instructions
 from aru.providers import create_model
-from aru.tools.codebase import glob_search, grep_search, list_directory, read_file, web_search, web_fetch
+from aru.tools.codebase import glob_search, grep_search, list_directory, read_file
 from aru.tools.indexer import semantic_search
 from aru.tools.ast_tools import code_structure, find_dependencies
 from aru.tools.ranker import rank_files
 
-PLANNER_INSTRUCTIONS = """\
-You are a software architect agent. Your job is to analyze codebases and create concise implementation plans.
-
-## How to research
-1. ALWAYS read the project's README.md first if it exists to understand the project context (use read_file)
-2. Rank files by relevance (use rank_files) to identify where to focus
-3. Explore the codebase structure (use list_directory, glob_search, read_file)
-4. Search for relevant code patterns (use grep_search, semantic_search)
-5. Analyze code structure and dependencies (use code_structure, find_dependencies)
-
-## Output format — STRICT
-
-Your output MUST follow this exact structure. No other format is accepted:
-
-## Summary
-- 1-3 bullet points maximum. What needs to be done and which files are involved.
-
-## Steps
-- [ ] Step 1: Description (include file paths and specific details)
-- [ ] Step 2: Description (include file paths and specific details)
-- [ ] Step 3: Description (include file paths and specific details)
-
-## Rules
-- The checklist IS the plan. Do NOT write paragraphs of analysis, context, considerations, or risks outside the Summary and Steps sections.
-- Be extremely concise. Every word must earn its place.
-- Each step must be self-contained enough that an executor agent can complete it independently.
-- Include relevant file paths and specific code references in each step.
-- Adjust step granularity based on task complexity. Do not overcomplicate simple tasks with multiple small steps; use fewer, broader steps instead.
-- Avoid adding explicit testing or verification steps for trivial changes. The executor will handle basic validation.
-- Never include documentation files (*.md) unless the user explicitly asked for them.
-- Do not plan creation of README.md, CHANGELOG.md, SETUP.md, CONTRIBUTING.md, or similar files.
-- The deliverable is working code, not documentation.
-"""
+# Planner uses read-only tools only — no write/edit/bash
+PLANNER_TOOLS = [
+    read_file, glob_search, grep_search, list_directory,
+    semantic_search, code_structure, find_dependencies, rank_files,
+]
 
 
 def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instructions: str = "") -> Agent:
@@ -50,16 +23,10 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
         model_ref: Provider/model reference (e.g., "anthropic/claude-sonnet-4-5", "ollama/llama3.1").
         extra_instructions: Additional instructions to append.
     """
-    instructions = PLANNER_INSTRUCTIONS
-
-    if extra_instructions:
-        instructions = f"{instructions}\n\n{extra_instructions}"
-
     return Agent(
         name="Planner",
         model=create_model(model_ref, max_tokens=4096),
-        tools=[read_file, glob_search, grep_search, list_directory, web_search, web_fetch,
-               semantic_search, code_structure, find_dependencies, rank_files],
-        instructions=instructions,
+        tools=PLANNER_TOOLS,
+        instructions=build_instructions("planner", extra_instructions),
         markdown=True,
     )

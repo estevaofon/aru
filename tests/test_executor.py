@@ -4,10 +4,11 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from aru.agents.executor import (
-    EXECUTOR_INSTRUCTIONS,
-    create_executor,
-)
+from aru.agents.base import build_instructions, EXECUTOR_ROLE, BASE_INSTRUCTIONS
+from aru.agents.executor import create_executor
+
+# Build full executor instructions for test assertions
+EXECUTOR_INSTRUCTIONS = build_instructions("executor")
 
 
 class TestExecutorInstructions:
@@ -22,6 +23,12 @@ class TestExecutorInstructions:
 
     def test_mentions_no_docs(self):
         assert "NEVER create documentation files" in EXECUTOR_INSTRUCTIONS
+
+    def test_base_instructions_included(self):
+        assert BASE_INSTRUCTIONS in EXECUTOR_INSTRUCTIONS
+
+    def test_role_instructions_included(self):
+        assert EXECUTOR_ROLE in EXECUTOR_INSTRUCTIONS
 
 
 class TestCreateExecutor:
@@ -55,7 +62,7 @@ class TestCreateExecutor:
         create_executor(extra_instructions="Always use TypeScript")
         call_kwargs = mock_agent.call_args[1]
         assert "Always use TypeScript" in call_kwargs["instructions"]
-        assert EXECUTOR_INSTRUCTIONS in call_kwargs["instructions"]
+        assert EXECUTOR_ROLE in call_kwargs["instructions"]
 
     @patch("aru.agents.executor.Agent")
     @patch("aru.agents.executor.create_model")

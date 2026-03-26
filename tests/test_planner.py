@@ -4,10 +4,11 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from aru.agents.planner import (
-    PLANNER_INSTRUCTIONS,
-    create_planner,
-)
+from aru.agents.base import build_instructions, PLANNER_ROLE, BASE_INSTRUCTIONS
+from aru.agents.planner import create_planner
+
+# Build full planner instructions for test assertions
+PLANNER_INSTRUCTIONS = build_instructions("planner")
 
 
 class TestPlannerInstructions:
@@ -22,10 +23,16 @@ class TestPlannerInstructions:
         assert "## Steps" in PLANNER_INSTRUCTIONS
 
     def test_mentions_no_docs(self):
-        assert "Never include documentation files" in PLANNER_INSTRUCTIONS
+        assert "NEVER create documentation files" in PLANNER_INSTRUCTIONS
 
     def test_mentions_checklist_format(self):
         assert "- [ ]" in PLANNER_INSTRUCTIONS
+
+    def test_base_instructions_included(self):
+        assert BASE_INSTRUCTIONS in PLANNER_INSTRUCTIONS
+
+    def test_role_instructions_included(self):
+        assert PLANNER_ROLE in PLANNER_INSTRUCTIONS
 
 
 class TestCreatePlanner:
@@ -59,7 +66,7 @@ class TestCreatePlanner:
         create_planner(extra_instructions="Focus on security")
         call_kwargs = mock_agent.call_args[1]
         assert "Focus on security" in call_kwargs["instructions"]
-        assert PLANNER_INSTRUCTIONS in call_kwargs["instructions"]
+        assert PLANNER_ROLE in call_kwargs["instructions"]
 
     @patch("aru.agents.planner.Agent")
     @patch("aru.agents.planner.create_model")

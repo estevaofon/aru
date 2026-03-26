@@ -20,7 +20,13 @@
             "uv run pytest",
             "uv run pytest *",
             "uv run python -m pytest",
-            "uv run python -m pytest *"
+            "uv run python -m pytest *",
+            ".venv/bin/python -m pytest *",
+            ".venv/bin/python *",
+            ".venv/Scripts/python -m pytest *",
+            ".venv/Scripts/python *",
+            ".venv/Scripts/python.exe -m pytest *",
+            ".venv/Scripts/python.exe *"
         ]
     }
 }

@@ -27,6 +27,19 @@ _allowed_actions: set[str] = set()   # Actions auto-approved via "allow all"
 _display = None    # Reference to the active StreamingDisplay
 _model_id: str = "claude-sonnet-4-5-20250929"  # Current model for sub-agents
 _permission_rules: list[str] = []  # User-defined glob patterns from aru.json
+_on_file_mutation = None  # Callback to invalidate context cache after file writes
+
+
+def set_on_file_mutation(callback):
+    """Set a callback invoked after any file write/edit/bash operation."""
+    global _on_file_mutation
+    _on_file_mutation = callback
+
+
+def _notify_file_mutation():
+    """Notify the session that files changed so caches are invalidated."""
+    if _on_file_mutation:
+        _on_file_mutation()
 
 
 def set_skip_permissions(value: bool):
@@ -236,6 +249,7 @@ def write_file(file_path: str, content: str) -> str:
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
+        _notify_file_mutation()
         return f"Successfully wrote to {file_path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -280,6 +294,7 @@ def write_files(files: list[dict]) -> str:
 
     parts = []
     if results:
+        _notify_file_mutation()
         parts.append(f"Successfully wrote {len(results)} files: {', '.join(results)}")
     if errors:
         parts.append("\n".join(errors))
@@ -311,6 +326,7 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         new_content = content.replace(old_string, new_string, 1)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
+        _notify_file_mutation()
         return f"Successfully edited {file_path}"
     except FileNotFoundError:
         return f"Error: File not found: {file_path}"
@@ -385,6 +401,7 @@ def edit_files(edits: list[dict]) -> str:
 
     parts = []
     if results:
+        _notify_file_mutation()
         unique = list(dict.fromkeys(results))  # preserve order, dedupe
         parts.append(f"Successfully applied {len(results)} edits across {len(unique)} files: {', '.join(unique)}")
     if errors:
@@ -819,7 +836,10 @@ def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
         )
         if not _ask_permission("Bash Command", cmd_display):
             return f"Permission denied: {command}"
-    return run_command(command, timeout=timeout, working_directory=working_directory)
+    result = run_command(command, timeout=timeout, working_directory=working_directory)
+    # Bash can modify files, so always invalidate cache
+    _notify_file_mutation()
+    return result
 
 
 class _HTMLToText(html.parser.HTMLParser):

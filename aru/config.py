@@ -66,10 +66,7 @@ class AgentConfig:
                 if name in self.skills:
                     skill = self.skills[name]
                     parts.append(f"## Skill: {skill.name}\n\n{skill.content}")
-        elif self.skills:
-            # If no specific skills requested, load all skills
-            for skill in self.skills.values():
-                parts.append(f"## Skill: {skill.name}\n\n{skill.content}")
+        # Skills are only loaded when explicitly requested to save tokens
         return "\n\n".join(parts)
 
 

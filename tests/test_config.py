@@ -74,15 +74,14 @@ class TestDataClasses:
         assert "## Project Instructions (AGENTS.md)" in result
         assert "Follow these rules" in result
 
-    def test_agent_config_get_extra_instructions_all_skills(self):
+    def test_agent_config_get_extra_instructions_no_skills_by_default(self):
+        """Skills are only loaded when explicitly requested (token optimization)."""
         skill1 = Skill("review", "Review", "Review code", "/path1")
         skill2 = Skill("test", "Test", "Write tests", "/path2")
         config = AgentConfig(skills={"review": skill1, "test": skill2})
         result = config.get_extra_instructions()
-        assert "## Skill: review" in result
-        assert "Review code" in result
-        assert "## Skill: test" in result
-        assert "Write tests" in result
+        assert "## Skill: review" not in result
+        assert "## Skill: test" not in result
 
     def test_agent_config_get_extra_instructions_specific_skills(self):
         skill1 = Skill("review", "Review", "Review code", "/path1")
@@ -99,7 +98,8 @@ class TestDataClasses:
             agents_md="AGENTS content",
             skills={"test": Skill("test", "Test", "Skill content", "/path")}
         )
-        result = config.get_extra_instructions()
+        # Skills only loaded when explicitly requested
+        result = config.get_extra_instructions(active_skills=["test"])
         # Check order: README -> AGENTS.md -> Skills
         readme_pos = result.find("README content")
         agents_pos = result.find("AGENTS content")

@@ -222,11 +222,14 @@ class TestSession:
         assert len(session.history) == 1
         assert session.history[0]["role"] == "user"
 
-    def test_add_message_truncates_history(self):
+    def test_add_message_summarizes_and_truncates_history(self):
         session = Session()
         for i in range(25):
             session.add_message("user", f"msg {i}")
-        assert len(session.history) == 20
+        # History should be bounded (summarization + hard cap)
+        assert len(session.history) <= 20
+        # First message should be a summary of older messages
+        assert "[Conversation summary" in session.history[0]["content"]
 
     def test_set_plan(self):
         session = Session()
