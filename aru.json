@@ -3,13 +3,24 @@
         "allow": [
             "git *",
             "npm *",
+            "pytest",
             "pytest *",
             "cd *",
             "find *",
             "xargs *",
             "wc *",
             "tail *",
-            "python *"
+            "python *",
+            ".venv/bin/pytest",
+            ".venv/bin/pytest *",
+            ".venv/Scripts/pytest",
+            ".venv/Scripts/pytest *",
+            ".venv/Scripts/pytest.exe",
+            ".venv/Scripts/pytest.exe *",
+            "uv run pytest",
+            "uv run pytest *",
+            "uv run python -m pytest",
+            "uv run python -m pytest *"
         ]
     }
 }

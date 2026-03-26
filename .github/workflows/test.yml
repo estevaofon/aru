@@ -31,7 +31,9 @@ jobs:
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
-      if: ${{ secrets.CODECOV_TOKEN != '' }}
+      if: env.CODECOV_TOKEN != ''
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.xml

@@ -1508,6 +1508,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     if result:
                         session.add_message("assistant", f"[Execution]\n{result}")
 
+                session.clear_plan()
+
         elif user_input.startswith("/") and not user_input.startswith("//"):
             # Check for custom commands from .agents/commands/
             parts = user_input[1:].split(None, 1)
