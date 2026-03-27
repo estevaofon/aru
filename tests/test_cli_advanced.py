@@ -255,11 +255,6 @@ class TestFormatToolLabel:
         label = _format_tool_label("bash", args)
         assert label == "Bash(pytest tests/)"
 
-    def test_semantic_search_query(self):
-        args = {"query": "authentication logic"}
-        label = _format_tool_label("semantic_search", args)
-        assert label == "Semantic(authentication logic)"
-
     def test_unknown_tool(self):
         label = _format_tool_label("custom_tool", {"arg": "value"})
         assert label == "custom_tool"

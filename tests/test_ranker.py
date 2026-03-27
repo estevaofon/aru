@@ -13,10 +13,8 @@ from aru.tools.ranker import (
     _score_name_match,
     _score_recency,
     _get_project_files,
-    _get_semantic_scores,
     _get_structural_scores,
     rank_files,
-    WEIGHT_SEMANTIC,
     WEIGHT_NAME,
     WEIGHT_STRUCTURAL,
     WEIGHT_RECENCY,
@@ -250,20 +248,6 @@ class TestGetProjectFiles:
         assert all("\\" not in f for f in files)
 
 
-class TestGetSemanticScores:
-    """Test semantic score fetching (graceful fallback)."""
-
-    def test_returns_empty_when_chromadb_missing(self, tmp_path):
-        with patch.dict("sys.modules", {"chromadb": None}):
-            scores = _get_semantic_scores("test query", str(tmp_path))
-            assert scores == {}
-
-    def test_returns_empty_on_exception(self, tmp_path):
-        with patch("aru.tools.indexer._init_client", side_effect=Exception("fail")):
-            scores = _get_semantic_scores("test query", str(tmp_path))
-            assert scores == {}
-
-
 class TestGetStructuralScores:
     """Test structural dependency scoring."""
 
@@ -304,9 +288,9 @@ class TestRankFiles:
         (tmp_path / "database.py").write_text("def connect_db(): pass")
         (tmp_path / "config.py").write_text("DEBUG = True")
 
-        result = rank_files("authentication")
+        result = rank_files("auth login")
         assert "auth.py" in result
-        # auth.py should rank higher (name match)
+        # auth.py should rank higher (name match on "auth")
         lines = result.strip().split("\n")
         ranked_files = [l for l in lines if ". " in l and ".py" in l]
         if ranked_files:
@@ -331,5 +315,33 @@ class TestRankFiles:
         assert len(numbered) <= 5
 
     def test_weights_sum_to_one(self):
-        total = WEIGHT_SEMANTIC + WEIGHT_NAME + WEIGHT_STRUCTURAL + WEIGHT_RECENCY
+        total = WEIGHT_NAME + WEIGHT_STRUCTURAL + WEIGHT_RECENCY
         assert abs(total - 1.0) < 0.001
+
+    def test_rank_files_custom_weights(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # auth.py matches "auth" by name; database.py does not
+        (tmp_path / "auth.py").write_text("def authenticate(): pass")
+        (tmp_path / "database.py").write_text("def connect_db(): pass")
+
+        # With full weight on name matching, auth.py should rank first
+        with patch("aru.tools.ranker.WEIGHT_NAME", 1.0), \
+             patch("aru.tools.ranker.WEIGHT_STRUCTURAL", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_RECENCY", 0.0):
+            result_name_heavy = rank_files("auth", top_k=2)
+
+        # With full weight on recency only, both files are equally new so
+        # ordering may vary — but auth.py should still appear in results
+        with patch("aru.tools.ranker.WEIGHT_NAME", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_STRUCTURAL", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_RECENCY", 1.0):
+            result_recency_heavy = rank_files("auth", top_k=2)
+
+        # Under name-heavy weights auth.py must rank first
+        lines_name = [l for l in result_name_heavy.strip().split("\n") if ".py" in l]
+        assert lines_name, "Expected ranked file lines in output"
+        assert "auth.py" in lines_name[0]
+
+        # Both files should appear regardless of weight configuration
+        assert "auth.py" in result_recency_heavy
+        assert "database.py" in result_recency_heavy

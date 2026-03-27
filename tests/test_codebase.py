@@ -107,16 +107,17 @@ def test_read_file_binary_detection(tmp_path):
 
 
 def test_read_file_truncation(tmp_path):
-    """Test that read_file returns a chunk continuation hint when file exceeds max_size bytes."""
+    """Test that read_file returns first chunk + outline when file exceeds max_size bytes."""
     large_file = tmp_path / "large.txt"
     max_size = 500
-    # Write content larger than max_size
-    large_file.write_text("x" * (max_size + 1000))
+    # Write content larger than max_size (multiple lines so chunking works)
+    large_file.write_text("\n".join(f"line {i}" for i in range(200)))
 
     result = read_file(str(large_file), max_size=max_size)
 
-    assert "[Large file]" in result
-    assert "start_line=N, end_line=M" in result
+    assert "[Showing lines" in result
+    assert "Remaining definitions" in result
+    assert "To read more:" in result
 
 
 def test_grep_search_with_context_lines(temp_dir):

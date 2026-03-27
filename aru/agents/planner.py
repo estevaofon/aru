@@ -8,11 +8,7 @@ from aru.providers import create_model
 from aru.tools.codebase import (
     _get_small_model_ref,
     glob_search, grep_search, list_directory, read_file, read_file_smart,
-    delegate_research,
 )
-from aru.tools.indexer import semantic_search
-from aru.tools.ast_tools import code_structure, find_dependencies
-from aru.tools.ranker import rank_files
 
 REVIEWER_INSTRUCTIONS = """\
 You are a plan scope reviewer. You receive a user request and a generated implementation plan.
@@ -34,9 +30,8 @@ Return ONLY the markdown plan. No explanation, no preamble.\
 
 # Planner uses read-only tools only — no write/edit/bash
 PLANNER_TOOLS = [
-    read_file, read_file_smart, delegate_research,
+    read_file, read_file_smart,
     glob_search, grep_search, list_directory,
-    semantic_search, code_structure, find_dependencies, rank_files,
 ]
 
 
@@ -82,5 +77,5 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
             compress_tool_results=True,
             compress_tool_results_limit=3,
         ),
-        tool_call_limit=12,
+        tool_call_limit=8,
     )

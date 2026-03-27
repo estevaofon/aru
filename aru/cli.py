@@ -818,14 +818,14 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
     from agno.agent import Agent
     from agno.compression.manager import CompressionManager
 
-    from aru.tools.codebase import ALL_TOOLS, _get_small_model_ref
+    from aru.tools.codebase import GENERAL_TOOLS, _get_small_model_ref
 
     extra = config.get_extra_instructions() if config else ""
 
     return Agent(
         name="Aru",
         model=create_model(session.model_ref, max_tokens=8192),
-        tools=ALL_TOOLS,
+        tools=GENERAL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,
         # Compress tool results after 4 uncompressed tool calls to save tokens
@@ -970,7 +970,6 @@ class StatusBar:
 TOOL_DISPLAY_NAMES = {
     "read_file": "Read",
     "read_file_smart": "ReadSmart",
-    "delegate_research": "Research",
     "write_file": "Write",
     "write_files": "Write",
     "edit_file": "Edit",
@@ -979,7 +978,6 @@ TOOL_DISPLAY_NAMES = {
     "grep_search": "Grep",
     "list_directory": "List",
     "bash": "Bash",
-    "semantic_search": "Semantic",
     "code_structure": "Structure",
     "find_dependencies": "Deps",
     "rank_files": "Rank",
@@ -994,7 +992,6 @@ TOOL_PRIMARY_ARG = {
     "grep_search": "pattern",
     "list_directory": "directory",
     "bash": "command",
-    "semantic_search": "query",
     "code_structure": "file_path",
     "find_dependencies": "file_path",
     "rank_files": "task",
@@ -1513,17 +1510,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     paste_state = PasteState()
     prompt_session = _create_prompt_session(paste_state, config)
 
-    # Parallel startup: MCP tools + background index warm-up
+    # Startup: load MCP tools
     from aru.tools.codebase import load_mcp_tools
-    from aru.tools.indexer import warm_up_index
-
-    async def _startup_mcp():
-        await load_mcp_tools()
-
-    async def _startup_index():
-        await asyncio.to_thread(warm_up_index)
-
-    await asyncio.gather(_startup_mcp(), _startup_index())
+    await load_mcp_tools()
 
     while True:
         try:

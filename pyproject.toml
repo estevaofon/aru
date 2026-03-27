@@ -7,7 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "agno",
     "anthropic",
-    "chromadb>=0.5",
     "httpx",
     "pathspec>=0.12",
     "art>=6.0",

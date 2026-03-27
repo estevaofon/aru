@@ -7,10 +7,9 @@ import re
 from aru.tools.gitignore import walk_filtered
 
 # Weights for each ranking signal (sum to 1.0)
-WEIGHT_SEMANTIC = 0.45
-WEIGHT_NAME = 0.25
-WEIGHT_STRUCTURAL = 0.20
-WEIGHT_RECENCY = 0.10
+WEIGHT_NAME = 0.50
+WEIGHT_STRUCTURAL = 0.30
+WEIGHT_RECENCY = 0.20
 
 
 def _get_project_files(root_dir: str) -> list[str]:
@@ -90,46 +89,6 @@ def _score_recency(file_path: str, root_dir: str, max_age_days: float = 30.0) ->
         return 0.0
 
 
-def _get_semantic_scores(task: str, root_dir: str, top_k: int = 30) -> dict[str, float]:
-    """Get semantic similarity scores from chromadb index."""
-    try:
-        from aru.tools.indexer import _update_index, _init_client, _collection
-
-        _init_client()
-        _update_index(root_dir)
-
-        from aru.tools.indexer import _collection as collection
-        if collection is None or collection.count() == 0:
-            return {}
-
-        results = collection.query(
-            query_texts=[task],
-            n_results=min(top_k, collection.count()),
-        )
-
-        if not results or not results["ids"] or not results["ids"][0]:
-            return {}
-
-        # Aggregate scores by file (best chunk score per file)
-        file_scores: dict[str, float] = {}
-        for metadata, distance in zip(results["metadatas"][0], results["distances"][0]):
-            file_path = metadata["file_path"]
-            score = max(0, 1 - distance)
-            if file_path not in file_scores or score > file_scores[file_path]:
-                file_scores[file_path] = score
-
-        # Normalize to 0-1 range
-        if file_scores:
-            max_score = max(file_scores.values())
-            if max_score > 0:
-                file_scores = {k: v / max_score for k, v in file_scores.items()}
-
-        return file_scores
-
-    except Exception:
-        return {}
-
-
 def _get_structural_scores(top_files: list[str], root_dir: str) -> dict[str, float]:
     """Boost files that are dependencies of already-relevant files."""
     try:
@@ -170,7 +129,6 @@ def rank_files(task: str, top_k: int = 15) -> str:
     """Rank project files by relevance to a given task description.
 
     Uses multiple signals to determine which files are most relevant:
-    - Semantic similarity (via codebase embeddings)
     - Filename/path keyword matching
     - Structural dependencies (files imported by relevant files)
     - Modification recency
@@ -189,34 +147,22 @@ def rank_files(task: str, top_k: int = 15) -> str:
 
     keywords = _extract_keywords(task)
 
-    # Signal 1: Semantic scores (may be empty if chromadb unavailable)
-    semantic_scores = _get_semantic_scores(task, root_dir, top_k=top_k * 3)
-    has_semantic = bool(semantic_scores)
-
-    # Signal 2: Name match scores
+    # Signal 1: Name match scores
     name_scores = {f: _score_name_match(f, keywords) for f in all_files}
 
-    # Signal 3: Recency scores
+    # Signal 2: Recency scores
     recency_scores = {f: _score_recency(f, root_dir) for f in all_files}
 
     # Preliminary ranking (without structural) to find top files for dependency tracing
     preliminary_scores = {}
     for f in all_files:
-        if has_semantic:
-            score = (
-                WEIGHT_SEMANTIC * semantic_scores.get(f, 0.0)
-                + WEIGHT_NAME * name_scores.get(f, 0.0)
-                + WEIGHT_RECENCY * recency_scores.get(f, 0.0)
-            )
-        else:
-            # Without semantic, redistribute weight
-            score = (
-                0.60 * name_scores.get(f, 0.0)
-                + 0.20 * recency_scores.get(f, 0.0)
-            )
+        score = (
+            WEIGHT_NAME * name_scores.get(f, 0.0)
+            + WEIGHT_RECENCY * recency_scores.get(f, 0.0)
+        )
         preliminary_scores[f] = score
 
-    # Signal 4: Structural scores (based on top preliminary results)
+    # Signal 3: Structural scores (based on top preliminary results)
     top_preliminary = sorted(preliminary_scores, key=preliminary_scores.get, reverse=True)[:10]
     structural_scores = _get_structural_scores(top_preliminary, root_dir)
 
@@ -224,32 +170,21 @@ def rank_files(task: str, top_k: int = 15) -> str:
     final_scores: dict[str, tuple[float, list[str]]] = {}
     for f in all_files:
         reasons = []
-        semantic = semantic_scores.get(f, 0.0)
         name = name_scores.get(f, 0.0)
         structural = structural_scores.get(f, 0.0)
         recency = recency_scores.get(f, 0.0)
 
-        if has_semantic:
-            score = (
-                WEIGHT_SEMANTIC * semantic
-                + WEIGHT_NAME * name
-                + WEIGHT_STRUCTURAL * structural
-                + WEIGHT_RECENCY * recency
-            )
-        else:
-            score = (
-                0.50 * name
-                + 0.30 * structural
-                + 0.20 * recency
-            )
+        score = (
+            WEIGHT_NAME * name
+            + WEIGHT_STRUCTURAL * structural
+            + WEIGHT_RECENCY * recency
+        )
 
         # Build reason strings
-        if semantic > 0.3:
-            reasons.append("semantic match")
         if name > 0.3:
             reasons.append("name match")
         if structural > 0:
-            reasons.append(f"dependency of top files")
+            reasons.append("dependency of top files")
         if recency > 0.7:
             reasons.append("recently modified")
 
@@ -269,8 +204,7 @@ def rank_files(task: str, top_k: int = 15) -> str:
 
     # Format output
     lines = [f"Files ranked by relevance to: \"{task}\"\n"]
-    mode = "semantic + name + structural + recency" if has_semantic else "name + structural + recency (semantic unavailable)"
-    lines.append(f"Ranking mode: {mode}\n")
+    lines.append("Ranking mode: name + structural + recency\n")
 
     for i, (file_path, (score, reasons)) in enumerate(ranked, 1):
         normalized_score = score / max_score
