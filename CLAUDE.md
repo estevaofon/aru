@@ -51,13 +51,9 @@ main.py → cli.run_cli() → REPL loop
 **Do NOT use `source .venv/bin/activate` in bash tool** — it hangs in subprocesses.
 
 ```bash
-# Use venv executables directly
-.venv/Scripts/pytest
-.venv/Scripts/pytest --cov=aru --cov-report=term-missing
-
-# Or if venv already active in parent shell
-python -m pytest
-python -m pytest --cov=aru --cov-report=term-missing
+# Windows (correct form)
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest --cov=aru --cov-report=term-missing
 ```
 
 **Always use `--cov-report=term-missing`**, not `--cov-report=html` (HTML causes OOM in WSL2).

@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from aru.tools.codebase import write_files, glob_search, read_file, grep_search, edit_file, set_skip_permissions
+from aru.tools.codebase import write_files, glob_search, read_file, grep_search, edit_file, list_directory, set_skip_permissions
 
 
 def test_write_files(tmp_path):
@@ -107,7 +107,7 @@ def test_read_file_binary_detection(tmp_path):
 
 
 def test_read_file_truncation(tmp_path):
-    """Test that read_file returns a truncation warning when file exceeds max_size bytes."""
+    """Test that read_file returns a chunk continuation hint when file exceeds max_size bytes."""
     large_file = tmp_path / "large.txt"
     max_size = 500
     # Write content larger than max_size
@@ -115,8 +115,8 @@ def test_read_file_truncation(tmp_path):
 
     result = read_file(str(large_file), max_size=max_size)
 
-    assert "[WARNING]" in result
-    assert "truncated" in result.lower()
+    assert "[Large file]" in result
+    assert "start_line=N, end_line=M" in result
 
 
 def test_grep_search_with_context_lines(temp_dir):
@@ -149,6 +149,24 @@ def test_grep_search_with_context_lines(temp_dir):
     # Lines outside the context window should not appear
     assert "line one" not in result
     assert "line seven" not in result
+
+
+def test_list_directory(temp_dir):
+    """Test list_directory returns known files/subdirs and excludes .git hidden dir."""
+    (temp_dir / "README.md").write_text("# readme")
+    (temp_dir / "main.py").write_text("# main")
+    sub = temp_dir / "src"
+    sub.mkdir()
+    (sub / "app.py").write_text("# app")
+    hidden = temp_dir / ".git"
+    hidden.mkdir()
+
+    result = list_directory(str(temp_dir))
+
+    assert "README.md" in result
+    assert "main.py" in result
+    assert "src/" in result
+    assert ".git" not in result
 
 
 def test_edit_file_basic(tmp_path):

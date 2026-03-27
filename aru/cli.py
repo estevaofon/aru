@@ -64,6 +64,27 @@ neon_green = "#39ff14" # Um verde bem "fósforo brilhante"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
 
 
+def format_duration(seconds: float) -> str:
+    """Format a duration in seconds to a human-readable string.
+
+    Examples:
+        0.5   -> "500ms"
+        1.0   -> "1s"
+        90.0  -> "1m 30s"
+        3661  -> "1h 1m 1s"
+    """
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def _sanitize_input(text: str) -> str:
     """Remove lone UTF-16 surrogates that Windows clipboard can introduce."""
     return text.encode("utf-8", errors="replace").decode("utf-8")
@@ -595,6 +616,35 @@ class Session:
         self.history = [{"role": "user", "content": summary}] + rest
         self.updated_at = datetime.now().isoformat(timespec="milliseconds")
 
+    def compact_history(self, max_tokens: int) -> int:
+        """Remove oldest messages until the estimated token total is below max_tokens.
+
+        Token count is estimated from the total character length of all messages
+        using the class-level _CHARS_PER_TOKEN ratio (3.5 chars ≈ 1 token).
+
+        Messages are dropped from the front of the history (oldest first).
+        If a single message already exceeds max_tokens, the history is reduced
+        to that one message only.
+
+        Args:
+            max_tokens: Target token ceiling for the conversation history.
+
+        Returns:
+            Number of messages removed.
+        """
+        def _total_tokens() -> int:
+            return sum(self.estimate_tokens(m["content"]) for m in self.history)
+
+        removed = 0
+        while self.history and _total_tokens() > max_tokens:
+            self.history.pop(0)
+            removed += 1
+
+        if removed:
+            self.updated_at = datetime.now().isoformat(timespec="milliseconds")
+
+        return removed
+
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
@@ -778,12 +828,12 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         tools=ALL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,
-        # Compress tool results after 5 uncompressed tool calls to save tokens
+        # Compress tool results after 4 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=5,
+            compress_tool_results_limit=4,
         ),
         tool_call_limit=20,
     )

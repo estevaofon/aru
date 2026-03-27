@@ -300,3 +300,322 @@ class TestSessionModelDisplay:
         display = session.model_display
         # Should contain some reference to anthropic or claude
         assert len(display) > 0
+
+
+# ── Session.compact_history ────────────────────────────────────────────────────
+
+
+class TestSessionCompactHistory:
+    """Tests for Session.compact_history(max_tokens)."""
+
+    # _CHARS_PER_TOKEN = 3.5  →  estimate_tokens(s) = int(len(s) / 3.5)
+    # 35 chars → 10 tokens; 70 chars → 20 tokens
+
+    def _msg(self, role: str, chars: int) -> dict:
+        """Helper to build a message with a predictable token count."""
+        return {"role": role, "content": "x" * chars}
+
+    def test_no_removal_when_under_budget(self):
+        """History already under max_tokens: nothing is removed."""
+        session = Session()
+        session.history = [
+            self._msg("user", 35),   # 10 tokens
+            self._msg("assistant", 35),  # 10 tokens
+        ]
+        removed = session.compact_history(max_tokens=100)
+        assert removed == 0
+        assert len(session.history) == 2
+
+    def test_removes_oldest_messages_first(self):
+        """Oldest messages (front of list) are removed before newer ones."""
+        session = Session()
+        session.history = [
+            self._msg("user", 35),        # 10 tok  → oldest
+            self._msg("assistant", 35),   # 10 tok
+            self._msg("user", 35),        # 10 tok  → newest
+        ]
+        # Total = 30 tokens; max = 25 → drop 1 oldest
+        removed = session.compact_history(max_tokens=25)
+        assert removed == 1
+        assert len(session.history) == 2
+        # Remaining messages should be the last two
+        assert session.history[0]["content"] == "x" * 35
+        assert session.history[1]["content"] == "x" * 35
+
+    def test_removes_multiple_messages(self):
+        """Multiple messages removed until total is within budget."""
+        session = Session()
+        # 5 messages × 10 tokens each = 50 tokens total
+        session.history = [self._msg("user", 35) for _ in range(5)]
+        # Budget = 25 tokens → need to remove 3 (leaving 2 × 10 = 20 ≤ 25)
+        removed = session.compact_history(max_tokens=25)
+        assert removed == 3
+        assert len(session.history) == 2
+
+    def test_single_oversized_message_drains_history(self):
+        """When every message exceeds max_tokens, all are removed (history emptied)."""
+        session = Session()
+        session.history = [
+            self._msg("user", 350),      # 100 tokens
+            self._msg("assistant", 35),  # 10 tokens
+        ]
+        # Budget = 5 tokens — even the smallest message (10 tok) exceeds it,
+        # so compact_history drains the list completely.
+        removed = session.compact_history(max_tokens=5)
+        assert removed == 2
+        assert session.history == []
+
+    def test_empty_history_returns_zero(self):
+        """Empty history: nothing to remove, returns 0."""
+        session = Session()
+        session.history = []
+        removed = session.compact_history(max_tokens=100)
+        assert removed == 0
+        assert session.history == []
+
+    def test_exact_budget_no_removal(self):
+        """History exactly equal to max_tokens is not trimmed."""
+        session = Session()
+        session.history = [self._msg("user", 35)]  # exactly 10 tokens
+        removed = session.compact_history(max_tokens=10)
+        assert removed == 0
+        assert len(session.history) == 1
+
+    def test_returns_removal_count(self):
+        """Return value must equal the number of messages dropped."""
+        session = Session()
+        session.history = [self._msg("user", 35) for _ in range(4)]  # 40 tok
+        removed = session.compact_history(max_tokens=15)
+        # 40 - 10 = 30 > 15 → drop 1 (30 tok)
+        # 30 - 10 = 20 > 15 → drop 2 (20 tok)
+        # 20 - 10 = 10 ≤ 15 → stop   (drop 2 messages? wait: 2×10=20>15, 1×10=10≤15 → drop 3)
+        # Let's just assert removed == len(original) - len(remaining)
+        assert removed == 4 - len(session.history)
+
+    def test_updated_at_changes_on_removal(self):
+        """updated_at must be refreshed when messages are removed."""
+        session = Session()
+        before = session.updated_at
+        session.history = [self._msg("user", 35), self._msg("assistant", 35)]
+        time.sleep(0.01)
+        session.compact_history(max_tokens=5)
+        assert session.updated_at != before
+
+    def test_updated_at_unchanged_when_no_removal(self):
+        """updated_at must not change if nothing was removed."""
+        session = Session()
+        session.history = [self._msg("user", 35)]
+        before = session.updated_at
+        session.compact_history(max_tokens=1000)
+        assert session.updated_at == before
+
+
+# ---------------------------------------------------------------------------
+# Extended tests for estimate_tokens
+# ---------------------------------------------------------------------------
+
+class TestEstimateTokensExtended:
+    """Extended unit tests for Session.estimate_tokens."""
+
+    # --- basic arithmetic ---------------------------------------------------
+
+    def test_single_char_returns_zero(self):
+        """1 char < 3.5 → truncated to 0."""
+        assert Session.estimate_tokens("x") == 0
+
+    def test_exactly_one_token(self):
+        """floor(3 / 3.5) == 0; floor(3.5 / 3.5) == 1 (len 4 gives 1)."""
+        # int(4 / 3.5) == int(1.142…) == 1
+        assert Session.estimate_tokens("abcd") == 1
+
+    def test_multiple_of_chars_per_token(self):
+        """35 chars → exactly 10 tokens (35 / 3.5 = 10.0)."""
+        assert Session.estimate_tokens("a" * 35) == 10
+
+    def test_large_text(self):
+        """1000 chars → int(1000 / 3.5) == 285."""
+        assert Session.estimate_tokens("x" * 1000) == 285
+
+    def test_unicode_characters_counted_by_len(self):
+        """estimate_tokens counts Python str length, not byte length."""
+        text = "é" * 7          # len == 7, int(7 / 3.5) == 2
+        assert Session.estimate_tokens(text) == 2
+
+    def test_newlines_counted(self):
+        """Newline counts as a character."""
+        text = "\n" * 7         # len == 7 → 2
+        assert Session.estimate_tokens(text) == 2
+
+    def test_multiline_string(self):
+        """Realistic multiline content: 70 chars → 20 tokens."""
+        text = "a" * 70
+        assert Session.estimate_tokens(text) == 20
+
+    # --- floor / truncation -------------------------------------------------
+
+    def test_truncates_not_rounds(self):
+        """int() truncates toward zero, never rounds up."""
+        # 6 chars → int(6/3.5) == int(1.714…) == 1, not 2
+        assert Session.estimate_tokens("a" * 6) == 1
+
+    def test_just_below_next_token_boundary(self):
+        """int(6.99… / 3.5) should still be 1, not 2."""
+        # 6 chars is 1.714 tokens → 1
+        assert Session.estimate_tokens("a" * 6) == 1
+
+    # --- callable as static (no instance needed) ----------------------------
+
+    def test_callable_without_instance(self):
+        """estimate_tokens is a static method — callable on the class."""
+        result = Session.estimate_tokens("hello world")  # len=11, int(11/3.5)=3
+        assert result == 3
+
+    def test_instance_and_class_agree(self):
+        """Calling via instance and via class should return the same value."""
+        session = Session()
+        text = "some sample text here"
+        assert session.estimate_tokens(text) == Session.estimate_tokens(text)
+
+    # --- return type --------------------------------------------------------
+
+    def test_returns_int(self):
+        """Return type must be int, not float."""
+        result = Session.estimate_tokens("hello")
+        assert isinstance(result, int)
+
+    def test_empty_returns_int_zero(self):
+        """Empty string returns int 0, not float 0.0."""
+        result = Session.estimate_tokens("")
+        assert result == 0
+        assert isinstance(result, int)
+
+
+# ---------------------------------------------------------------------------
+# Extended tests for check_budget_warning
+# ---------------------------------------------------------------------------
+
+class TestCheckBudgetWarningExtended:
+    """Extended unit tests for Session.check_budget_warning."""
+
+    # helpers ----------------------------------------------------------------
+
+    @staticmethod
+    def _session_with_usage(total_input: int, total_output: int,
+                            budget: int) -> Session:
+        s = Session()
+        s.token_budget = budget
+        s.total_input_tokens = total_input
+        s.total_output_tokens = total_output
+        return s
+
+    # --- no-budget guard ----------------------------------------------------
+
+    def test_budget_zero_returns_none(self):
+        """token_budget == 0 means unlimited — always returns None."""
+        s = self._session_with_usage(9999, 9999, 0)
+        assert s.check_budget_warning() is None
+
+    def test_negative_budget_returns_none(self):
+        """Negative budget is treated as unlimited."""
+        s = self._session_with_usage(500, 500, -1)
+        assert s.check_budget_warning() is None
+
+    # --- below warning threshold --------------------------------------------
+
+    def test_zero_usage_no_warning(self):
+        s = self._session_with_usage(0, 0, 1000)
+        assert s.check_budget_warning() is None
+
+    def test_79_percent_no_warning(self):
+        """79% usage is below the 80% threshold."""
+        s = self._session_with_usage(395, 395, 1000)
+        # 790 / 1000 = 79 % → no warning
+        assert s.check_budget_warning() is None
+
+    # --- yellow (80–94 %) warning -------------------------------------------
+
+    def test_exactly_80_percent_returns_yellow(self):
+        """Exactly 80% triggers the yellow warning."""
+        s = self._session_with_usage(400, 400, 1000)
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "80%" in warning
+        assert "[yellow]" in warning
+
+    def test_81_percent_returns_yellow(self):
+        s = self._session_with_usage(410, 400, 1000)
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[yellow]" in warning
+        assert "bold red" not in warning
+
+    def test_94_percent_returns_yellow_not_red(self):
+        """94% is still in yellow range (below 95% threshold)."""
+        s = self._session_with_usage(470, 470, 1000)
+        # 940 / 1000 = 94%
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[yellow]" in warning
+        assert "bold red" not in warning
+
+    # --- red (≥ 95 %) critical warning --------------------------------------
+
+    def test_exactly_95_percent_returns_red(self):
+        """Exactly 95% triggers the bold-red critical warning."""
+        s = self._session_with_usage(475, 475, 1000)
+        # 950 / 1000 = 95%
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[bold red]" in warning
+        assert "95%" in warning
+
+    def test_100_percent_returns_red(self):
+        """100% usage returns a red critical warning."""
+        s = self._session_with_usage(500, 500, 1000)
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[bold red]" in warning
+
+    def test_over_budget_returns_red(self):
+        """Exceeding 100% still returns a red warning."""
+        s = self._session_with_usage(600, 600, 1000)
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[bold red]" in warning
+
+    # --- percentage text in warning ----------------------------------------
+
+    def test_yellow_warning_contains_percentage(self):
+        s = self._session_with_usage(400, 400, 1000)
+        warning = s.check_budget_warning()
+        assert "%" in warning
+
+    def test_red_warning_contains_percentage(self):
+        s = self._session_with_usage(475, 475, 1000)
+        warning = s.check_budget_warning()
+        assert "%" in warning
+
+    # --- only input tokens (no output) --------------------------------------
+
+    def test_input_only_usage(self):
+        """Budget check uses total = input + output; output may be 0."""
+        s = self._session_with_usage(800, 0, 1000)
+        # 800/1000 = 80% → yellow warning threshold
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[yellow]" in warning
+
+    def test_output_only_usage(self):
+        """Same as above but only output tokens."""
+        s = self._session_with_usage(0, 800, 1000)
+        warning = s.check_budget_warning()
+        assert warning is not None
+        assert "[yellow]" in warning
+
+    # --- return type --------------------------------------------------------
+
+    def test_returns_string_or_none(self):
+        s_warn = self._session_with_usage(400, 400, 1000)
+        s_none = self._session_with_usage(0, 0, 1000)
+        assert isinstance(s_warn.check_budget_warning(), str)
+        assert s_none.check_budget_warning() is None

@@ -110,13 +110,9 @@ The project uses a local `.venv` virtual environment. When using the `bash` tool
 **For bash tool commands, use one of these patterns:**
 
 ```bash
-# Option 1: Use venv executables directly
-.venv/bin/pytest
-.venv/bin/pytest --cov=aru --cov-report=term-missing
-
-# Option 2: Use python -m if venv is already active in parent shell
-python -m pytest
-python -m pytest --cov=aru --cov-report=term-missing
+# Windows (correct form)
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest --cov=aru --cov-report=term-missing
 ```
 
 **Important:** Always prefer `--cov-report=term-missing` over `--cov-report=html` when running coverage tests. The HTML report consumes significantly more memory and can cause the process to be killed by the OOM killer, especially in memory-constrained environments like WSL2.

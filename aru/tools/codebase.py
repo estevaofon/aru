@@ -38,6 +38,7 @@ def set_on_file_mutation(callback):
 
 def _notify_file_mutation():
     """Notify the session that files changed so caches are invalidated."""
+    _read_cache.clear()
     if _on_file_mutation:
         _on_file_mutation()
 
@@ -161,18 +162,50 @@ def _ask_permission(action: str, details: str | Text | Group) -> bool:
         return allowed
 
 
+# Hard ceiling per tool result (~15K tokens). Even max_size=0 respects this per chunk.
+_READ_HARD_CAP = 60_000  # bytes
+
+# Per-session read cache: avoids re-reading the same file+range multiple times.
+# Key = (resolved_path, start_line, end_line, max_size), Value = short metadata description.
+_read_cache: dict[tuple, str] = {}
+
+
+def clear_read_cache():
+    """Clear the read cache. Call after file mutations to avoid stale data."""
+    _read_cache.clear()
+
+
 def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 15_000) -> str:
-    """Read file contents. Use start_line/end_line for large files.
+    """Read file contents. Returns chunked output for large files.
 
     Args:
         file_path: Path to the file (absolute or relative).
         start_line: First line (1-indexed, inclusive). 0 = beginning.
         end_line: Last line (1-indexed, inclusive). 0 = end.
         max_size: Max bytes before truncation. Default 15KB.
+            Set to 0 to read the full file in chunks — each chunk up to ~60KB.
+            The first chunk includes a continuation hint so you can call again
+            with start_line to get the next chunk.
     """
     try:
+        resolved = os.path.abspath(file_path)
+        cache_key = (resolved, start_line, end_line, max_size)
+        if cache_key in _read_cache:
+            lines_info = _read_cache[cache_key]
+            hint = (
+                f" To read a specific section, use read_file(\"{file_path}\", start_line=N, end_line=M)."
+                if not start_line and not end_line else ""
+            )
+            return (
+                f"[cached] Already read ({lines_info})."
+                f" Use the content from your earlier call.{hint}"
+            )
+
         # Check if file exists and get size
         file_size = os.path.getsize(file_path)
+
+        full_read = max_size == 0
+        effective_limit = _READ_HARD_CAP if full_read else max_size
 
         # Detect binary files by checking for null bytes in the first 1KB
         with open(file_path, "rb") as f:
@@ -192,41 +225,60 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
             e = end_line if end_line > 0 else total_lines
             e = min(e, total_lines)
 
-            # Cap the maximum lines returned to prevent huge context blowouts
-            max_lines = 1000
-            truncated = False
-            if e - s > max_lines:
-                e = s + max_lines
-                truncated = True
-
             selected = lines[s:e]
-            numbered = [f"{s + i + 1:4d} | {line}" for i, line in enumerate(selected)]
-            header = f"[Lines {s + 1}-{e} of {total_lines}]\n"
-            result = header + "".join(numbered)
-            if truncated:
-                result += f"\n\n[WARNING] Output truncated to {max_lines} lines. Use a smaller range to read further."
-            return result
 
-        # Full file mode with size limit
-        if file_size > max_size:
-            # Read up to max_size bytes worth of lines
+            # Apply chunk limit based on bytes
             accumulated = []
             char_count = 0
-            for i, line in enumerate(lines):
+            for i, line in enumerate(selected):
                 char_count += len(line)
-                if char_count > max_size:
+                if char_count > effective_limit:
                     break
-                accumulated.append(f"{i + 1:4d} | {line}")
-            lines_shown = len(accumulated)
-            return (
-                "".join(accumulated)
-                + f"\n\n[WARNING] File truncated at ~{max_size:,} bytes ({file_size:,} total, "
-                + f"{lines_shown}/{total_lines} lines shown). "
-                + "Use start_line/end_line to read specific sections."
-            )
+                accumulated.append(f"{s + i + 1:4d} | {line}")
 
-        numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
-        return _truncate_output("".join(numbered))
+            lines_returned = len(accumulated)
+            actual_end = s + lines_returned
+            header = f"[Lines {s + 1}-{actual_end} of {total_lines}]\n"
+            result = header + "".join(accumulated)
+
+            if lines_returned < len(selected):
+                next_start = actual_end + 1
+                result += (
+                    f"\n\n[CHUNK] Returned {lines_returned} of {e - s} requested lines."
+                    f" Call read_file(\"{file_path}\", start_line={next_start}, end_line={e})"
+                    f" to continue."
+                )
+            _read_cache[cache_key] = f"{lines_returned} lines returned"
+            return result
+
+        # Full file mode — check if it fits in one chunk
+        if file_size <= effective_limit:
+            numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
+            output = "".join(numbered)
+            result = output if full_read else _truncate_output(output)
+            _read_cache[cache_key] = f"{total_lines} lines"
+            return result
+
+        # File exceeds limit — return ONLY the outline (no content chunk)
+        import re as _re
+        toc_entries = []
+        toc_pattern = _re.compile(r"^(\s*)(def |class |async def )(\w+)")
+        for li, raw_line in enumerate(lines):
+            m = toc_pattern.match(raw_line)
+            if m:
+                indent = len(m.group(1))
+                prefix = "  " if indent > 0 else ""
+                toc_entries.append(f"{prefix}{m.group(2).strip()} {m.group(3)} (line {li + 1})")
+
+        outline = "\n".join(toc_entries) if toc_entries else "(no definitions found)"
+        result = (
+            f"[Large file] {file_path} — {total_lines} lines, {file_size:,} bytes.\n"
+            f"Content omitted to save tokens. Use the outline below to read specific sections.\n\n"
+            f"[Outline]\n{outline}\n\n"
+            f"To read a section: read_file(\"{file_path}\", start_line=N, end_line=M)"
+        )
+        _read_cache[cache_key] = f"{total_lines} lines, outline only"
+        return result
     except FileNotFoundError:
         return f"Error: File not found: {file_path}"
     except Exception as e:
@@ -598,7 +650,9 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
 
     results = []
     match_count = 0
+    files_with_matches: dict[str, list[int]] = {}  # rel_path -> list of match line numbers
     MAX_MATCHES = 15 if context_lines > 0 else 30
+    stopped_early = False
 
     for root, dirs, files in walk_filtered(directory):
         for filename in files:
@@ -616,38 +670,46 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
                     if not match_indices:
                         continue
 
-                    # Merge overlapping context windows
-                    shown: set[int] = set()
-                    blocks = []
-                    current_block: list[str] = []
-                    for mi in match_indices:
-                        start = max(0, mi - context_lines)
-                        end = min(len(lines), mi + context_lines + 1)
-                        for li in range(start, end):
-                            if li not in shown:
-                                if current_block and li > max(shown) + 1:
-                                    blocks.append(current_block)
-                                    current_block = []
-                                shown.add(li)
-                                marker = ">" if li == mi else " "
-                                current_block.append(f"{rel_path}:{li + 1}:{marker} {lines[li].rstrip()}")
-                    if current_block:
-                        blocks.append(current_block)
+                    files_with_matches[rel_path] = [i + 1 for i in match_indices]
 
-                    for block in blocks:
-                        results.extend(block)
-                        results.append("---")
+                    # Only emit context blocks if we haven't exceeded the limit
+                    if match_count < MAX_MATCHES:
+                        # Merge overlapping context windows
+                        shown: set[int] = set()
+                        blocks = []
+                        current_block: list[str] = []
+                        for mi in match_indices:
+                            start = max(0, mi - context_lines)
+                            end = min(len(lines), mi + context_lines + 1)
+                            for li in range(start, end):
+                                if li not in shown:
+                                    if current_block and li > max(shown) + 1:
+                                        blocks.append(current_block)
+                                        current_block = []
+                                    shown.add(li)
+                                    marker = ">" if li == mi else " "
+                                    current_block.append(f"{rel_path}:{li + 1}:{marker} {lines[li].rstrip()}")
+                        if current_block:
+                            blocks.append(current_block)
+
+                        for block in blocks:
+                            results.extend(block)
+                            results.append("---")
                     match_count += len(match_indices)
                 else:
                     for i, line in enumerate(lines, 1):
                         if regex.search(line):
                             results.append(f"{rel_path}:{i}: {line.rstrip()}")
                             match_count += 1
+                            if rel_path not in files_with_matches:
+                                files_with_matches[rel_path] = []
+                            files_with_matches[rel_path].append(i)
 
             except (OSError, PermissionError):
                 continue
 
-        if match_count >= MAX_MATCHES and context_lines == 0:
+        if match_count >= MAX_MATCHES:
+            stopped_early = True
             break
 
     if not results:
@@ -657,10 +719,22 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
     if results and results[-1] == "---":
         results.pop()
 
-    if context_lines == 0 and match_count > MAX_MATCHES:
-        output = "\n".join(results[:MAX_MATCHES]) + f"\n... and {match_count - MAX_MATCHES} more matches (use a more specific pattern to narrow results)"
+    if match_count > MAX_MATCHES and context_lines == 0:
+        output = "\n".join(results[:MAX_MATCHES])
     else:
         output = "\n".join(results)
+
+    # Append file summary so the model knows where ALL matches are
+    if len(files_with_matches) > 1 or stopped_early:
+        summary_lines = ["\n[Match summary]"]
+        for fpath, line_nums in files_with_matches.items():
+            nums = ", ".join(str(n) for n in line_nums[:10])
+            extra = f" +{len(line_nums) - 10} more" if len(line_nums) > 10 else ""
+            summary_lines.append(f"  {fpath}: lines {nums}{extra}")
+        if stopped_early:
+            summary_lines.append(f"  ... search stopped at {match_count} matches. Use file_glob or a more specific pattern.")
+        output += "\n".join(summary_lines)
+
     return _truncate_output(output)
 
 
@@ -833,6 +907,8 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
             )
             if sys.platform != "win32":
@@ -885,6 +961,8 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=cwd,
         )
         if sys.platform == "win32":
@@ -1233,6 +1311,7 @@ Do not create documentation files unless explicitly asked.
 # All tools as a list for easy import
 ALL_TOOLS = [
     read_file,
+    read_file_smart,
     write_file,
     write_files,
     edit_file,
@@ -1244,6 +1323,7 @@ ALL_TOOLS = [
     web_search,
     web_fetch,
     delegate_task,
+    delegate_research,
     semantic_search,
     code_structure,
     find_dependencies,
