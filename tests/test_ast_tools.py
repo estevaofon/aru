@@ -72,6 +72,29 @@ def test_extract_function_simple():
 
 
 @pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="tree-sitter not available")
+def test_extract_function_with_docstring():
+    """Test extracting a function with docstring."""
+    source = b"""def documented(param):
+    \"\"\"This is a docstring.\"\"\"
+    pass
+"""
+    tree = _parse_python_tree(source)
+    
+    func_node = None
+    for child in tree.root_node.children:
+        if child.type == "function_definition":
+            func_node = child
+            break
+    
+    assert func_node is not None
+    func_info = _extract_function(func_node, source)
+    
+    assert func_info["name"] == "documented"
+    assert func_info["params"] == ["param"]
+    assert "This is a docstring." in func_info.get("docstring", "")
+
+
+@pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="tree-sitter not available")
 def test_extract_function_with_types():
     """Test extracting function with type annotations."""
     source = b"def greet(name: str, age: int = 30) -> str:\n    pass"
@@ -446,6 +469,42 @@ def function():
     assert "import os" in result
     assert "Example" in result
     assert "function" in result
+
+
+def test_code_structure(tmp_path):
+    """Test code_structure() parsing a Python file returning imports, classes and functions correctly."""
+    test_file = tmp_path / "sample.py"
+    test_file.write_text("""import os
+from pathlib import Path
+
+class User:
+    def __init__(self, name):
+        self.name = name
+    
+    def greet(self):
+        return f"Hello, {self.name}"
+
+def add(a, b):
+    return a + b
+
+def multiply(x, y):
+    return x * y
+""")
+    
+    result = code_structure(str(test_file))
+    
+    # Test imports
+    assert "import os" in result
+    assert "from pathlib import Path" in result
+    
+    # Test classes
+    assert "User" in result
+    assert "__init__" in result
+    assert "greet" in result
+    
+    # Test functions
+    assert "add" in result
+    assert "multiply" in result
 
 
 # --- Import Resolution Tests ---
