@@ -181,6 +181,12 @@ class TestTruncateOutput:
             # If truncated, check start and end are preserved
             assert "🔥" in result or "测试" in result
 
+    def test_truncate_output_empty_string(self):
+        """Test that empty string returns empty string without errors."""
+        result = truncate_output("")
+        assert result == ""
+        assert isinstance(result, str)
+
     def test_truncates_by_both_line_and_byte_limits(self):
         """Test that both line and byte truncation can be triggered in the same output."""
         # Create 600 lines of 50 bytes each (30KB total)

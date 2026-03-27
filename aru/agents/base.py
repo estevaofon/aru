@@ -27,8 +27,10 @@ Your sole output is the implementation plan. The executor agent will carry out t
 Before every tool call, pick the cheapest option that answers your question:
 
 1. **Know the exact file?** → `read_file_smart(path, query)` or `read_file(path)` directly.
-2. **Know a pattern to search for?** → `grep_search(pattern, file_glob="*.py", context_lines=15)`
-   - find a function definition, check if something is already tested, find where X is imported
+2. **Know a pattern to search for?** → `grep_search(pattern, file_glob="*.py", context_lines=N)`
+   - Import/single line: `context_lines=3` — find a class definition, check if something is already tested, find where X is imported
+   - Function body: `context_lines=30` — see the full implementation
+   - Class with methods: `context_lines=50`
 3. **Don't know where to start?** → `delegate_research(task, query)`
    - open-ended exploration with no known file or pattern
 
@@ -98,9 +100,11 @@ Guidelines:
 ## Reading strategy — avoid full-file reads
 
 **grep then read selectively** — never read an entire file just to find a function:
-1. `grep_search("def my_func", context_lines=20)` → see the function body immediately, no read needed
-2. If you need more: `read_file(path, start_line=N, end_line=M)` using the line number from grep
-3. Only use `read_file(path)` with no range when you genuinely need the whole file
+1. Finding an import or single line: `grep_search("import X", context_lines=3)`
+2. Finding a function/method body: `grep_search("def my_func", context_lines=30)`
+3. Finding a class with its methods: `grep_search("class MyClass", context_lines=50)`
+4. If grep didn't return enough: `read_file(path, start_line=N, end_line=M)` using the line number from grep
+5. Only use `read_file(path)` with no range when you genuinely need the whole file
 
 **NEVER read the same file twice.** If you already have the file content, use it.
 
@@ -128,6 +132,14 @@ and delegating subtasks to sub-agents.
 
 **Minimize tool calls**: Do the work with as few tool calls as possible. Read only files you need. \
 Skip exploration when the task is clear and the relevant files are obvious.
+
+**Prefer grep over full reads**: Before reading a file, ask if a targeted search would suffice.
+- Finding an import or single line: `grep_search("import Claude", file_glob="*.py", context_lines=3)`
+- Finding a function/method body: `grep_search("def my_func", context_lines=30)`
+- Finding a class with its methods: `grep_search("class MyClass", context_lines=50)`
+- Use `read_file(path, start_line=N, end_line=M)` when grep didn't return enough and you know the lines
+- Only use `read_file(path)` with no range when you genuinely need the whole file
+- Never read a file whose content was already provided in the conversation
 
 **Batch independent tool calls**: When you need multiple independent pieces of information \
 (e.g., read file A and search for pattern B), emit ALL those tool calls in a single response — \
