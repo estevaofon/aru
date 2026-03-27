@@ -152,6 +152,26 @@ class TestGrepSearch:
         result = grep_search("[invalid", str(project_dir))
         assert "Invalid regex" in result
 
+    def test_grep_context_lines_shows_surrounding_code(self, project_dir: Path):
+        result = grep_search("def main", str(project_dir), context_lines=2)
+        # Should include the match line marked with >
+        assert ":>" in result or "> " in result
+        # Should include separator between blocks
+        assert "---" in result or "def main" in result
+
+    def test_grep_context_lines_includes_nearby_lines(self, tmp_path: Path):
+        f = tmp_path / "sample.py"
+        f.write_text("line1\nline2\ndef foo():\n    pass\nline5\nline6\n")
+        result = grep_search("def foo", str(tmp_path), context_lines=1)
+        assert "line2" in result
+        assert "def foo" in result
+        assert "    pass" in result
+
+    def test_grep_context_lines_zero_unchanged(self, project_dir: Path):
+        result = grep_search("def main", str(project_dir), context_lines=0)
+        # Default behavior: single lines, no separator
+        assert "def main" in result
+
 
 # ── list_directory ───────────────────────────────────────────────────
 
@@ -175,9 +195,11 @@ class TestHelpers:
         assert _truncate_output("short") == "short"
 
     def test_truncate_long_output(self):
-        text = "x" * 20_000
+        # Create text exceeding 20KB / 500 lines (universal truncation thresholds)
+        lines = ["x" * 50 + "\n" for _ in range(600)]
+        text = "".join(lines)
         result = _truncate_output(text)
-        assert "truncated" in result
+        assert "omitted" in result
         assert len(result) < len(text)
 
     def test_is_long_running_server(self):
@@ -536,10 +558,10 @@ class TestRunCommand:
             cmd = "python -c \"print('x' * 15000)\""
         
         result = run_command(cmd)
-        
-        # Output should be truncated if over 10K chars
-        if len(result) >= 10000:
-            assert "truncated" in result.lower()
+
+        # Output should be truncated if over threshold (20KB / 500 lines)
+        if len(result) >= 20_000 or result.count("\n") >= 500:
+            assert "omitted" in result.lower() or "truncated" in result.lower()
     
     def test_run_command_with_pipes(self):
         """Test command with pipes."""

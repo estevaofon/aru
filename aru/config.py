@@ -33,7 +33,7 @@ class Skill:
     source_path: str
 
 
-MAX_README_CHARS = 8000
+MAX_README_CHARS = 2000  # Reduced from 8000 to save ~1.7K tokens per request
 
 
 @dataclass
@@ -45,19 +45,21 @@ class AgentConfig:
     skills: dict[str, Skill] = field(default_factory=dict)
     permissions: dict[str, Any] = field(default_factory=dict)
     model_defaults: dict[str, str] = field(default_factory=dict)
+    plan_reviewer: bool = True
 
     @property
     def has_instructions(self) -> bool:
         return bool(self.agents_md) or bool(self.skills)
 
-    def get_extra_instructions(self, active_skills: list[str] | None = None) -> str:
+    def get_extra_instructions(self, active_skills: list[str] | None = None, lightweight: bool = False) -> str:
         """Build extra instructions from README.md, AGENTS.md, and active skills.
 
-        Order matters — README.md comes first so the agent has project context
-        before any custom instructions or skills.
+        Args:
+            active_skills: List of skill names to include.
+            lightweight: If True, skip README.md to save tokens (for executor steps).
         """
         parts = []
-        if self.readme_md:
+        if self.readme_md and not lightweight:
             parts.append(f"## Project Overview (README.md)\n\n{self.readme_md}")
         if self.agents_md:
             parts.append(f"## Project Instructions (AGENTS.md)\n\n{self.agents_md}")
@@ -66,7 +68,6 @@ class AgentConfig:
                 if name in self.skills:
                     skill = self.skills[name]
                     parts.append(f"## Skill: {skill.name}\n\n{skill.content}")
-        # Skills are only loaded when explicitly requested to save tokens
         return "\n\n".join(parts)
 
 
@@ -216,6 +217,8 @@ def load_config(cwd: str | None = None) -> AgentConfig:
                     # Store model defaults for CLI
                     if "models" in data and isinstance(data["models"], dict):
                         config.model_defaults = data["models"]
+                    if "plan_reviewer" in data:
+                        config.plan_reviewer = bool(data["plan_reviewer"])
                 break
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 pass

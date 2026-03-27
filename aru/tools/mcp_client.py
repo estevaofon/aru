@@ -114,7 +114,10 @@ class McpSessionManager:
 
     async def cleanup(self):
         """Close all active MCP client sessions and terminate server subprocesses."""
-        await self._exit_stack.aclose()
+        try:
+            await self._exit_stack.aclose()
+        except (RuntimeError, Exception):
+            pass
 
 
 # Global Singleton manager to be used entirely inside aru's async loops

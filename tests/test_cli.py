@@ -476,3 +476,20 @@ class TestCliConstants:
         for cmd in SLASH_COMMANDS:
             assert len(cmd) == 3
             assert cmd[0].startswith("/")
+
+
+class TestAskYesNoCli:
+    def test_returns_true_for_yes_variants(self, monkeypatch):
+        from aru import cli
+
+        monkeypatch.setattr(cli.console, "input", lambda _: "Yes")
+        assert cli.ask_yes_no("Continue?") is True
+
+    def test_returns_false_on_eof(self, monkeypatch):
+        from aru import cli
+
+        def _raise(_):
+            raise EOFError()
+
+        monkeypatch.setattr(cli.console, "input", _raise)
+        assert cli.ask_yes_no("Continue?") is False
