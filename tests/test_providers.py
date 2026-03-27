@@ -205,6 +205,54 @@ class TestGetModelDisplay:
         assert display == "unknown/model"
 
 
+class TestResolveApiKey:
+    """Test API key resolution from environment variables."""
+
+    def test_resolve_api_key_with_env_var(self):
+        """Should return env var value when present."""
+        from aru.providers import _resolve_api_key, ProviderConfig
+        
+        provider = ProviderConfig(
+            name="TestProvider",
+            api_key_env="TEST_API_KEY",
+            base_url=None,
+            default_model="test-model"
+        )
+        
+        with patch.dict("os.environ", {"TEST_API_KEY": "secret-key-123"}):
+            result = _resolve_api_key(provider)
+            assert result == "secret-key-123"
+
+    def test_resolve_api_key_missing_env_var(self):
+        """Should return None when env var is not set."""
+        from aru.providers import _resolve_api_key, ProviderConfig
+        
+        provider = ProviderConfig(
+            name="TestProvider",
+            api_key_env="NONEXISTENT_API_KEY",
+            base_url=None,
+            default_model="test-model"
+        )
+        
+        with patch.dict("os.environ", {}, clear=True):
+            result = _resolve_api_key(provider)
+            assert result is None
+
+    def test_resolve_api_key_with_none_env(self):
+        """Should return None when api_key_env is None."""
+        from aru.providers import _resolve_api_key, ProviderConfig
+        
+        provider = ProviderConfig(
+            name="TestProvider",
+            api_key_env=None,
+            base_url=None,
+            default_model="test-model"
+        )
+        
+        result = _resolve_api_key(provider)
+        assert result is None
+
+
 class TestGetAvailableModels:
     def test_includes_legacy_aliases(self):
         models = get_available_models()
@@ -219,3 +267,37 @@ class TestGetAvailableModels:
         openai_models = [k for k in models if k.startswith("openai/")]
         assert len(anthropic_models) > 0
         assert len(openai_models) > 0
+
+
+class TestCreateProviderModel:
+    """Test direct provider model instantiation logic."""
+    
+    @patch("agno.models.anthropic.Claude")
+    @patch("aru.providers._resolve_api_key")
+    def test_create_anthropic_model_with_cache(self, mock_resolve_key, mock_claude):
+        """Should create Claude model with cache_system_prompt=True by default."""
+        from aru.providers import _create_provider_model, ProviderConfig
+        
+        mock_resolve_key.return_value = "test-api-key"
+        mock_claude.return_value = MagicMock()
+        
+        provider = ProviderConfig(
+            name="Anthropic",
+            api_key_env="ANTHROPIC_API_KEY",
+            default_model="claude-sonnet-4-5"
+        )
+        
+        _create_provider_model(
+            provider_type="anthropic",
+            provider=provider,
+            model_id="claude-sonnet-4-5-20250929",
+            max_tokens=8192,
+            cache_system_prompt=True
+        )
+        
+        mock_claude.assert_called_once_with(
+            id="claude-sonnet-4-5-20250929",
+            max_tokens=8192,
+            cache_system_prompt=True,
+            api_key="test-api-key"
+        )

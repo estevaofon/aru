@@ -45,15 +45,16 @@ class TestCreateExecutor:
     @patch("aru.agents.executor.create_model")
     def test_default_model(self, mock_create_model, mock_agent):
         create_executor()
-        mock_create_model.assert_called_once()
-        call_args = mock_create_model.call_args
+        # First call is the main model, second is the compression model
+        assert mock_create_model.call_count >= 1
+        call_args = mock_create_model.call_args_list[0]
         assert call_args[0][0] == "anthropic/claude-sonnet-4-5"
 
     @patch("aru.agents.executor.Agent")
     @patch("aru.agents.executor.create_model")
     def test_custom_model_ref(self, mock_create_model, mock_agent):
         create_executor(model_ref="ollama/llama3.1")
-        call_args = mock_create_model.call_args
+        call_args = mock_create_model.call_args_list[0]
         assert call_args[0][0] == "ollama/llama3.1"
 
     @patch("aru.agents.executor.Agent")

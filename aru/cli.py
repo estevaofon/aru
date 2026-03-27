@@ -27,7 +27,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from aru.agents.executor import create_executor
-from aru.agents.planner import create_planner
+from aru.agents.planner import create_planner, review_plan
 from aru.config import AgentConfig, load_config, render_command_template
 from aru.providers import (
     LEGACY_MODEL_ALIASES,
@@ -38,10 +38,14 @@ from aru.providers import (
 )
 
 import io as _io
+import logging as _logging
 
 if sys.platform == "win32" and not hasattr(sys, "_called_from_test"):
     sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+# Suppress Agno INFO logs (e.g. "Tool count limit hit") — only show warnings/errors
+_logging.getLogger("agno").setLevel(_logging.WARNING)
 
 console = Console()
 
@@ -759,8 +763,9 @@ class SessionStore:
 def create_general_agent(session: Session, config: AgentConfig | None = None):
     """Create the general-purpose agent."""
     from agno.agent import Agent
+    from agno.compression.manager import CompressionManager
 
-    from aru.tools.codebase import ALL_TOOLS
+    from aru.tools.codebase import ALL_TOOLS, _get_small_model_ref
 
     extra = config.get_extra_instructions() if config else ""
 
@@ -770,6 +775,14 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         tools=ALL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,
+        # Compress tool results after 5 uncompressed tool calls to save tokens
+        compress_tool_results=True,
+        compression_manager=CompressionManager(
+            model=create_model(_get_small_model_ref(), max_tokens=1024),
+            compress_tool_results=True,
+            compress_tool_results_limit=5,
+        ),
+        tool_call_limit=20,
     )
 
 
@@ -903,6 +916,8 @@ class StatusBar:
 
 TOOL_DISPLAY_NAMES = {
     "read_file": "Read",
+    "read_file_smart": "ReadSmart",
+    "delegate_research": "Research",
     "write_file": "Write",
     "write_files": "Write",
     "edit_file": "Edit",
@@ -919,6 +934,7 @@ TOOL_DISPLAY_NAMES = {
 
 TOOL_PRIMARY_ARG = {
     "read_file": "file_path",
+    "read_file_smart": "file_path",
     "write_file": "file_path",
     "edit_file": "file_path",
     "glob_search": "pattern",
@@ -1049,8 +1065,15 @@ class StreamingDisplay:
         return Measurement(1, options.max_width)
 
 
-async def run_agent_capture(agent, message: str, session: "Session | None" = None) -> str | None:
-    """Run agent with async streaming display and parallel tool execution."""
+async def run_agent_capture(agent, message: str, session: "Session | None" = None, lightweight: bool = False) -> str | None:
+    """Run agent with async streaming display and parallel tool execution.
+
+    Args:
+        agent: The Agno agent to run.
+        message: The user message/prompt.
+        session: Optional session for history and context.
+        lightweight: If True, skip tree/git/plan context and history (for executor steps).
+    """
     from agno.models.message import Message
     from agno.run.agent import (
         RunContentEvent,
@@ -1074,7 +1097,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         cwd = os.getcwd()
         dynamic_parts.append(f"The current working directory is: {cwd}")
 
-        if session:
+        if session and not lightweight:
             env_context_parts = []
             tree_text = session.get_cached_tree(cwd)
             if tree_text:
@@ -1100,12 +1123,14 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         run_message = f"{dynamic_context}\n\n---\n\n## Current Task/Message\n{message}"
 
         # Build conversation history as real messages for the LLM
-        # Exclude the last user message (already in run_message) to avoid duplication
+        # Skip history for lightweight executor steps — they don't need prior conversation
+        from aru.context import prune_history
         history_messages: list[Message] = []
-        if session and session.history:
+        if session and session.history and not lightweight:
             # The last message is the current user input (already added before calling this function)
             prior_history = session.history[:-1]
-            for msg in prior_history:
+            pruned = prune_history(prior_history)
+            for msg in pruned:
                 history_messages.append(Message(role=msg["role"], content=msg["content"], from_history=True))
 
         # Combine: history messages + current enriched message
@@ -1180,6 +1205,9 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
                                 chunk = unflushed[:break_point + 1]
                                 # Only flush if we are outside of a code block (balanced ```)
                                 if chunk.count("```") % 2 == 0:
+                                    # Clear live content before stopping to prevent
+                                    # rich.Live re-rendering stale text on stop()
+                                    display.content = None
                                     live.stop()
                                     console.print(Markdown(chunk))
                                     display._flushed_len += len(chunk)
@@ -1194,6 +1222,17 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
+
+            # Layer 3: Auto-compact conversation when approaching context limits
+            from aru.context import should_compact, compact_conversation
+            if should_compact(session.total_input_tokens, session.model_id):
+                try:
+                    session.history = await compact_conversation(
+                        session.history, session.model_ref, session.plan_task
+                    )
+                    console.print("[dim]Context compacted to save tokens.[/dim]")
+                except Exception:
+                    pass  # compaction is best-effort
 
         # Print only un-flushed content
         final_content = accumulated or final_content
@@ -1238,7 +1277,7 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
             f"## Task\n{session.plan_task}\n\n"
             f"## Plan\n{session.current_plan}"
         )
-        return await run_agent_capture(executor, exec_prompt, session)
+        return await run_agent_capture(executor, exec_prompt, session, lightweight=True)
 
     all_results = []
     completed_context = ""
@@ -1268,10 +1307,10 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
             "\nIMPORTANT: Just execute this step. Do NOT repeat completed steps or summarize."
         )
 
-        # Execute this step
+        # Execute this step (lightweight=True to skip tree/git/history)
         executor = executor_factory()
         try:
-            result = await run_agent_capture(executor, step_prompt, session)
+            result = await run_agent_capture(executor, step_prompt, session, lightweight=True)
             if result:
                 step.status = "completed"
                 all_results.append(f"### Step {step.index}: {step.description}\n{result}")
@@ -1299,21 +1338,6 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
         border_style="green" if all(s.status == "completed" for s in session.plan_steps) else "yellow",
         padding=(0, 1),
     ))
-
-    # Final walkthrough — one concise summary of everything that was done
-    if all_results:
-        console.print()
-        console.print("[bold cyan]Generating walkthrough...[/bold cyan]")
-        walkthrough_executor = executor_factory()
-        walkthrough_prompt = (
-            f"## Task: {session.plan_task}\n\n"
-            f"All steps are done. Give a brief walkthrough of what was accomplished — "
-            f"key changes, files modified, and anything the user should know. Be concise.\n\n"
-            f"## Completed Steps\n{session.render_plan_progress()}"
-        )
-        walkthrough = await run_agent_capture(walkthrough_executor, walkthrough_prompt, session)
-        if walkthrough:
-            all_results.append(f"### Walkthrough\n{walkthrough}")
 
     return "\n\n".join(all_results) if all_results else None
 
@@ -1571,6 +1595,13 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
             plan_content = await run_agent_capture(planner, prompt, session)
 
+            if plan_content and config and config.plan_reviewer:
+                console.print("[dim]Reviewing scope...[/dim]")
+                reviewed = await review_plan(task, plan_content)
+                if reviewed != plan_content:
+                    plan_content = reviewed
+                    console.print(Markdown(plan_content))
+
             if plan_content:
                 session.set_plan(task, plan_content)
                 session.add_message("user", f"/plan {task}")
@@ -1583,8 +1614,11 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 if ask_yes_no("Execute this plan?"):
                     console.print("[bold green]Executing plan...[/bold green]")
 
+                    # Use lightweight instructions for executor steps (skip README.md)
+                    light_instructions = config.get_extra_instructions(lightweight=True) if config else ""
+
                     def make_executor():
-                        return create_executor(session.model_ref, extra_instructions)
+                        return create_executor(session.model_ref, light_instructions)
 
                     result = await execute_plan_steps(session, make_executor)
                     if result:

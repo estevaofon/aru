@@ -161,14 +161,14 @@ def _ask_permission(action: str, details: str | Text | Group) -> bool:
         return allowed
 
 
-def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 30_000) -> str:
-    """Read the contents of a file.
+def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 15_000) -> str:
+    """Read file contents. Use start_line/end_line for large files.
 
     Args:
-        file_path: Path to the file to read (absolute or relative to working directory).
-        start_line: First line to read (1-indexed, inclusive). 0 means from the beginning.
-        end_line: Last line to read (1-indexed, inclusive). 0 means to the end.
-        max_size: Maximum file size in bytes before truncation. Defaults to 30KB. Ignored when line range is specified.
+        file_path: Path to the file (absolute or relative).
+        start_line: First line (1-indexed, inclusive). 0 = beginning.
+        end_line: Last line (1-indexed, inclusive). 0 = end.
+        max_size: Max bytes before truncation. Default 15KB.
     """
     try:
         # Check if file exists and get size
@@ -226,11 +226,147 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
             )
 
         numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
-        return "".join(numbered)
+        return _truncate_output("".join(numbered))
     except FileNotFoundError:
         return f"Error: File not found: {file_path}"
     except Exception as e:
         return f"Error reading file: {e}"
+
+
+# Threshold: files smaller than this are returned as-is (not worth a model call)
+_SMART_READ_THRESHOLD = 3_000  # chars (~750 tokens)
+
+
+async def read_file_smart(file_path: str, query: str) -> str:
+    """Read a file and answer a specific question about it — returns a concise answer, NOT raw content.
+
+    Use this instead of read_file when you only need a specific piece of information
+    about a file (e.g., "does this file have tests for X?", "what does function Y do?",
+    "which classes are exported?"). This is much cheaper on tokens than reading the full file.
+
+    Use plain read_file only when you need to see the actual code/content.
+
+    Args:
+        file_path: Path to the file to read.
+        query: The specific question you want answered about this file.
+    """
+    # Read raw content first (reuse existing read_file logic)
+    raw = read_file(file_path, max_size=20_000)
+
+    if raw.startswith("Error:"):
+        return raw
+
+    # Strip line number prefixes for the model (cleaner input)
+    lines = raw.splitlines()
+    clean_lines = []
+    for line in lines:
+        # Lines have format "  42 | content" — strip the prefix
+        if " | " in line[:8]:
+            clean_lines.append(line.split(" | ", 1)[1] if " | " in line else line)
+        else:
+            clean_lines.append(line)
+    clean = "\n".join(clean_lines)
+
+    # Small file — just return raw content (model call not worth it)
+    if len(clean) <= _SMART_READ_THRESHOLD:
+        return raw
+
+    # Large file — call small model to answer the query
+    from agno.agent import Agent
+    from aru.providers import create_model
+
+    small_ref = _get_small_model_ref()
+    prompt = (
+        f"Answer this question about the file `{file_path}`:\n\n"
+        f"**Question:** {query}\n\n"
+        f"**File content:**\n```\n{clean[:15_000]}\n```\n\n"
+        f"Give a concise, direct answer. If code is relevant, quote only the essential snippet."
+    )
+
+    try:
+        summarizer = Agent(
+            name="FileReader",
+            model=create_model(small_ref, max_tokens=512),
+            instructions="You answer specific questions about source code files. Be concise and direct.",
+            markdown=False,
+        )
+        result = await summarizer.arun(prompt, stream=False)
+        answer = result.content.strip() if result and result.content else ""
+        if not answer:
+            return raw  # fallback
+        return f"[{file_path}] {answer}"
+    except Exception:
+        return raw  # fallback to raw content on any error
+
+
+# Max chars returned by delegate_research to the Planner — keeps Planner context small
+_RESEARCH_RESULT_MAX_CHARS = 800
+
+
+async def delegate_research(task: str, query: str) -> str:
+    """Explore the codebase and answer a specific question — WITHOUT polluting your context.
+
+    DEFAULT TOOL FOR EXPLORATION. Use this whenever you do not already know the exact
+    file path that answers your question. The sub-agent runs in a clean isolated context:
+    its tool calls never appear in your history. You receive only the final answer (~600 chars).
+
+    Use read_file_smart / read_file ONLY when you are already certain of the exact file.
+    Use this tool for everything else — finding, understanding, verifying.
+
+    Args:
+        task: What to research (e.g., "understand how session persistence works").
+        query: The specific question to answer
+               (e.g., "which files and functions handle saving sessions to disk?").
+    """
+    from agno.agent import Agent
+    from aru.providers import create_model
+
+    agent_id = _next_subagent_id()
+    cwd = os.getcwd()
+    small_ref = _get_small_model_ref()
+
+    instructions = f"""\
+You are a research sub-agent (#{agent_id}). Your sole job is to answer a specific question \
+about this codebase. Be focused and concise — explore only what is needed to answer the query.
+
+Working directory: {cwd}
+
+Rules:
+- Answer ONLY the query. Do not summarize unrelated code.
+- Stop exploring as soon as you have enough information to answer.
+- Your final response must be a concise answer (under 600 chars if possible).
+- Do NOT create or modify any files.
+"""
+
+    # Read-only tools only — no write, bash, web, or nested delegation
+    research_tools = [
+        read_file, read_file_smart, glob_search, grep_search,
+        list_directory, semantic_search, code_structure,
+        find_dependencies, rank_files,
+    ]
+
+    sub = Agent(
+        name=f"Researcher-{agent_id}",
+        model=create_model(small_ref, max_tokens=1024),
+        tools=research_tools,
+        instructions=instructions,
+        markdown=False,
+        tool_call_limit=8,
+    )
+
+    prompt = f"Task: {task}\n\nAnswer this query: {query}"
+
+    try:
+        result = await sub.arun(prompt, stream=False)
+        answer = result.content.strip() if result and result.content else ""
+        if not answer:
+            return "[Research] No findings."
+        # Cap to keep Planner context small
+        if len(answer) > _RESEARCH_RESULT_MAX_CHARS:
+            answer = answer[:_RESEARCH_RESULT_MAX_CHARS] + "... [truncated]"
+        return f"[Research-{agent_id}] {answer}"
+    except Exception as e:
+        return f"[Research-{agent_id}] Error: {e}"
 
 
 def write_file(file_path: str, content: str) -> str:
@@ -433,13 +569,16 @@ def glob_search(pattern: str, directory: str = ".") -> str:
     return "\n".join(matches)
 
 
-def grep_search(pattern: str, directory: str = ".", file_glob: str = "") -> str:
+def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context_lines: int = 5) -> str:
     """Search for a regex pattern in file contents.
 
     Args:
         pattern: Regular expression pattern to search for.
         directory: Directory to search in. Defaults to current directory.
         file_glob: Optional glob to filter which files to search (e.g. '*.py').
+        context_lines: Lines of context to show before and after each match (like grep -C).
+            Use this to see the surrounding code without needing a separate read_file call.
+            E.g. context_lines=10 shows the function body around a def match.
     """
     import re
 
@@ -449,6 +588,9 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "") -> str:
         return f"Invalid regex pattern: {e}"
 
     results = []
+    match_count = 0
+    MAX_MATCHES = 15 if context_lines > 0 else 30
+
     for root, dirs, files in walk_filtered(directory):
         for filename in files:
             if file_glob and not fnmatch.fnmatch(filename, file_glob):
@@ -457,17 +599,60 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "") -> str:
             rel_path = os.path.relpath(filepath, directory)
             try:
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                    for i, line in enumerate(f, 1):
+                    lines = f.readlines()
+
+                if context_lines > 0:
+                    # Collect match line indices
+                    match_indices = [i for i, line in enumerate(lines) if regex.search(line)]
+                    if not match_indices:
+                        continue
+
+                    # Merge overlapping context windows
+                    shown: set[int] = set()
+                    blocks = []
+                    current_block: list[str] = []
+                    for mi in match_indices:
+                        start = max(0, mi - context_lines)
+                        end = min(len(lines), mi + context_lines + 1)
+                        for li in range(start, end):
+                            if li not in shown:
+                                if current_block and li > max(shown) + 1:
+                                    blocks.append(current_block)
+                                    current_block = []
+                                shown.add(li)
+                                marker = ">" if li == mi else " "
+                                current_block.append(f"{rel_path}:{li + 1}:{marker} {lines[li].rstrip()}")
+                    if current_block:
+                        blocks.append(current_block)
+
+                    for block in blocks:
+                        results.extend(block)
+                        results.append("---")
+                    match_count += len(match_indices)
+                else:
+                    for i, line in enumerate(lines, 1):
                         if regex.search(line):
                             results.append(f"{rel_path}:{i}: {line.rstrip()}")
+                            match_count += 1
+
             except (OSError, PermissionError):
                 continue
 
+        if match_count >= MAX_MATCHES and context_lines == 0:
+            break
+
     if not results:
         return f"No matches found for pattern: {pattern}"
-    if len(results) > 30:
-        return "\n".join(results[:30]) + f"\n... and {len(results) - 30} more matches (use a more specific pattern to narrow results)"
-    return "\n".join(results)
+
+    # Trim trailing separator
+    if results and results[-1] == "---":
+        results.pop()
+
+    if context_lines == 0 and match_count > MAX_MATCHES:
+        output = "\n".join(results[:MAX_MATCHES]) + f"\n... and {match_count - MAX_MATCHES} more matches (use a more specific pattern to narrow results)"
+    else:
+        output = "\n".join(results)
+    return _truncate_output(output)
 
 
 def list_directory(directory: str = ".") -> str:
@@ -604,13 +789,8 @@ _TRUNCATE_KEEP = 3_000  # chars to keep from start and end
 
 def _truncate_output(text: str) -> str:
     """Truncate long tool output to save tokens. Keeps start + end with a marker in the middle."""
-    if len(text) <= _MAX_OUTPUT_CHARS:
-        return text
-    return (
-        text[:_TRUNCATE_KEEP]
-        + f"\n\n[...truncated {len(text) - 2 * _TRUNCATE_KEEP:,} chars...]\n\n"
-        + text[-_TRUNCATE_KEEP:]
-    )
+    from aru.context import truncate_output
+    return truncate_output(text)
 
 
 def _is_long_running(command: str) -> bool:
@@ -623,13 +803,12 @@ def _is_long_running(command: str) -> bool:
 
 
 def run_command(command: str, timeout: int = 60, working_directory: str = "") -> str:
-    """Execute a shell command and return its output. Use this for any system operation:
-    git commands, running tests, installing packages, building projects, checking processes, etc.
+    """Execute a shell command and return output.
 
     Args:
-        command: The shell command to execute (e.g. 'git status', 'python -m pytest', 'npm install').
-        timeout: Max seconds to wait for the command to finish. Defaults to 60.
-        working_directory: Directory to run the command in. Defaults to current working directory.
+        command: The command to execute.
+        timeout: Max seconds. Default 60.
+        working_directory: Directory to run in. Default: cwd.
     """
     cwd = working_directory or os.getcwd()
 
@@ -814,19 +993,12 @@ def _is_safe_command(command: str) -> bool:
 
 
 def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
-    """Execute a bash command. This is your primary tool for interacting with the system.
-    Use it for:
-    - Running tests: 'python -m pytest tests/'
-    - Git operations: 'git status', 'git diff', 'git add', 'git commit'
-    - Installing packages: 'pip install', 'npm install', 'uv add'
-    - Building projects: 'make', 'cargo build', 'go build'
-    - Checking system state: 'ls', 'ps', 'env', 'which'
-    - Any other shell command
+    """Execute a shell command (tests, git, install, build, etc).
 
     Args:
-        command: The bash command to execute.
-        timeout: Max seconds to wait. Defaults to 60.
-        working_directory: Directory to run in. Defaults to current working directory.
+        command: The command to execute.
+        timeout: Max seconds to wait. Default 60.
+        working_directory: Directory to run in. Default: cwd.
     """
     cwd = working_directory or os.getcwd()
     if not _is_safe_command(command):
@@ -886,12 +1058,11 @@ def _html_to_text(html_content: str) -> str:
 
 
 def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web and return results. Use this to find information about frameworks,
-    libraries, APIs, error messages, or any topic where online knowledge would help.
+    """Search the web for information.
 
     Args:
-        query: The search query (e.g. 'agno framework python', 'FastAPI websocket example').
-        max_results: Maximum number of results to return (default 5).
+        query: The search query.
+        max_results: Max results to return (default 5).
     """
     import re as _re
     import urllib.parse
@@ -934,15 +1105,12 @@ def web_search(query: str, max_results: int = 5) -> str:
     return "\n\n".join(results)
 
 
-def web_fetch(url: str, max_chars: int = 15000) -> str:
-    """Fetch a URL and return its content as readable text.
-
-    Use this to read web pages, GitHub repos/issues/PRs, documentation,
-    API responses, or any publicly accessible URL.
+def web_fetch(url: str, max_chars: int = 8000) -> str:
+    """Fetch a URL and return content as text.
 
     Args:
         url: The URL to fetch.
-        max_chars: Maximum characters to return (default 15000) to avoid overwhelming context.
+        max_chars: Max characters to return (default 8000).
     """
     try:
         with httpx.Client(follow_redirects=True, timeout=30) as client:
@@ -970,7 +1138,7 @@ def web_fetch(url: str, max_chars: int = 15000) -> str:
 
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
-    return text
+    return _truncate_output(text)
 
 
 _SUBAGENT_COUNTER = 0
@@ -1010,21 +1178,12 @@ _SUBAGENT_TOOLS = [
 
 
 async def delegate_task(task: str, context: str = "") -> str:
-    """Delegate a task to a sub-agent that runs autonomously and returns the result.
-
-    Use this when you need to:
-    - Research a part of the codebase while continuing other work
-    - Perform an independent subtask (e.g., fix file A while you work on file B)
-    - Explore or gather information without cluttering your own context
-
-    The sub-agent has the same tools as you (read, write, edit, search, bash, web_fetch)
-    but cannot delegate further.
-
-    Multiple delegate_task calls issued in the same response run concurrently.
+    """Delegate a task to a sub-agent that runs autonomously. Multiple calls run concurrently.
+    Use for independent research or subtasks to keep your own context clean.
 
     Args:
-        task: Clear, specific description of what the sub-agent should do.
-        context: Optional extra context (e.g., relevant file paths, constraints).
+        task: What the sub-agent should do.
+        context: Optional extra context (file paths, constraints).
     """
     from agno.agent import Agent
     from aru.providers import create_model
@@ -1056,7 +1215,7 @@ Do not create documentation files unless explicitly asked.
     try:
         result = await sub.arun(task, stream=False)
         if result and result.content:
-            return f"[SubAgent-{agent_id}] {result.content}"
+            return _truncate_output(f"[SubAgent-{agent_id}] {result.content}")
         return f"[SubAgent-{agent_id}] Task completed but no output was returned."
     except Exception as e:
         return f"[SubAgent-{agent_id}] Error: {e}"
