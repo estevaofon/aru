@@ -2,7 +2,8 @@
 
 Um assistente de codificação inteligente para o terminal, powered by LLMs e [Agno](https://github.com/agno-agi/agno) agents.
 </br></br>
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/164298dc-8ac5-46c4-80ed-6c782373f61e" />
+<img width="600" alt="image" src="https://github.com/user-attachments/assets/36001faa-3163-4374-84fd-da8704a4ed9d" />
+
 
 
 ## Destaques
