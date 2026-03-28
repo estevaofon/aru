@@ -149,12 +149,14 @@ def _render_home(session: "Session", skip_permissions: bool) -> None:
     """Render a clean home screen inspired by Claude Code."""
     from rich.table import Table
 
+    from aru import __version__
+
     logo = Text("\n")
     for line in aru_logo.strip("\n").split("\n"):
         logo.append("  " + line + "\n", style=f"bold {neon_green}")
     console.print(logo)
     console.print(
-        Text("  A coding agent powered by multiple LLM providers + Agno", style="dim"),
+        Text.from_markup(f"  [dim]A coding agent powered by multiple LLM providers + Agno[/dim]  [bold {neon_green}]v{__version__}[/bold {neon_green}]"),
     )
     console.print()
 
