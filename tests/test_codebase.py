@@ -6,6 +6,7 @@ from aru.tools.codebase import (
     get_project_tree, _is_safe_command, _shell_split, _is_long_running,
     _html_to_text, clear_read_cache, set_on_file_mutation,
     reset_allowed_actions, _read_cache, _allowed_actions,
+    read_file_smart,
 )
 
 
@@ -520,3 +521,17 @@ class TestCacheAndCallbacks:
 
         reset_allowed_actions()
         assert len(_allowed_actions) == 0
+
+
+@pytest.mark.asyncio
+async def test_read_file_smart_below_threshold(tmp_path):
+    """Test that read_file_smart returns raw content when file is small (≤ 3_000 chars)."""
+    f = tmp_path / "small.py"
+    # Content well under the 3_000-char threshold
+    f.write_text("def add(a, b):\n    return a + b\n")
+
+    result = await read_file_smart(str(f), query="What does this file do?")
+
+    # Should return raw content, not a model-generated answer
+    assert "def add(a, b):" in result
+    assert "return a + b" in result
