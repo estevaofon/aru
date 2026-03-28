@@ -25,7 +25,6 @@ aru/
 └── tools/
     ├── codebase.py     # 16 core tools (read/write/edit/search/bash/web/delegate)
     ├── ast_tools.py    # Tree-sitter Python AST analysis (classes, functions, imports)
-    ├── indexer.py       # Chromadb semantic indexing (chunked file embeddings)
     ├── ranker.py        # Multi-factor file relevance scoring
     └── gitignore.py     # .gitignore-aware file filtering with caching
 ```
@@ -65,7 +64,7 @@ Loads project-level customization into an `AgentConfig` object:
 | Category | Tools |
 |----------|-------|
 | File I/O | `read_file`, `write_file`, `write_files`, `edit_file`, `edit_files` |
-| Search | `glob_search`, `grep_search`, `semantic_search`, `rank_files`, `list_directory` |
+| Search | `glob_search`, `grep_search`, `rank_files`, `list_directory` |
 | Analysis | `code_structure`, `find_dependencies` |
 | Shell | `bash`, `run_command` |
 | Web | `web_search`, `web_fetch` |
@@ -73,15 +72,9 @@ Loads project-level customization into an `AgentConfig` object:
 
 Permission model: read-only tools auto-approve; write/bash tools prompt user (with "allow all" option). Safe command prefixes whitelist ~40 read-only shell commands.
 
-### `tools/indexer.py` — Semantic Search
-
-- Chromadb vector DB persisted in `.aru/chroma/`
-- Chunks files (1500 chars, 200 overlap), tracks mtimes in `.aru/index_meta.json`
-- Lazy init on first `semantic_search` call
-
 ### `tools/ranker.py` — File Relevance Ranking
 
-Score = `0.45 * semantic + 0.25 * name_match + 0.20 * structural + 0.10 * recency`
+Score = `0.50 * name_match + 0.30 * structural + 0.20 * recency`
 
 ### `tools/ast_tools.py` — AST Analysis
 
@@ -91,13 +84,11 @@ Tree-sitter based Python parser. Extracts imports, classes, functions, decorator
 
 - `.env` → `ANTHROPIC_API_KEY`
 - `.aru/sessions/` → Saved conversation sessions (JSON)
-- `.aru/chroma/` → Chromadb embeddings
-- `.aru/index_meta.json` → File indexing metadata
 - `.claude/settings.local.json` → Permission allowlists
 
 ## Dependencies
 
-Core: `agno`, `anthropic`, `chromadb>=0.5`, `tree-sitter>=0.23`, `tree-sitter-python`, `prompt-toolkit>=3.0`, `rich`, `pathspec>=0.12`, `art>=6.0`, `python-dotenv`, `httpx`, `sqlalchemy>=2.0.48`
+Core: `agno`, `anthropic`, `tree-sitter>=0.23`, `tree-sitter-python`, `prompt-toolkit>=3.0`, `rich`, `pathspec>=0.12`, `art>=6.0`, `python-dotenv`, `httpx`, `sqlalchemy>=2.0.48`
 
 Python: **3.13+**
 
@@ -110,13 +101,9 @@ The project uses a local `.venv` virtual environment. When using the `bash` tool
 **For bash tool commands, use one of these patterns:**
 
 ```bash
-# Option 1: Use venv executables directly
-.venv/bin/pytest
-.venv/bin/pytest --cov=aru --cov-report=term-missing
-
-# Option 2: Use python -m if venv is already active in parent shell
-python -m pytest
-python -m pytest --cov=aru --cov-report=term-missing
+# Windows (correct form)
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest --cov=aru --cov-report=term-missing
 ```
 
 **Important:** Always prefer `--cov-report=term-missing` over `--cov-report=html` when running coverage tests. The HTML report consumes significantly more memory and can cause the process to be killed by the OOM killer, especially in memory-constrained environments like WSL2.

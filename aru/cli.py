@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from prompt_toolkit import PromptSession
@@ -30,7 +31,7 @@ from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
 from aru.config import AgentConfig, load_config, render_command_template
 from aru.providers import (
-    LEGACY_MODEL_ALIASES,
+    MODEL_ALIASES,
     create_model,
     get_model_display,
     list_providers,
@@ -64,6 +65,27 @@ neon_green = "#39ff14" # Um verde bem "fósforo brilhante"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
 
 
+def format_duration(seconds: float) -> str:
+    """Format a duration in seconds to a human-readable string.
+
+    Examples:
+        0.5   -> "500ms"
+        1.0   -> "1s"
+        90.0  -> "1m 30s"
+        3661  -> "1h 1m 1s"
+    """
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def _sanitize_input(text: str) -> str:
     """Remove lone UTF-16 surrogates that Windows clipboard can introduce."""
     return text.encode("utf-8", errors="replace").decode("utf-8")
@@ -73,11 +95,14 @@ _MENTION_RE = re.compile(r'(?<!\S)@([a-zA-Z0-9_./\\-]+)')
 _MENTION_MAX_SIZE = 30_000  # bytes, same limit as read_file
 
 
-def _resolve_mentions(text: str, cwd: str) -> str:
-    """Resolve @file mentions by appending file contents to the message."""
+def _resolve_mentions(text: str, cwd: str) -> tuple[str, int]:
+    """Resolve @file mentions by appending file contents to the message.
+
+    Returns (resolved_text, number_of_files_attached).
+    """
     matches = list(_MENTION_RE.finditer(text))
     if not matches:
-        return text
+        return text, 0
 
     appendix_parts = []
     seen = set()
@@ -105,8 +130,8 @@ def _resolve_mentions(text: str, cwd: str) -> str:
             continue
 
     if appendix_parts:
-        return text + "".join(appendix_parts)
-    return text
+        return text + "".join(appendix_parts), len(appendix_parts)
+    return text, 0
 
 
 TIPS = [
@@ -432,7 +457,7 @@ class Session:
     # Approximate chars-per-token ratio for estimation (conservative)
     _CHARS_PER_TOKEN = 3.5
     # History summarization threshold: summarize oldest messages when history exceeds this
-    _HISTORY_SUMMARIZE_THRESHOLD = 12
+    _HISTORY_SUMMARIZE_THRESHOLD = 20
     _HISTORY_SUMMARIZE_COUNT = 6  # number of oldest messages to condense
 
     def __init__(self, session_id: str | None = None):
@@ -572,25 +597,66 @@ class Session:
         if len(self.history) > self._HISTORY_SUMMARIZE_THRESHOLD:
             self._summarize_old_messages()
         # Hard cap as safety net
-        if len(self.history) > 20:
-            self.history = self.history[-20:]
+        if len(self.history) > 30:
+            self.history = self.history[-30:]
 
     def _summarize_old_messages(self):
-        """Condense the oldest messages into a single summary message."""
+        """Condense the oldest messages into a single summary message.
+
+        Preserves [Tools] and [Plan] sections so the model knows what actions
+        were taken even after summarization.
+        """
         n = self._HISTORY_SUMMARIZE_COUNT
         old = self.history[:n]
         rest = self.history[n:]
         summary_parts = []
         for msg in old:
             role = msg["role"]
-            # Truncate each message to keep summary compact
-            text = msg["content"][:200]
-            if len(msg["content"]) > 200:
+            content = msg["content"]
+            # Extract [Tools] section before truncating
+            tools_section = ""
+            tools_idx = content.find("\n[Tools]\n")
+            if tools_idx != -1:
+                tools_section = content[tools_idx:]
+            # Truncate the main text but keep tools metadata
+            text = content[:300] if tools_idx == -1 else content[:tools_idx][:300]
+            if len(content) > 300:
                 text += "..."
+            if tools_section:
+                text += tools_section
             summary_parts.append(f"[{role}]: {text}")
         summary = "[Conversation summary of earlier messages]\n" + "\n".join(summary_parts)
         self.history = [{"role": "user", "content": summary}] + rest
         self.updated_at = datetime.now().isoformat(timespec="milliseconds")
+
+    def compact_history(self, max_tokens: int) -> int:
+        """Remove oldest messages until the estimated token total is below max_tokens.
+
+        Token count is estimated from the total character length of all messages
+        using the class-level _CHARS_PER_TOKEN ratio (3.5 chars ≈ 1 token).
+
+        Messages are dropped from the front of the history (oldest first).
+        If a single message already exceeds max_tokens, the history is reduced
+        to that one message only.
+
+        Args:
+            max_tokens: Target token ceiling for the conversation history.
+
+        Returns:
+            Number of messages removed.
+        """
+        def _total_tokens() -> int:
+            return sum(self.estimate_tokens(m["content"]) for m in self.history)
+
+        removed = 0
+        while self.history and _total_tokens() > max_tokens:
+            self.history.pop(0)
+            removed += 1
+
+        if removed:
+            self.updated_at = datetime.now().isoformat(timespec="milliseconds")
+
+        return removed
 
     def to_dict(self) -> dict:
         return {
@@ -616,7 +682,7 @@ class Session:
         model_ref = data.get("model_ref")
         if not model_ref:
             legacy_key = data.get("model_key", "sonnet")
-            model_ref = LEGACY_MODEL_ALIASES.get(legacy_key, DEFAULT_MODEL)
+            model_ref = MODEL_ALIASES.get(legacy_key, DEFAULT_MODEL)
         session.model_ref = model_ref
         session.cwd = data.get("cwd", os.getcwd())
         session.created_at = data.get("created_at", "")
@@ -765,22 +831,22 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
     from agno.agent import Agent
     from agno.compression.manager import CompressionManager
 
-    from aru.tools.codebase import ALL_TOOLS, _get_small_model_ref
+    from aru.tools.codebase import GENERAL_TOOLS, _get_small_model_ref
 
     extra = config.get_extra_instructions() if config else ""
 
     return Agent(
         name="Aru",
         model=create_model(session.model_ref, max_tokens=8192),
-        tools=ALL_TOOLS,
+        tools=GENERAL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,
-        # Compress tool results after 5 uncompressed tool calls to save tokens
+        # Compress tool results after 4 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=5,
+            compress_tool_results_limit=4,
         ),
         tool_call_limit=20,
     )
@@ -914,10 +980,29 @@ class StatusBar:
         return Measurement(1, options.max_width)
 
 
+@dataclass
+class AgentRunResult:
+    """Result from run_agent_capture including text output and tool call history."""
+    content: str | None = None
+    tool_calls: list[str] = field(default_factory=list)
+
+    def with_tools_summary(self) -> str | None:
+        """Return content with appended tool call summary for session history."""
+        if not self.content:
+            return self.content
+        if not self.tool_calls:
+            return self.content
+        tools_section = "\n".join(f"  - {t}" for t in self.tool_calls)
+        return f"{self.content}\n\n[Tools]\n{tools_section}"
+
+
+# Categories of tools that modify files (for highlighting in history)
+_MUTATION_TOOLS = {"write_file", "write_files", "edit_file", "edit_files", "bash", "run_command"}
+
+
 TOOL_DISPLAY_NAMES = {
     "read_file": "Read",
     "read_file_smart": "ReadSmart",
-    "delegate_research": "Research",
     "write_file": "Write",
     "write_files": "Write",
     "edit_file": "Edit",
@@ -926,7 +1011,6 @@ TOOL_DISPLAY_NAMES = {
     "grep_search": "Grep",
     "list_directory": "List",
     "bash": "Bash",
-    "semantic_search": "Semantic",
     "code_structure": "Structure",
     "find_dependencies": "Deps",
     "rank_files": "Rank",
@@ -941,7 +1025,6 @@ TOOL_PRIMARY_ARG = {
     "grep_search": "pattern",
     "list_directory": "directory",
     "bash": "command",
-    "semantic_search": "query",
     "code_structure": "file_path",
     "find_dependencies": "file_path",
     "rank_files": "task",
@@ -1065,7 +1148,7 @@ class StreamingDisplay:
         return Measurement(1, options.max_width)
 
 
-async def run_agent_capture(agent, message: str, session: "Session | None" = None, lightweight: bool = False) -> str | None:
+async def run_agent_capture(agent, message: str, session: "Session | None" = None, lightweight: bool = False) -> AgentRunResult:
     """Run agent with async streaming display and parallel tool execution.
 
     Args:
@@ -1073,6 +1156,9 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         message: The user message/prompt.
         session: Optional session for history and context.
         lightweight: If True, skip tree/git/plan context and history (for executor steps).
+
+    Returns:
+        AgentRunResult with text content and list of tool call labels.
     """
     from agno.models.message import Message
     from agno.run.agent import (
@@ -1084,6 +1170,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
     console.print()
     final_content = None
+    collected_tool_calls: list[str] = []
 
     try:
         from aru.tools.codebase import set_display, set_live
@@ -1160,6 +1247,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
                         tool_args = getattr(event, "tool_args", None)
                         tool_id = getattr(event, "tool_call_id", None) or tool_name
                     label = _format_tool_label(tool_name, tool_args)
+                    collected_tool_calls.append(label)
                     # Flush any accumulated content before tool runs
                     if accumulated[display._flushed_len:]:
                         live.stop()
@@ -1251,7 +1339,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         console.print(f"[red]Error: {escape(str(e))}[/red]")
 
     console.print()
-    return final_content
+    return AgentRunResult(content=final_content, tool_calls=collected_tool_calls)
 
 
 def ask_yes_no(prompt: str) -> bool:
@@ -1263,12 +1351,50 @@ def ask_yes_no(prompt: str) -> bool:
         return False
 
 
+def _extract_plan_file_paths(plan_text: str) -> list[str]:
+    """Extract file paths mentioned in plan steps (e.g., 'in `aru/cli.py`')."""
+    # Match backtick-quoted paths that look like file paths
+    matches = re.findall(r"`([^`]+\.\w{1,5})`", plan_text or "")
+    seen = set()
+    paths = []
+    for m in matches:
+        norm = os.path.normpath(m)
+        if norm not in seen and os.path.isfile(norm):
+            seen.add(norm)
+            paths.append(norm)
+    return paths
+
+
+def _build_file_context(file_paths: list[str], max_total: int = 20_000) -> str:
+    """Read files and build a context string, respecting a total char budget."""
+    if not file_paths:
+        return ""
+    parts = []
+    total = 0
+    for path in file_paths:
+        try:
+            content = open(path, "r", encoding="utf-8").read()
+            if total + len(content) > max_total:
+                continue
+            total += len(content)
+            parts.append(f"### `{path}`\n```\n{content}\n```")
+        except Exception:
+            continue
+    if not parts:
+        return ""
+    return "## Pre-loaded file contents (do NOT re-read these files)\n\n" + "\n\n".join(parts)
+
+
 async def execute_plan_steps(session: Session, executor_factory) -> str | None:
     """Execute plan steps one by one with live progress tracking.
 
     Shows a checkbox progress panel that updates as each step completes.
     Each step runs as a separate executor call with full context.
     """
+    # Pre-load files mentioned in the plan to avoid redundant reads per step
+    plan_files = _extract_plan_file_paths(session.current_plan)
+    file_context = _build_file_context(plan_files)
+
     if not session.plan_steps:
         # No structured steps — fall back to single execution
         executor = executor_factory()
@@ -1277,7 +1403,8 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
             f"## Task\n{session.plan_task}\n\n"
             f"## Plan\n{session.current_plan}"
         )
-        return await run_agent_capture(executor, exec_prompt, session, lightweight=True)
+        run_result = await run_agent_capture(executor, exec_prompt, session, lightweight=True)
+        return run_result.with_tools_summary()
 
     all_results = []
     completed_context = ""
@@ -1300,20 +1427,28 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
         # Build step-specific prompt — compact to save tokens
         # Only show current step + compact progress (not full descriptions of other steps)
         compact_progress = session.render_compact_progress(step.index)
-        step_prompt = (
-            f"## Task: {session.plan_task}\n\n"
-            f"## Current Step ({step.index}/{len(session.plan_steps)})\n{step.description}\n\n"
-            f"## Progress\n{compact_progress}\n"
-            "\nIMPORTANT: Just execute this step. Do NOT repeat completed steps or summarize."
-        )
+        step_prompt_parts = [
+            f"## Task: {session.plan_task}\n",
+            f"## Current Step ({step.index}/{len(session.plan_steps)})\n{step.description}\n",
+            f"## Progress\n{compact_progress}\n",
+            "IMPORTANT: Just execute this step. Do NOT repeat completed steps or summarize.",
+        ]
+        if file_context:
+            step_prompt_parts.insert(1, file_context)
+        step_prompt = "\n".join(step_prompt_parts)
 
         # Execute this step (lightweight=True to skip tree/git/history)
         executor = executor_factory()
         try:
-            result = await run_agent_capture(executor, step_prompt, session, lightweight=True)
-            if result:
+            run_result = await run_agent_capture(executor, step_prompt, session, lightweight=True)
+            if run_result.content:
                 step.status = "completed"
-                all_results.append(f"### Step {step.index}: {step.description}\n{result}")
+                # Include tool calls per step for rich history
+                step_text = f"### Step {step.index}: {step.description}\n{run_result.content}"
+                if run_result.tool_calls:
+                    tools_str = ", ".join(run_result.tool_calls)
+                    step_text += f"\nTools: {tools_str}"
+                all_results.append(step_text)
                 completed_context += f"\n- Step {step.index} ({step.description}): Done"
             else:
                 step.status = "completed"
@@ -1362,6 +1497,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 "anthropic": "anthropic/claude-haiku-4-5",
                 "openai": "openai/gpt-4o-mini",
                 "groq": "groq/llama-3.1-8b-instant",
+                "deepseek": "deepseek/deepseek-chat",
+                "ollama": "ollama/llama3.1",
             }
             small_ref = _small_defaults.get(provider_key, sess.model_ref)
         set_small_model_ref(small_ref)
@@ -1417,17 +1554,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     paste_state = PasteState()
     prompt_session = _create_prompt_session(paste_state, config)
 
-    # Parallel startup: MCP tools + background index warm-up
+    # Startup: load MCP tools
     from aru.tools.codebase import load_mcp_tools
-    from aru.tools.indexer import warm_up_index
-
-    async def _startup_mcp():
-        await load_mcp_tools()
-
-    async def _startup_index():
-        await asyncio.to_thread(warm_up_index)
-
-    await asyncio.gather(_startup_mcp(), _startup_index())
+    await load_mcp_tools()
 
     while True:
         try:
@@ -1452,9 +1581,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         user_input = _sanitize_input(paste_state.build_message(user_text))
 
         # Resolve @file mentions
-        resolved = _resolve_mentions(user_input, os.getcwd())
+        resolved, injected = _resolve_mentions(user_input, os.getcwd())
         if resolved != user_input:
-            injected = resolved.count("Contents of ")
             console.print(f"[dim]Attached {injected} file(s) from @ mentions[/dim]")
             user_input = resolved
 
@@ -1482,13 +1610,21 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             await cleanup_mcp()
             break
 
-        if user_input.startswith("/model"):
+        if user_input == "/model" or user_input.startswith("/model "):
             arg = user_input[6:].strip()
             if not arg:
                 console.print(f"[bold]Current model:[/bold] {session.model_display} ({session.model_id})")
                 console.print()
-                console.print("[bold]Legacy aliases:[/bold]")
-                for alias, ref in LEGACY_MODEL_ALIASES.items():
+                # Show model aliases from aru.json
+                if config.model_defaults:
+                    non_default = {k: v for k, v in config.model_defaults.items() if k != "default"}
+                    if non_default:
+                        console.print("[bold]Model aliases (aru.json):[/bold]")
+                        for alias, ref in non_default.items():
+                            console.print(f"  [cyan]{alias}[/cyan] → {ref}")
+                        console.print()
+                console.print("[bold]Aliases:[/bold]")
+                for alias, ref in MODEL_ALIASES.items():
                     console.print(f"  [cyan]{alias}[/cyan] → {ref}")
                 console.print()
                 console.print("[bold]Providers:[/bold]")
@@ -1500,16 +1636,18 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             else:
                 arg_lower = arg.lower()
                 try:
+                    # Resolve config aliases (aru.json "models" section) first
+                    resolved_ref = config.model_defaults.get(arg_lower, arg_lower) if config.model_defaults else arg_lower
                     # Validate the model reference resolves to a known provider
-                    provider_key, model_name = resolve_model_ref(arg_lower)
+                    provider_key, model_name = resolve_model_ref(resolved_ref)
                     from aru.providers import get_provider
                     provider = get_provider(provider_key)
                     if provider is None:
                         available = ", ".join(sorted(list_providers().keys()))
                         console.print(f"[yellow]Unknown provider '{provider_key}'. Available: {available}[/yellow]")
                     else:
-                        session.model_ref = arg_lower if "/" in arg_lower else (
-                            LEGACY_MODEL_ALIASES.get(arg_lower, arg_lower)
+                        session.model_ref = resolved_ref if "/" in resolved_ref else (
+                            MODEL_ALIASES.get(resolved_ref, resolved_ref)
                         )
                         _sync_model(session)
                         planner = None
@@ -1593,7 +1731,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             # No need to manually inject session context into prompt; run_agent_capture will do it.
             prompt = task
 
-            plan_content = await run_agent_capture(planner, prompt, session)
+            plan_result = await run_agent_capture(planner, prompt, session, lightweight=True)
+            plan_content = plan_result.content
 
             if plan_content and config and config.plan_reviewer:
                 console.print("[dim]Reviewing scope...[/dim]")
@@ -1639,9 +1778,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
                 agent = create_general_agent(session, config)
                 session.add_message("user", user_input)
-                result = await run_agent_capture(agent, prompt, session)
-                if result:
-                    session.add_message("assistant", result)
+                run_result = await run_agent_capture(agent, prompt, session)
+                if run_result.content:
+                    session.add_message("assistant", run_result.with_tools_summary())
             else:
                 console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
                 console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /quit[/dim]")
@@ -1651,9 +1790,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         else:
             agent = create_general_agent(session, config)
             session.add_message("user", user_input)
-            result = await run_agent_capture(agent, user_input, session)
-            if result:
-                session.add_message("assistant", result)
+            run_result = await run_agent_capture(agent, user_input, session)
+            if run_result.content:
+                session.add_message("assistant", run_result.with_tools_summary())
 
         # Show token usage and auto-save
         if session.token_summary:

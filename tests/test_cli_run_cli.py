@@ -1,0 +1,1 @@
+[['Hello, world!', '/quit'], ['/plan Create a new feature', 'y', '/quit'], ['/custom-command argument', '/quit'], {'custom-command': 'mock_command_def'}, ['/model anthropic/claude-opus-4-5', 'Hello', '/quit']]

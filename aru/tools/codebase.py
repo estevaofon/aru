@@ -38,6 +38,7 @@ def set_on_file_mutation(callback):
 
 def _notify_file_mutation():
     """Notify the session that files changed so caches are invalidated."""
+    _read_cache.clear()
     if _on_file_mutation:
         _on_file_mutation()
 
@@ -161,18 +162,48 @@ def _ask_permission(action: str, details: str | Text | Group) -> bool:
         return allowed
 
 
+# Hard ceiling per tool result (~15K tokens). Even max_size=0 respects this per chunk.
+_READ_HARD_CAP = 60_000  # bytes
+
+# Per-session read cache: avoids re-reading the same file+range multiple times.
+# Key = (resolved_path, start_line, end_line, max_size), Value = short metadata description.
+_read_cache: dict[tuple, str] = {}
+
+
+def clear_read_cache():
+    """Clear the read cache. Call after file mutations to avoid stale data."""
+    _read_cache.clear()
+
+
 def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 15_000) -> str:
-    """Read file contents. Use start_line/end_line for large files.
+    """Read file contents. Returns chunked output for large files.
 
     Args:
         file_path: Path to the file (absolute or relative).
         start_line: First line (1-indexed, inclusive). 0 = beginning.
         end_line: Last line (1-indexed, inclusive). 0 = end.
         max_size: Max bytes before truncation. Default 15KB.
+            Set to 0 to read the full file in chunks — each chunk up to ~60KB.
+            The first chunk includes a continuation hint so you can call again
+            with start_line to get the next chunk.
     """
     try:
+        resolved = os.path.abspath(file_path)
+        cache_key = (resolved, start_line, end_line, max_size)
+        # Only cache specific range reads — full-file reads may have been compressed
+        # out of context, so blocking them causes the agent to get stuck
+        if cache_key in _read_cache and (start_line > 0 or end_line > 0):
+            lines_info = _read_cache[cache_key]
+            return (
+                f"[cached] Already read ({lines_info})."
+                f" Use the content from your earlier call."
+            )
+
         # Check if file exists and get size
         file_size = os.path.getsize(file_path)
+
+        full_read = max_size == 0
+        effective_limit = _READ_HARD_CAP if full_read else max_size
 
         # Detect binary files by checking for null bytes in the first 1KB
         with open(file_path, "rb") as f:
@@ -191,42 +222,76 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
             s = max(start_line, 1) - 1  # Convert to 0-indexed
             e = end_line if end_line > 0 else total_lines
             e = min(e, total_lines)
-            
-            # Cap the maximum lines returned to prevent huge context blowouts
-            max_lines = 1000
-            truncated = False
-            if e - s > max_lines:
-                e = s + max_lines
-                truncated = True
-                
-            selected = lines[s:e]
-            numbered = [f"{s + i + 1:4d} | {line}" for i, line in enumerate(selected)]
-            header = f"[Lines {s + 1}-{e} of {total_lines}]\n"
-            result = header + "".join(numbered)
-            if truncated:
-                result += f"\n\n[WARNING] Output truncated to {max_lines} lines. Use a smaller range to read further."
-            return result
 
-        # Full file mode with size limit
-        if file_size > max_size:
-            # Read up to max_size bytes worth of lines
+            selected = lines[s:e]
+
+            # Apply chunk limit based on bytes
             accumulated = []
             char_count = 0
-            for i, line in enumerate(lines):
+            for i, line in enumerate(selected):
                 char_count += len(line)
-                if char_count > max_size:
+                if char_count > effective_limit:
                     break
-                accumulated.append(f"{i + 1:4d} | {line}")
-            lines_shown = len(accumulated)
-            return (
-                "".join(accumulated)
-                + f"\n\n[WARNING] File truncated at ~{max_size:,} bytes ({file_size:,} total, "
-                + f"{lines_shown}/{total_lines} lines shown). "
-                + "Use start_line/end_line to read specific sections."
-            )
+                accumulated.append(f"{s + i + 1:4d} | {line}")
 
-        numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
-        return _truncate_output("".join(numbered))
+            lines_returned = len(accumulated)
+            actual_end = s + lines_returned
+            header = f"[Lines {s + 1}-{actual_end} of {total_lines}]\n"
+            result = header + "".join(accumulated)
+
+            if lines_returned < len(selected):
+                next_start = actual_end + 1
+                result += (
+                    f"\n\n[CHUNK] Returned {lines_returned} of {e - s} requested lines."
+                    f" Call read_file(\"{file_path}\", start_line={next_start}, end_line={e})"
+                    f" to continue."
+                )
+            _read_cache[cache_key] = f"{lines_returned} lines returned"
+            return result
+
+        # Full file mode — check if it fits in one chunk
+        if file_size <= effective_limit:
+            numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
+            output = "".join(numbered)
+            result = output if full_read else _truncate_output(output)
+            _read_cache[cache_key] = f"{total_lines} lines"
+            return result
+
+        # File exceeds limit — return first chunk + outline of the rest
+        # First chunk: up to effective_limit bytes
+        accumulated = []
+        char_count = 0
+        for i, line in enumerate(lines):
+            char_count += len(line)
+            if char_count > effective_limit and accumulated:
+                break
+            accumulated.append(f"{i + 1:4d} | {line}")
+            if char_count > effective_limit:
+                break
+
+        lines_shown = len(accumulated)
+        first_chunk = "".join(accumulated)
+
+        # Outline of remaining content (definitions after the first chunk)
+        import re as _re
+        toc_entries = []
+        toc_pattern = _re.compile(r"^(\s*)(def |class |async def )(\w+)")
+        for li in range(lines_shown, total_lines):
+            m = toc_pattern.match(lines[li])
+            if m:
+                indent = len(m.group(1))
+                prefix = "  " if indent > 0 else ""
+                toc_entries.append(f"{prefix}{m.group(2).strip()} {m.group(3)} (line {li + 1})")
+
+        outline = "\n".join(toc_entries) if toc_entries else "(no more definitions)"
+        result = (
+            f"{first_chunk}\n\n"
+            f"[Showing lines 1-{lines_shown} of {total_lines} ({file_size:,} bytes)]\n\n"
+            f"[Remaining definitions]\n{outline}\n\n"
+            f"To read more: read_file(\"{file_path}\", start_line={lines_shown + 1}, end_line=N)"
+        )
+        _read_cache[cache_key] = f"{lines_shown}/{total_lines} lines + outline"
+        return result
     except FileNotFoundError:
         return f"Error: File not found: {file_path}"
     except Exception as e:
@@ -298,75 +363,6 @@ async def read_file_smart(file_path: str, query: str) -> str:
     except Exception:
         return raw  # fallback to raw content on any error
 
-
-# Max chars returned by delegate_research to the Planner — keeps Planner context small
-_RESEARCH_RESULT_MAX_CHARS = 800
-
-
-async def delegate_research(task: str, query: str) -> str:
-    """Explore the codebase and answer a specific question — WITHOUT polluting your context.
-
-    DEFAULT TOOL FOR EXPLORATION. Use this whenever you do not already know the exact
-    file path that answers your question. The sub-agent runs in a clean isolated context:
-    its tool calls never appear in your history. You receive only the final answer (~600 chars).
-
-    Use read_file_smart / read_file ONLY when you are already certain of the exact file.
-    Use this tool for everything else — finding, understanding, verifying.
-
-    Args:
-        task: What to research (e.g., "understand how session persistence works").
-        query: The specific question to answer
-               (e.g., "which files and functions handle saving sessions to disk?").
-    """
-    from agno.agent import Agent
-    from aru.providers import create_model
-
-    agent_id = _next_subagent_id()
-    cwd = os.getcwd()
-    small_ref = _get_small_model_ref()
-
-    instructions = f"""\
-You are a research sub-agent (#{agent_id}). Your sole job is to answer a specific question \
-about this codebase. Be focused and concise — explore only what is needed to answer the query.
-
-Working directory: {cwd}
-
-Rules:
-- Answer ONLY the query. Do not summarize unrelated code.
-- Stop exploring as soon as you have enough information to answer.
-- Your final response must be a concise answer (under 600 chars if possible).
-- Do NOT create or modify any files.
-"""
-
-    # Read-only tools only — no write, bash, web, or nested delegation
-    research_tools = [
-        read_file, read_file_smart, glob_search, grep_search,
-        list_directory, semantic_search, code_structure,
-        find_dependencies, rank_files,
-    ]
-
-    sub = Agent(
-        name=f"Researcher-{agent_id}",
-        model=create_model(small_ref, max_tokens=1024),
-        tools=research_tools,
-        instructions=instructions,
-        markdown=False,
-        tool_call_limit=8,
-    )
-
-    prompt = f"Task: {task}\n\nAnswer this query: {query}"
-
-    try:
-        result = await sub.arun(prompt, stream=False)
-        answer = result.content.strip() if result and result.content else ""
-        if not answer:
-            return "[Research] No findings."
-        # Cap to keep Planner context small
-        if len(answer) > _RESEARCH_RESULT_MAX_CHARS:
-            answer = answer[:_RESEARCH_RESULT_MAX_CHARS] + "... [truncated]"
-        return f"[Research-{agent_id}] {answer}"
-    except Exception as e:
-        return f"[Research-{agent_id}] Error: {e}"
 
 
 def write_file(file_path: str, content: str) -> str:
@@ -557,7 +553,16 @@ def glob_search(pattern: str, directory: str = ".") -> str:
         for filename in files:
             filepath = os.path.join(root, filename)
             rel_path = os.path.relpath(filepath, directory)
-            if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(filename, pattern):
+            # Normalize to forward slashes for consistent fnmatch behaviour on Windows
+            rel_posix = rel_path.replace('\\', '/')
+            matched = fnmatch.fnmatch(rel_posix, pattern)
+            # For patterns like **/*.py, also match root-level files against the suffix
+            # because fnmatch requires a path separator before the file part
+            if not matched and pattern.startswith('**/'):
+                matched = fnmatch.fnmatch(filename, pattern[3:])
+            if not matched:
+                matched = fnmatch.fnmatch(filename, pattern)
+            if matched:
                 matches.append(rel_path)
 
     if not matches:
@@ -569,16 +574,15 @@ def glob_search(pattern: str, directory: str = ".") -> str:
     return "\n".join(matches)
 
 
-def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context_lines: int = 5) -> str:
+def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context_lines: int = 10) -> str:
     """Search for a regex pattern in file contents.
 
     Args:
         pattern: Regular expression pattern to search for.
         directory: Directory to search in. Defaults to current directory.
         file_glob: Optional glob to filter which files to search (e.g. '*.py').
-        context_lines: Lines of context to show before and after each match (like grep -C).
-            Use this to see the surrounding code without needing a separate read_file call.
-            E.g. context_lines=10 shows the function body around a def match.
+        context_lines: Lines of context before and after each match (like grep -C). Default 10.
+            Use 0 for file-level matches only. Use 30+ for full function bodies.
     """
     import re
 
@@ -589,7 +593,9 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
 
     results = []
     match_count = 0
-    MAX_MATCHES = 15 if context_lines > 0 else 30
+    files_with_matches: dict[str, list[int]] = {}  # rel_path -> list of match line numbers
+    MAX_MATCHES = 20 if context_lines > 0 else 50
+    stopped_early = False
 
     for root, dirs, files in walk_filtered(directory):
         for filename in files:
@@ -607,38 +613,46 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
                     if not match_indices:
                         continue
 
-                    # Merge overlapping context windows
-                    shown: set[int] = set()
-                    blocks = []
-                    current_block: list[str] = []
-                    for mi in match_indices:
-                        start = max(0, mi - context_lines)
-                        end = min(len(lines), mi + context_lines + 1)
-                        for li in range(start, end):
-                            if li not in shown:
-                                if current_block and li > max(shown) + 1:
-                                    blocks.append(current_block)
-                                    current_block = []
-                                shown.add(li)
-                                marker = ">" if li == mi else " "
-                                current_block.append(f"{rel_path}:{li + 1}:{marker} {lines[li].rstrip()}")
-                    if current_block:
-                        blocks.append(current_block)
+                    files_with_matches[rel_path] = [i + 1 for i in match_indices]
 
-                    for block in blocks:
-                        results.extend(block)
-                        results.append("---")
+                    # Only emit context blocks if we haven't exceeded the limit
+                    if match_count < MAX_MATCHES:
+                        # Merge overlapping context windows
+                        shown: set[int] = set()
+                        blocks = []
+                        current_block: list[str] = []
+                        for mi in match_indices:
+                            start = max(0, mi - context_lines)
+                            end = min(len(lines), mi + context_lines + 1)
+                            for li in range(start, end):
+                                if li not in shown:
+                                    if current_block and li > max(shown) + 1:
+                                        blocks.append(current_block)
+                                        current_block = []
+                                    shown.add(li)
+                                    marker = ">" if li == mi else " "
+                                    current_block.append(f"{rel_path}:{li + 1}:{marker} {lines[li].rstrip()}")
+                        if current_block:
+                            blocks.append(current_block)
+
+                        for block in blocks:
+                            results.extend(block)
+                            results.append("---")
                     match_count += len(match_indices)
                 else:
                     for i, line in enumerate(lines, 1):
                         if regex.search(line):
                             results.append(f"{rel_path}:{i}: {line.rstrip()}")
                             match_count += 1
+                            if rel_path not in files_with_matches:
+                                files_with_matches[rel_path] = []
+                            files_with_matches[rel_path].append(i)
 
             except (OSError, PermissionError):
                 continue
 
-        if match_count >= MAX_MATCHES and context_lines == 0:
+        if match_count >= MAX_MATCHES:
+            stopped_early = True
             break
 
     if not results:
@@ -648,10 +662,22 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
     if results and results[-1] == "---":
         results.pop()
 
-    if context_lines == 0 and match_count > MAX_MATCHES:
-        output = "\n".join(results[:MAX_MATCHES]) + f"\n... and {match_count - MAX_MATCHES} more matches (use a more specific pattern to narrow results)"
+    if match_count > MAX_MATCHES and context_lines == 0:
+        output = "\n".join(results[:MAX_MATCHES])
     else:
         output = "\n".join(results)
+
+    # Append file summary so the model knows where ALL matches are
+    if len(files_with_matches) > 1 or stopped_early:
+        summary_lines = ["\n[Match summary]"]
+        for fpath, line_nums in files_with_matches.items():
+            nums = ", ".join(str(n) for n in line_nums[:10])
+            extra = f" +{len(line_nums) - 10} more" if len(line_nums) > 10 else ""
+            summary_lines.append(f"  {fpath}: lines {nums}{extra}")
+        if stopped_early:
+            summary_lines.append(f"  ... search stopped at {match_count} matches. Use file_glob or a more specific pattern.")
+        output += "\n".join(summary_lines)
+
     return _truncate_output(output)
 
 
@@ -824,6 +850,8 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=cwd,
             )
             if sys.platform != "win32":
@@ -876,6 +904,8 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=cwd,
         )
         if sys.platform == "win32":
@@ -1153,7 +1183,6 @@ def _next_subagent_id() -> int:
 
 
 # Import new tools
-from aru.tools.indexer import semantic_search
 from aru.tools.ast_tools import code_structure, find_dependencies
 from aru.tools.ranker import rank_files
 
@@ -1170,7 +1199,6 @@ _SUBAGENT_TOOLS = [
     bash,
     web_search,
     web_fetch,
-    semantic_search,
     code_structure,
     find_dependencies,
     rank_files,
@@ -1224,6 +1252,7 @@ Do not create documentation files unless explicitly asked.
 # All tools as a list for easy import
 ALL_TOOLS = [
     read_file,
+    read_file_smart,
     write_file,
     write_files,
     edit_file,
@@ -1235,14 +1264,48 @@ ALL_TOOLS = [
     web_search,
     web_fetch,
     delegate_task,
-    semantic_search,
     code_structure,
     find_dependencies,
     rank_files,
 ]
 
+# Executor tools — full write/execute capability, no discovery overhead
+EXECUTOR_TOOLS = [
+    read_file,
+    read_file_smart,
+    write_file,
+    write_files,
+    edit_file,
+    edit_files,
+    glob_search,
+    grep_search,
+    list_directory,
+    bash,
+    web_search,
+    web_fetch,
+    delegate_task,
+    code_structure,
+]
+
+# General-purpose tools — everything except niche analysis tools
+GENERAL_TOOLS = [
+    read_file,
+    read_file_smart,
+    write_file,
+    write_files,
+    edit_file,
+    edit_files,
+    glob_search,
+    grep_search,
+    list_directory,
+    bash,
+    web_search,
+    web_fetch,
+    delegate_task,
+]
+
 async def load_mcp_tools():
-    """Initialize MCP servers and inject their tools into ALL_TOOLS dynamically."""
+    """Initialize MCP servers and inject their tools into tool lists dynamically."""
     from aru.tools.mcp_client import init_mcp
     try:
         mcp_tools = await init_mcp()
@@ -1250,5 +1313,7 @@ async def load_mcp_tools():
             _console.print(f"[dim]Loaded {len(mcp_tools)} tools from MCP servers.[/dim]")
             for t in mcp_tools:
                 ALL_TOOLS.append(t)
+                EXECUTOR_TOOLS.append(t)
+                GENERAL_TOOLS.append(t)
     except Exception as e:
         _console.print(f"[dim]Failed to load MCP tools: {e}[/dim]")

@@ -33,13 +33,15 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         api_key_env="ANTHROPIC_API_KEY",
         default_model="claude-sonnet-4-5-20250929",
         models={
-            "claude-sonnet-4-5": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 8192},
-            "claude-opus-4": {"id": "claude-opus-4-20250514", "max_tokens": 8192},
+            "claude-sonnet-4-5": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 16384},
+            "claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "max_tokens": 64000},
+            "claude-opus-4": {"id": "claude-opus-4-20250514", "max_tokens": 32000},
+            "claude-opus-4-6": {"id": "claude-opus-4-6", "max_tokens": 64000},
             "claude-haiku-3-5": {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192},
             "claude-haiku-4-5": {"id": "claude-haiku-4-5-20251001", "max_tokens": 8192},
             # Full IDs also work as-is
-            "claude-sonnet-4-5-20250929": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 8192},
-            "claude-opus-4-20250514": {"id": "claude-opus-4-20250514", "max_tokens": 8192},
+            "claude-sonnet-4-5-20250929": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 16384},
+            "claude-opus-4-20250514": {"id": "claude-opus-4-20250514", "max_tokens": 32000},
             "claude-haiku-3-5-20241022": {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192},
             "claude-haiku-4-5-20251001": {"id": "claude-haiku-4-5-20251001", "max_tokens": 8192},
         },
@@ -84,14 +86,15 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         api_key_env="DEEPSEEK_API_KEY",
         default_model="deepseek-chat",
         models={
-            "deepseek-chat": {"id": "deepseek-chat", "max_tokens": 4096},
-            "deepseek-reasoner": {"id": "deepseek-reasoner", "max_tokens": 4096},
+            "deepseek-chat": {"id": "deepseek-chat", "max_tokens": 8192},
+            "deepseek-chat-v3-0324": {"id": "deepseek-chat-v3-0324", "max_tokens": 16384},
+            "deepseek-reasoner": {"id": "deepseek-reasoner", "max_tokens": 16384},
         },
     ),
 }
 
-# Legacy short names for backward compatibility (map to anthropic/ provider)
-LEGACY_MODEL_ALIASES: dict[str, str] = {
+# Common short names (map to anthropic/ provider)
+MODEL_ALIASES: dict[str, str] = {
     "sonnet": "anthropic/claude-sonnet-4-5",
     "opus": "anthropic/claude-opus-4",
     "haiku": "anthropic/claude-haiku-3-5",
@@ -211,8 +214,8 @@ def resolve_model_ref(model_ref: str) -> tuple[str, str]:
       - "anthropic"                    → ("anthropic", <default_model>)
     """
     # Check legacy aliases first
-    if model_ref in LEGACY_MODEL_ALIASES:
-        model_ref = LEGACY_MODEL_ALIASES[model_ref]
+    if model_ref in MODEL_ALIASES:
+        model_ref = MODEL_ALIASES[model_ref]
 
     if "/" in model_ref:
         provider_key, model_name = model_ref.split("/", 1)
@@ -359,13 +362,13 @@ def _create_provider_model(
         return OpenRouter(**params)
 
     elif provider_type == "deepseek":
-        from agno.models.deepseek import DeepSeekChat
+        from agno.models.deepseek import DeepSeek
         api_key = _resolve_api_key(provider)
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
             params["api_key"] = api_key
         params.update(kwargs)
-        return DeepSeekChat(**params)
+        return DeepSeek(**params)
 
     else:
         # Fallback: try OpenAI-compatible (works for many providers)
@@ -399,7 +402,7 @@ def get_available_models() -> dict[str, str]:
     models: dict[str, str] = {}
 
     # Legacy aliases
-    for alias, ref in LEGACY_MODEL_ALIASES.items():
+    for alias, ref in MODEL_ALIASES.items():
         provider_key, model_name = resolve_model_ref(ref)
         provider = _providers.get(provider_key)
         if provider:

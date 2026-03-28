@@ -5,6 +5,11 @@ from typing import Iterator
 
 import pathspec
 
+
+def normalize_path(path: str) -> str:
+    """Convert backslashes to forward slashes and remove trailing slashes."""
+    return path.replace("\\", "/").rstrip("/")
+
 # Hardcoded fallback patterns (always excluded even without .gitignore)
 _FALLBACK_PATTERNS = [
     ".git",

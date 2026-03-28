@@ -25,7 +25,6 @@ main.py → cli.run_cli() → REPL loop
 | `aru/agents/executor.py` | Execution agent — all tools, implements plan steps |
 | `aru/tools/codebase.py` | 16 core tools (read/write/edit/search/bash/web/delegate) |
 | `aru/tools/ast_tools.py` | Tree-sitter Python AST analysis |
-| `aru/tools/indexer.py` | Chromadb semantic indexing |
 | `aru/tools/ranker.py` | Multi-factor file relevance scoring |
 | `aru/tools/gitignore.py` | .gitignore-aware file filtering |
 | `aru.json` | Runtime config (permissions, models, custom providers) |
@@ -33,7 +32,7 @@ main.py → cli.run_cli() → REPL loop
 ### Tool Categories (16 tools in `codebase.py`)
 
 - **File I/O:** read_file, write_file, write_files, edit_file, edit_files
-- **Search:** glob_search, grep_search, semantic_search, rank_files, list_directory
+- **Search:** glob_search, grep_search, rank_files, list_directory
 - **Analysis:** code_structure, find_dependencies
 - **Shell:** bash, run_command
 - **Web:** web_search, web_fetch
@@ -51,13 +50,9 @@ main.py → cli.run_cli() → REPL loop
 **Do NOT use `source .venv/bin/activate` in bash tool** — it hangs in subprocesses.
 
 ```bash
-# Use venv executables directly
-.venv/Scripts/pytest
-.venv/Scripts/pytest --cov=aru --cov-report=term-missing
-
-# Or if venv already active in parent shell
-python -m pytest
-python -m pytest --cov=aru --cov-report=term-missing
+# Windows (correct form)
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest --cov=aru --cov-report=term-missing
 ```
 
 **Always use `--cov-report=term-missing`**, not `--cov-report=html` (HTML causes OOM in WSL2).
@@ -78,4 +73,4 @@ python -m pytest --cov=aru --cov-report=term-missing
 - `aru.json` → permissions, model defaults, custom providers
 - `.agents/commands/*.md` → custom slash commands
 - `.agents/skills/*.md` → custom skills with YAML frontmatter
-- `.aru/` → runtime data (sessions, chroma embeddings, index metadata)
+- `.aru/` → runtime data (sessions)

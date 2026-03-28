@@ -6,7 +6,6 @@ import pytest
 
 from aru.agents.base import build_instructions, PLANNER_ROLE, BASE_INSTRUCTIONS
 from aru.agents.planner import create_planner
-from aru.tools.codebase import delegate_research, _RESEARCH_RESULT_MAX_CHARS
 
 # Build full planner instructions for test assertions
 PLANNER_INSTRUCTIONS = build_instructions("planner")
@@ -15,9 +14,6 @@ PLANNER_INSTRUCTIONS = build_instructions("planner")
 class TestPlannerInstructions:
     def test_instructions_not_empty(self):
         assert len(PLANNER_INSTRUCTIONS) > 100
-
-    def test_mentions_delegate_research(self):
-        assert "delegate_research" in PLANNER_INSTRUCTIONS
 
     def test_mentions_output_format(self):
         assert "## Summary" in PLANNER_INSTRUCTIONS
@@ -99,15 +95,6 @@ class TestCreatePlanner:
 
     @patch("aru.agents.planner.Agent")
     @patch("aru.agents.planner.create_model")
-    def test_has_delegate_research(self, mock_create_model, mock_agent):
-        create_planner()
-        call_kwargs = mock_agent.call_args[1]
-        tools = call_kwargs["tools"]
-        tool_names = [getattr(t, "__name__", str(t)) for t in tools]
-        assert "delegate_research" in tool_names
-
-    @patch("aru.agents.planner.Agent")
-    @patch("aru.agents.planner.create_model")
     def test_no_write_tools(self, mock_create_model, mock_agent):
         create_planner()
         call_kwargs = mock_agent.call_args[1]
@@ -118,59 +105,3 @@ class TestCreatePlanner:
         assert "bash" not in tool_names
 
 
-class TestDelegateResearch:
-    @pytest.mark.asyncio
-    async def test_returns_research_answer(self):
-        mock_result = MagicMock()
-        mock_result.content = "auth is handled in aru/auth.py via JWT middleware"
-
-        mock_agent_instance = MagicMock()
-        mock_agent_instance.arun = AsyncMock(return_value=mock_result)
-
-        with patch("agno.agent.Agent", return_value=mock_agent_instance), \
-             patch("aru.providers.create_model"):
-            result = await delegate_research("understand auth", "which file handles JWT?")
-
-        assert "auth" in result
-        assert result.startswith("[Research-")
-
-    @pytest.mark.asyncio
-    async def test_truncates_long_answer(self):
-        mock_result = MagicMock()
-        mock_result.content = "x" * 2000  # way over the limit
-
-        mock_agent_instance = MagicMock()
-        mock_agent_instance.arun = AsyncMock(return_value=mock_result)
-
-        with patch("agno.agent.Agent", return_value=mock_agent_instance), \
-             patch("aru.providers.create_model"):
-            result = await delegate_research("task", "query")
-
-        assert len(result) <= _RESEARCH_RESULT_MAX_CHARS + 100  # prefix + truncation marker
-        assert "[truncated]" in result
-
-    @pytest.mark.asyncio
-    async def test_handles_empty_result(self):
-        mock_result = MagicMock()
-        mock_result.content = ""
-
-        mock_agent_instance = MagicMock()
-        mock_agent_instance.arun = AsyncMock(return_value=mock_result)
-
-        with patch("agno.agent.Agent", return_value=mock_agent_instance), \
-             patch("aru.providers.create_model"):
-            result = await delegate_research("task", "query")
-
-        assert "No findings" in result
-
-    @pytest.mark.asyncio
-    async def test_handles_exception(self):
-        mock_agent_instance = MagicMock()
-        mock_agent_instance.arun = AsyncMock(side_effect=RuntimeError("network error"))
-
-        with patch("agno.agent.Agent", return_value=mock_agent_instance), \
-             patch("aru.providers.create_model"):
-            result = await delegate_research("task", "query")
-
-        assert "Error" in result
-        assert "network error" in result

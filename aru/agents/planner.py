@@ -8,32 +8,34 @@ from aru.providers import create_model
 from aru.tools.codebase import (
     _get_small_model_ref,
     glob_search, grep_search, list_directory, read_file, read_file_smart,
-    delegate_research,
 )
-from aru.tools.indexer import semantic_search
-from aru.tools.ast_tools import code_structure, find_dependencies
-from aru.tools.ranker import rank_files
 
 REVIEWER_INSTRUCTIONS = """\
 You are a plan scope reviewer. You receive a user request and a generated implementation plan.
 Your ONLY job: ensure the plan does not add more deliverables than the user explicitly asked for.
 
 Rules:
-- Count the concrete deliverables named in the user request (functions, classes, files, bug fixes)
-- If the plan adds MORE than what was requested, remove the excess steps
-- Be conservative: only remove steps that clearly add things the user did NOT name
-- Never add steps, never rewrite steps, never change wording
-- Return the plan in the EXACT same markdown format (## Summary then ## Steps)
-- If the plan is already correct, return it unchanged
+- Count EXACTLY how many deliverables the user asked for. "a function" = 1. "two endpoints" = 2. \
+  Unquantified plurals = lean minimal.
+- If the user said "a" or "one", the plan MUST have exactly 1 deliverable step. \
+  Multiple steps that each produce a separate deliverable is scope creep — keep only the best one.
+- Multiple steps are OK only when they implement different parts of the SAME deliverable \
+  or when the user explicitly asked for multiple things.
+
+CRITICAL — preserve the original plan text:
+- You may ONLY delete entire steps that are scope creep. You must NOT rewrite, rephrase, \
+  translate, summarize, or simplify any step you keep.
+- Copy kept steps EXACTLY as they appear — same language, same wording, same detail level.
+- Return the plan in the EXACT same markdown format (## Summary then ## Steps).
+- If the plan is already correct, return it UNCHANGED — do not paraphrase it.
 
 Return ONLY the markdown plan. No explanation, no preamble.\
 """
 
 # Planner uses read-only tools only — no write/edit/bash
 PLANNER_TOOLS = [
-    read_file, read_file_smart, delegate_research,
+    read_file, read_file_smart,
     glob_search, grep_search, list_directory,
-    semantic_search, code_structure, find_dependencies, rank_files,
 ]
 
 
@@ -72,12 +74,12 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
         tools=PLANNER_TOOLS,
         instructions=build_instructions("planner", extra_instructions),
         markdown=True,
-        # Compress tool results after 2 uncompressed tool calls to save tokens
+        # Compress tool results after 6 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=2,
+            compress_tool_results_limit=10,
         ),
-        tool_call_limit=10,
+        tool_call_limit=20,
     )
