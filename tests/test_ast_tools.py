@@ -742,3 +742,21 @@ def test_tree_sitter_availability_flag():
         expected = False
     
     assert _TREE_SITTER_AVAILABLE == expected
+
+
+@pytest.mark.skipif(not _TREE_SITTER_AVAILABLE, reason="tree-sitter not available")
+def test_async_function_extraction():
+    """Test that async def functions are parsed and their names appear in the structure."""
+    source = b"async def fetch_data(url, timeout=30):\n    pass"
+    tree = _parse_python_tree(source)
+
+    assert tree is not None
+
+    structure = _extract_structure_treesitter(tree, source, "test.py")
+
+    function_names = [f["name"] for f in structure["functions"]]
+    assert "fetch_data" in function_names
+
+    func = next(f for f in structure["functions"] if f["name"] == "fetch_data")
+    assert "url" in func["params"]
+    assert "timeout" in func["params"]

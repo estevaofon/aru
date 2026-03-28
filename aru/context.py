@@ -262,3 +262,26 @@ def _fallback_summary(history: list[dict[str, str]], plan_task: str | None = Non
         parts.append(f"- [{role}]: {text}")
 
     return "\n".join(parts)
+
+
+def format_context_block(content: str, label: str = "Context", include_timestamp: bool = True) -> str:
+    """Format a context block with separator and optional timestamp.
+    
+    Args:
+        content: The content to include in the block.
+        label: Label for the context block.
+        include_timestamp: Whether to include timestamp in the separator.
+    
+    Returns:
+        Formatted context block with separators and timestamp.
+    """
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    if include_timestamp:
+        separator = f"-- {label} ({timestamp}) --"
+    else:
+        separator = f"-- {label} --"
+    
+    return f"{separator}\n{content}\n{separator}"
