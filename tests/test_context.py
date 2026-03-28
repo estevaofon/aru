@@ -9,6 +9,7 @@ from aru.context import (
     compact_conversation,
     apply_compaction,
     build_compaction_prompt,
+    format_context_block,
 )
 
 
@@ -200,3 +201,46 @@ class TestApplyCompaction:
         
         # Recent messages should be in result
         assert "Recent request" in str(result)
+
+
+class TestFormatContextBlock:
+    """Tests for format_context_block function."""
+
+    def test_format_with_timestamp(self):
+        """Should format block with timestamp in separator."""
+        content = "This is a test context content."
+        result = format_context_block(content, label="Test", include_timestamp=True)
+        
+        # Should contain the content
+        assert content in result
+        # Should have timestamp in format YYYY-MM-DD HH:MM:SS
+        assert "Test (" in result
+        assert ")" in result
+        # Should have separators at start and end
+        assert result.startswith("-- Test (")
+        assert result.endswith(") --")
+
+    def test_format_without_timestamp(self):
+        """Should format block without timestamp."""
+        content = "Content without timestamp"
+        result = format_context_block(content, label="Info", include_timestamp=False)
+        
+        assert content in result
+        assert "-- Info --" in result
+        assert "-- Info --" in result
+        assert "(" not in result
+
+    def test_format_custom_label(self):
+        """Should use custom label."""
+        content = "Some content"
+        result = format_context_block(content, label="CustomLabel")
+        
+        assert "CustomLabel" in result
+        assert content in result
+
+    def test_format_empty_content(self):
+        """Should handle empty content."""
+        result = format_context_block("", label="Empty", include_timestamp=False)
+        
+        assert "-- Empty --" in result
+        assert result.count("-- Empty --") == 2

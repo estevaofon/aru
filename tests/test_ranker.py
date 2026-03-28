@@ -141,6 +141,12 @@ class TestScoreNameMatch:
         score = _score_name_match("user/profile/settings.py", ["user", "profile"])
         assert score > 0.0
 
+    def test_path_component_substring_of_keyword(self):
+        # "auth" (from path) is a substring of keyword "authentication" → +1.5 match
+        # With 2 keywords, score = min(1.5 / 2, 1.0) = 0.75, strictly between 0 and 1
+        score = _score_name_match("src/auth.py", ["authentication", "unrelated"])
+        assert 0 < score < 1
+
 
 class TestScoreRecency:
     """Test recency scoring based on file modification time."""

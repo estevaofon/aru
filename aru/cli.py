@@ -906,7 +906,7 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=4,
+            compress_tool_results_limit=10,
         ),
         tool_call_limit=20,
     )
