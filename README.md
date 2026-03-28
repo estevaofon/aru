@@ -10,10 +10,9 @@ Um assistente de codificação inteligente para o terminal, powered by LLMs e [A
 
 - **Arquitetura Multi-Agente** — Agentes especializados para planejamento, execução e conversação
 - **CLI Interativa** — Respostas em streaming, paste multi-linha, gerenciamento de sessões
-- **16 Ferramentas Integradas** — Operações de arquivo, busca de código, shell, busca web, busca semântica, delegação de tarefas
+- **16 Ferramentas Integradas** — Operações de arquivo, busca de código, shell, busca web, delegação de tarefas
 - **Planejamento de Tarefas** — Quebra de tarefas complexas em etapas com execução automática
-- **Multi-Provider** — Anthropic (Sonnet, Opus, Haiku), Ollama (modelos locais), OpenAI, Groq e OpenRouter
-- **Busca Semântica** — Busca de código baseada em embeddings com chromadb
+- **Multi-Provider** — Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek e outros via configuração custom
 - **Comandos e Skills Personalizados** — Estenda aru via diretório `.agents/`
 - **Suporte MCP** — Integração com Model Context Protocol servers
 
@@ -29,7 +28,7 @@ pip install -e .
 
 ### 2. Configurar a API Key
 
-Aru usa o **Claude Sonnet 4.5** da Anthropic como modelo padrão. Você precisa de uma [chave de API da Anthropic](https://console.anthropic.com/) para começar.
+Aru usa o **Claude Sonnet 4.6** da Anthropic como modelo padrão. Você precisa de uma [chave de API da Anthropic](https://console.anthropic.com/) para começar.
 
 Crie um arquivo `.env` na raiz do projeto:
 
@@ -139,15 +138,15 @@ aru> /model ollama/codellama
 
 ### Modelos e Providers
 
-Por padrão, aru utiliza o **Claude Sonnet 4.5** (Anthropic). Você pode alternar para qualquer provider suportado durante a sessão com `/model`:
+Por padrão, aru utiliza o **Claude Sonnet 4.6** (Anthropic). Você pode alternar para qualquer provider suportado durante a sessão com `/model`:
 
 | Provider | Comando | API Key (`.env`) | Instalação extra |
 |----------|---------|-------------------|------------------|
-| **Anthropic** | `/model anthropic/claude-sonnet-4-5` | `ANTHROPIC_API_KEY` | — (incluído) |
+| **Anthropic** | `/model anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | — (incluído) |
 | **Ollama** | `/model ollama/llama3.1` | — (local) | `pip install -e ".[ollama]"` |
 | **OpenAI** | `/model openai/gpt-4o` | `OPENAI_API_KEY` | `pip install -e ".[openai]"` |
 | **Groq** | `/model groq/llama-3.3-70b-versatile` | `GROQ_API_KEY` | `pip install -e ".[groq]"` |
-| **OpenRouter** | `/model openrouter/anthropic/claude-sonnet-4-5` | `OPENROUTER_API_KEY` | `pip install -e ".[openai]"` |
+| **OpenRouter** | `/model openrouter/deepseek/deepseek-chat-v3-0324` | `OPENROUTER_API_KEY` | `pip install -e ".[openai]"` |
 
 Para instalar todos os providers de uma vez:
 
@@ -174,13 +173,37 @@ Você pode definir o provider/modelo padrão no `aru.json` para não precisar tr
 ```json
 {
   "models": {
-    "default": "ollama/codellama",
-    "small": "ollama/llama3.1"
+    "default": "openrouter/deepseek/deepseek-chat-v3-0324",
+    "minimax": "openrouter/minimax/minimax-m2.5",
+    "deepseek-v3": "openrouter/deepseek/deepseek-chat-v3-0324",
+    "sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "opus-4-6": "anthropic/claude-opus-4-6"
   }
 }
 ```
 
-O campo `small` define o modelo usado para sub-agentes e tarefas delegadas.
+O campo `default` define o modelo principal. Os demais campos são aliases que podem ser usados com `/model <alias>`.
+
+#### Providers customizados
+
+Você pode configurar providers customizados com limites de tokens específicos:
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "models": {
+        "deepseek-chat-v3-0324": {"id": "deepseek-chat-v3-0324", "max_tokens": 16384}
+      }
+    },
+    "openrouter": {
+      "models": {
+        "minimax/minimax-m2.5": {"id": "minimax/minimax-m2.5", "max_tokens": 65536}
+      }
+    }
+  }
+}
+```
 
 ### Permissões (`aru.json`)
 
@@ -193,7 +216,8 @@ O arquivo `aru.json` na raiz do projeto controla quais comandos shell o aru pode
       "git *",
       "npm *",
       "pytest *",
-      "python *"
+      "python *",
+      "uv run pytest *"
     ]
   }
 }
@@ -202,25 +226,6 @@ O arquivo `aru.json` na raiz do projeto controla quais comandos shell o aru pode
 Cada entrada é um padrão glob. Qualquer comando que não se encaixe em um padrão listado pedirá confirmação antes de executar.
 
 > O `aru.json` também pode ser colocado em `.aru/config.json`.
-
-#### Exemplo completo de `aru.json`
-
-```json
-{
-  "models": {
-    "default": "anthropic/claude-sonnet-4-5",
-    "small": "anthropic/claude-haiku-4-5"
-  },
-  "permission": {
-    "allow": [
-      "git *",
-      "npm *",
-      "pytest *",
-      "python *"
-    ]
-  }
-}
-```
 
 ### AGENTS.md
 
@@ -265,6 +270,7 @@ Aru pode carregar ferramentas de servidores MCP. Configure em `.aru/mcp_config.j
 
 ### Operações de Arquivo
 - `read_file` — Lê arquivos com suporte a range de linhas e detecção binária
+- `read_file_smart` — Leitura inteligente de arquivos com foco em trechos relevantes para a query
 - `write_file` / `write_files` — Escreve arquivos únicos ou em lote
 - `edit_file` / `edit_files` — Edições find-replace em múltiplos arquivos
 
@@ -272,8 +278,7 @@ Aru pode carregar ferramentas de servidores MCP. Configure em `.aru/mcp_config.j
 - `glob_search` — Encontra arquivos por padrão (respeita .gitignore)
 - `grep_search` — Busca de conteúdo com regex e filtro de arquivos
 - `list_directory` — Listagem de diretório com filtro gitignore
-- `semantic_search` — Busca conceitual em linguagem natural via embeddings chromadb
-- `rank_files` — Ranking de relevância de arquivos multi-fator (semântico, nome, estrutura, recência)
+- `rank_files` — Ranking de relevância de arquivos multi-fator (nome, estrutura, recência)
 
 ### Análise de Código
 - `code_structure` — Extrai classes, funções, imports via AST tree-sitter
@@ -301,21 +306,19 @@ aru-code/
 │   └── tools/
 │       ├── codebase.py     # 16 ferramentas principais
 │       ├── ast_tools.py    # Análise de código tree-sitter
-│       ├── indexer.py      # Indexação semântica chromadb
 │       ├── ranker.py       # Ranking de relevância de arquivos
 │       ├── mcp_client.py   # Cliente MCP
 │       └── gitignore.py    # Filtro gitignore-aware
 ├── aru.json                # Permissões e configuração de modelos
 ├── .env                    # API keys (não commitado)
-├── .aru/                   # Dados locais (sessões, índice, embeddings)
+├── .aru/                   # Dados locais (sessões)
 └── pyproject.toml
 ```
 
 ## Construído Com
 
 - **[Agno](https://github.com/agno-agi/agno)** — Framework de agentes com orquestração de ferramentas
-- **[Anthropic Claude](https://www.anthropic.com/)** — Sonnet 4.5, Opus 4, Haiku 3.5
-- **[chromadb](https://www.trychroma.com/)** — Embeddings de busca semântica
+- **[Anthropic Claude](https://www.anthropic.com/)** — Sonnet 4.6, Opus 4.6, Haiku 4.5
 - **[tree-sitter](https://tree-sitter.github.io/)** — Análise de código baseada em AST
 - **[Rich](https://rich.readthedocs.io/)** — UI de terminal
 - **[prompt-toolkit](https://python-prompt-toolkit.readthedocs.io/)** — Manipulação avançada de input
@@ -330,7 +333,7 @@ pip install -e ".[dev]"
 pytest
 
 # Executar testes com cobertura
-pytest --cov=aru --cov-report=html
+pytest --cov=aru --cov-report=term-missing
 ```
 
 ---
