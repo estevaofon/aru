@@ -1,7 +1,10 @@
 {
     "models": {
-        "default": "openrouter/deepseek/deepseek-chat-v3-0324",
+        "default": "openrouter/minimax/minimax-m2.7",
+        "nemotron": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "minimax": "openrouter/minimax/minimax-m2.5",
+        "minimax-m2.7": "openrouter/minimax/minimax-m2.7",
+        "nemotron": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "deepseek-v3": "openrouter/deepseek/deepseek-chat-v3-0324",
         "sonnet-4-6": "anthropic/claude-sonnet-4-6",
         "opus-4-6": "anthropic/claude-opus-4-6"
@@ -14,7 +17,8 @@
         },
         "openrouter": {
             "models": {
-                "minimax/minimax-m2.5": {"id": "minimax/minimax-m2.5", "max_tokens": 65536}
+                "minimax/minimax-m2.5": {"id": "minimax/minimax-m2.5", "max_tokens": 65536},
+                "minimax/minimax-m2.7": {"id": "minimax/minimax-m2.7", "max_tokens": 65536}
             }
         }
     },

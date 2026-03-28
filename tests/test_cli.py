@@ -121,7 +121,7 @@ class TestPlanStep:
         step = PlanStep(1, "task")
         step.status = "completed"
         d = step.to_dict()
-        assert d == {"index": 1, "description": "task", "status": "completed"}
+        assert d == {"index": 1, "description": "task", "subtasks": [], "status": "completed"}
 
     def test_from_dict(self):
         d = {"index": 3, "description": "test", "status": "in_progress"}

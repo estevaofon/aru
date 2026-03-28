@@ -48,6 +48,10 @@ def set_skip_permissions(value: bool):
     _skip_permissions = value
 
 
+def get_skip_permissions() -> bool:
+    return _skip_permissions
+
+
 _small_model_ref: str = "anthropic/claude-haiku-4-5"  # Small model for sub-agents
 
 
@@ -387,18 +391,18 @@ def write_file(file_path: str, content: str) -> str:
         return f"Error writing file: {e}"
 
 
-def write_files(files: list[dict]) -> str:
+def write_files(file_list: list[dict]) -> str:
     """Write multiple files at once. Use this instead of multiple write_file calls when creating
     or updating several files that don't depend on each other (e.g. scaffolding a project).
 
     Each entry in the list must have 'path' and 'content' keys.
 
     Args:
-        files: List of dicts with 'path' (file path) and 'content' (file content) keys.
-               Example: [{"path": "src/main.py", "content": "print('hello')"}, {"path": "src/utils.py", "content": "..."}]
+        file_list: List of dicts with 'path' (file path) and 'content' (file content) keys.
+                   Example: [{"path": "src/main.py", "content": "print('hello')"}, {"path": "src/utils.py", "content": "..."}]
     """
-    parts = [Text(f"Write {len(files)} files:", style="bold"), Text()]
-    for e in files:
+    parts = [Text(f"Write {len(file_list)} files:", style="bold"), Text()]
+    for e in file_list:
         p = e.get("path", "<missing>")
         content = e.get("content", "")
         preview = content[:300] + ("..." if len(content) > 300 else "")
@@ -406,11 +410,11 @@ def write_files(files: list[dict]) -> str:
         parts.append(_format_diff("", preview))
         parts.append(Text())
     if not _ask_permission("Write Files", Group(*parts)):
-        return f"Permission denied: batch write of {len(files)} files"
+        return f"Permission denied: batch write of {len(file_list)} files"
 
     results = []
     errors = []
-    for entry in files:
+    for entry in file_list:
         path = entry.get("path", "")
         content = entry.get("content", "")
         if not path:
@@ -1269,8 +1273,13 @@ ALL_TOOLS = [
     rank_files,
 ]
 
+# Task list tools for executor subtask tracking
+from aru.tools.tasklist import create_task_list, update_task
+
 # Executor tools — full write/execute capability, no discovery overhead
 EXECUTOR_TOOLS = [
+    create_task_list,
+    update_task,
     read_file,
     read_file_smart,
     write_file,

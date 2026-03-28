@@ -31,6 +31,7 @@ from rich.text import Text
 from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
 from aru.config import AgentConfig, load_config, render_command_template
+from aru.tools.codebase import get_skip_permissions
 from aru.providers import (
     MODEL_ALIASES,
     create_model,
@@ -438,9 +439,10 @@ from aru.agents.base import build_instructions as _build_instructions
 class PlanStep:
     """A single step in a structured plan."""
 
-    def __init__(self, index: int, description: str):
+    def __init__(self, index: int, description: str, subtasks: list[str] | None = None):
         self.index = index
         self.description = description
+        self.subtasks: list[str] = subtasks or []
         self.status: str = "pending"  # pending | in_progress | completed | failed
 
     @property
@@ -453,15 +455,23 @@ class PlanStep:
             return "[bold red]\\[!][/bold red]"
         return "[dim]\\[ ][/dim]"
 
+    @property
+    def full_description(self) -> str:
+        """Description with subtask list for executor prompt."""
+        if not self.subtasks:
+            return self.description
+        subtask_lines = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self.subtasks))
+        return f"{self.description}\n\nSubtasks:\n{subtask_lines}"
+
     def __str__(self) -> str:
         return f"Step {self.index}: {self.description}"
 
     def to_dict(self) -> dict:
-        return {"index": self.index, "description": self.description, "status": self.status}
+        return {"index": self.index, "description": self.description, "subtasks": self.subtasks, "status": self.status}
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlanStep":
-        step = cls(data["index"], data["description"])
+        step = cls(data["index"], data["description"], data.get("subtasks", []))
         step.status = data.get("status", "pending")
         return step
 
@@ -469,46 +479,59 @@ class PlanStep:
 def parse_plan_steps(plan_text: str) -> list[PlanStep]:
     """Extract structured steps from a plan markdown output.
 
-    Matches lines like:
+    Matches step lines like:
     - [ ] Step 1: Do something
     - [ ] 1. Do something
-    - Step 1: Do something
-    - 1. Do something (at start of line or after whitespace)
+
+    And subtask lines indented below each step:
+      1. Write backend/models.py
+      2. Edit backend/main.py — add router
     """
     steps = []
-    # Match checkbox items: - [ ] description
-    checkbox_pattern = re.compile(r"^\s*-\s*\[[ x]\]\s*(.+)$", re.MULTILINE)
-    # Match numbered items: 1. description or Step 1: description
-    numbered_pattern = re.compile(r"^\s*(?:step\s*)?\d+[.:]\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+    lines = plan_text.split("\n")
 
-    # Try checkbox format first
-    matches = checkbox_pattern.findall(plan_text)
-    if matches:
-        for i, desc in enumerate(matches, 1):
-            # Clean up step prefix if present (e.g., "Step 1: ...")
-            cleaned = re.sub(r"^(?:step\s*)?\d+[.:]\s*", "", desc, flags=re.IGNORECASE).strip()
-            steps.append(PlanStep(i, cleaned or desc.strip()))
+    # Patterns
+    checkbox_pattern = re.compile(r"^\s*-\s*\[[ x]\]\s*(.+)$")
+    subtask_pattern = re.compile(r"^\s+\d+[.:]\s*(.+)$")
+
+    current_step_desc = None
+    current_subtasks: list[str] = []
+    step_index = 0
+
+    def _flush_step():
+        nonlocal current_step_desc, current_subtasks, step_index
+        if current_step_desc is not None:
+            step_index += 1
+            cleaned = re.sub(r"^(?:step\s*)?\d+[.:]\s*", "", current_step_desc, flags=re.IGNORECASE).strip()
+            steps.append(PlanStep(step_index, cleaned or current_step_desc.strip(), current_subtasks))
+            current_subtasks = []
+            current_step_desc = None
+
+    for line in lines:
+        checkbox_match = checkbox_pattern.match(line)
+        subtask_match = subtask_pattern.match(line)
+
+        if checkbox_match:
+            _flush_step()
+            current_step_desc = checkbox_match.group(1)
+        elif subtask_match and current_step_desc is not None:
+            current_subtasks.append(subtask_match.group(1).strip())
+
+    _flush_step()
+
+    if steps:
         return steps
 
-    # Fallback: look for numbered items under a "steps" heading
-    # Find section that likely contains steps
-    sections = re.split(r"^#{1,3}\s+", plan_text, flags=re.MULTILINE)
-    for section in sections:
-        section_matches = numbered_pattern.findall(section)
-        if len(section_matches) >= 2:  # At least 2 steps to be a plan
-            for i, desc in enumerate(section_matches, 1):
-                cleaned = re.sub(r"^(?:step\s*)?\d+[.:]\s*", "", desc, flags=re.IGNORECASE).strip()
-                steps.append(PlanStep(i, cleaned or desc.strip()))
-            return steps
-
-    # Last resort: any numbered items in the whole text
-    matches = numbered_pattern.findall(plan_text)
-    if len(matches) >= 2:
-        for i, desc in enumerate(matches, 1):
+    # Fallback: numbered items without checkboxes
+    numbered_pattern = re.compile(r"^\s*(?:step\s*)?\d+[.:]\s*(.+)$", re.IGNORECASE)
+    for line in lines:
+        match = numbered_pattern.match(line)
+        if match:
+            desc = match.group(1)
             cleaned = re.sub(r"^(?:step\s*)?\d+[.:]\s*", "", desc, flags=re.IGNORECASE).strip()
-            steps.append(PlanStep(i, cleaned or desc.strip()))
+            steps.append(PlanStep(len(steps) + 1, cleaned or desc.strip()))
 
-    return steps
+    return steps if len(steps) >= 2 else []
 
 
 class Session:
@@ -901,12 +924,12 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         tools=GENERAL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,
-        # Compress tool results after 4 uncompressed tool calls to save tokens
+        # Compress tool results after 7 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=10,
+            compress_tool_results_limit=7,
         ),
         tool_call_limit=20,
     )
@@ -1234,6 +1257,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
     try:
         from aru.tools.codebase import set_display, set_live
+        from aru.tools.tasklist import set_live as tasklist_set_live, set_display as tasklist_set_display
 
         status = StatusBar(interval=3.0)
         display = StreamingDisplay(status)
@@ -1291,6 +1315,8 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         with Live(display, console=console, refresh_per_second=10) as live:
             set_live(live)
             set_display(display)
+            tasklist_set_live(live)
+            tasklist_set_display(display)
             accumulated = ""
             async for event in agent.arun(agent_input, stream=True, stream_events=True, yield_run_output=True):
                 if isinstance(event, RunOutput):
@@ -1497,14 +1523,49 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
             step_prompt_parts.insert(1, file_context)
         step_prompt = "\n".join(step_prompt_parts)
 
+        # Reset task store for each new step
+        from aru.tools.tasklist import reset_task_store
+        reset_task_store()
+
         # Execute this step (lightweight=True to skip tree/git/history)
         executor = executor_factory()
         try:
             run_result = await run_agent_capture(executor, step_prompt, session, lightweight=True)
-            if run_result.content:
+            content = run_result.content
+
+            # Check task store as ground truth for step completion
+            from aru.tools.tasklist import get_task_store
+            store = get_task_store()
+            all_tasks = store.get_all()
+            tasks_completed = sum(1 for t in all_tasks if t["status"] == "completed")
+            tasks_failed = sum(1 for t in all_tasks if t["status"] == "failed")
+            tasks_total = len(all_tasks)
+            tasks_all_done = tasks_total > 0 and (tasks_completed + tasks_failed == tasks_total)
+
+            # Determine step outcome: task store takes precedence over content
+            step_failed = False
+            if tasks_all_done:
+                if tasks_failed > 0 and tasks_completed == 0:
+                    step_failed = True
+                # else: at least some tasks completed → step succeeded
+            elif content:
+                step_failed = (
+                    content.startswith("Error")
+                    or "Error from OpenAI API" in content
+                    or "Error in Agent run" in content
+                )
+
+            if step_failed:
+                step.status = "failed"
+                fail_msg = content[:200] if content else f"{tasks_failed}/{tasks_total} subtasks failed"
+                console.print(f"\n[red]Step {step.index} failed: {fail_msg}[/red]")
+                if not get_skip_permissions() and not ask_yes_no("Continue with remaining steps?"):
+                    break
+            elif content or tasks_all_done:
                 step.status = "completed"
-                # Include tool calls per step for rich history
-                step_text = f"### Step {step.index}: {step.description}\n{run_result.content}"
+                # Build step result text
+                summary = content or f"All {tasks_completed} subtasks completed."
+                step_text = f"### Step {step.index}: {step.description}\n{summary}"
                 if run_result.tool_calls:
                     tools_str = ", ".join(run_result.tool_calls)
                     step_text += f"\nTools: {tools_str}"
@@ -1517,12 +1578,12 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
             step.status = "failed"
             console.print(f"\n[yellow]Step {step.index} interrupted.[/yellow]")
             # Ask if user wants to continue with remaining steps
-            if not ask_yes_no("Continue with remaining steps?"):
+            if not get_skip_permissions() and not ask_yes_no("Continue with remaining steps?"):
                 break
         except Exception as e:
             step.status = "failed"
             console.print(f"\n[red]Step {step.index} failed: {e}[/red]")
-            if not ask_yes_no("Continue with remaining steps?"):
+            if not get_skip_permissions() and not ask_yes_no("Continue with remaining steps?"):
                 break
 
     # Final progress display
@@ -1819,7 +1880,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 if session.plan_steps:
                     console.print(f"\n[bold]{len(session.plan_steps)} steps detected.[/bold]")
 
-                if ask_yes_no("Execute this plan?"):
+                if get_skip_permissions() or ask_yes_no("Execute this plan?"):
                     console.print("[bold green]Executing plan...[/bold green]")
 
                     # Use lightweight instructions for executor steps (skip README.md)
@@ -1912,6 +1973,10 @@ def main():
     try:
         asyncio.run(run_cli(skip_permissions=skip_permissions, resume_id=resume_id))
     except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
+        _graceful_exit()
+    except Exception as e:
+        from rich.markup import escape
+        console.print(f"\n[bold red]Fatal error: {escape(str(e))}[/bold red]")
         _graceful_exit()
 
 

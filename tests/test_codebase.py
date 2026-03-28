@@ -6,6 +6,7 @@ from aru.tools.codebase import (
     get_project_tree, _is_safe_command, _shell_split, _is_long_running,
     _html_to_text, clear_read_cache, set_on_file_mutation,
     reset_allowed_actions, _read_cache, _allowed_actions,
+    read_file_smart, _format_diff, get_skip_permissions,
 )
 
 
@@ -453,6 +454,50 @@ class TestEditFiles:
         assert "not found" in result.lower()
         assert f1.read_text() == "alpha = 10"
 
+    def test_edit_files_multiple_edits(self, tmp_path):
+        """Test edit_files applying multiple search/replace edits across two temp files."""
+        f1 = tmp_path / "module_a.py"
+        f2 = tmp_path / "module_b.py"
+        f1.write_text(
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "def greet(name):\n"
+            "    return f'Hello, {name}!'\n"
+        )
+        f2.write_text(
+            "DATABASE_URL = 'sqlite:///dev.db'\n"
+            "TIMEOUT = 30\n"
+            "RETRIES = 3\n"
+        )
+
+        edits = [
+            {"path": str(f1), "old_string": "import os\nimport sys", "new_string": "import os\nimport sys\nimport logging"},
+            {"path": str(f1), "old_string": "return f'Hello, {name}!'", "new_string": "return f'Hi, {name}!'"},
+            {"path": str(f2), "old_string": "DATABASE_URL = 'sqlite:///dev.db'", "new_string": "DATABASE_URL = 'postgresql:///prod.db'"},
+            {"path": str(f2), "old_string": "TIMEOUT = 30", "new_string": "TIMEOUT = 60"},
+        ]
+
+        set_skip_permissions(True)
+        try:
+            result = edit_files(edits)
+        finally:
+            set_skip_permissions(False)
+
+        assert "Successfully" in result
+
+        content_a = f1.read_text()
+        assert "import logging" in content_a
+        assert "return f'Hi, {name}!'" in content_a
+        assert "return f'Hello, {name}!'" not in content_a
+
+        content_b = f2.read_text()
+        assert "DATABASE_URL = 'postgresql:///prod.db'" in content_b
+        assert "TIMEOUT = 60" in content_b
+        assert "RETRIES = 3" in content_b
+        assert "sqlite" not in content_b
+        assert "TIMEOUT = 30" not in content_b
+
     def test_missing_path_key(self):
         edits = [{"old_string": "foo", "new_string": "bar"}]
 
@@ -520,3 +565,139 @@ class TestCacheAndCallbacks:
 
         reset_allowed_actions()
         assert len(_allowed_actions) == 0
+
+
+@pytest.mark.asyncio
+async def test_read_file_smart_below_threshold(tmp_path):
+    """Test that read_file_smart returns raw content when file is small (≤ 3_000 chars)."""
+    f = tmp_path / "small.py"
+    # Content well under the 3_000-char threshold
+    f.write_text("def add(a, b):\n    return a + b\n")
+
+    result = await read_file_smart(str(f), query="What does this file do?")
+
+    # Should return raw content, not a model-generated answer
+    assert "def add(a, b):" in result
+    assert "return a + b" in result
+
+
+class TestSkipPermissions:
+    """Tests for set_skip_permissions / get_skip_permissions."""
+
+    def test_default_is_false(self):
+        """Initially skip_permissions is False."""
+        set_skip_permissions(False)
+        assert get_skip_permissions() is False
+
+    def test_set_true_and_read_back(self):
+        """Setting to True is reflected immediately by get_skip_permissions."""
+        original = get_skip_permissions()
+        try:
+            set_skip_permissions(True)
+            assert get_skip_permissions() is True
+        finally:
+            set_skip_permissions(original)
+
+    def test_set_false_and_read_back(self):
+        """Setting back to False is also reflected immediately."""
+        set_skip_permissions(True)
+        try:
+            set_skip_permissions(False)
+            assert get_skip_permissions() is False
+        finally:
+            set_skip_permissions(False)
+
+
+class TestFormatDiff:
+    """Tests for _format_diff — unified diff rendering of old/new strings."""
+
+    def test_multiline_deletion(self):
+        """Multiline old_string produces a red '- ' line per original line."""
+        old = "line1\nline2\nline3"
+        group = _format_diff(old, "")
+
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert rendered.count("- line") == 3
+        assert "- line1" in rendered
+        assert "- line2" in rendered
+        assert "- line3" in rendered
+        assert "+ " not in rendered
+
+    def test_multiline_addition(self):
+        """Multiline new_string produces a green '+ ' line per new line."""
+        new = "alpha\nbeta\ngamma"
+        group = _format_diff("", new)
+
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert rendered.count("+ alpha") == 1
+        assert rendered.count("+ beta") == 1
+        assert rendered.count("+ gamma") == 1
+        assert "+ alpha" in rendered
+        assert "+ beta" in rendered
+        assert "+ gamma" in rendered
+        assert "- " not in rendered
+
+    def test_both_sides_produces_combined_output(self):
+        """Providing both old and new strings renders deletions followed by additions."""
+        old = "foo\nbar"
+        new = "foo\nbaz"
+        group = _format_diff(old, new)
+
+        rendered = "\n".join(str(r) for r in group.renderables)
+        # The function renders ALL old lines as deletions, ALL new lines as additions.
+        # It does not perform line-level diffing, so even unchanged lines appear twice.
+        assert "- foo" in rendered
+        assert "- bar" in rendered
+        assert "+ foo" in rendered
+        assert "+ baz" in rendered
+        # Deletions come first, then additions
+        minus_idx = rendered.index("- ")
+        plus_idx = rendered.index("+ ")
+        assert minus_idx < plus_idx
+
+    def test_no_empty_diff_both_empty(self):
+        """When both old and new are empty the diff group is empty (no-empty-diff guard)."""
+        group = _format_diff("", "")
+        assert len(group.renderables) == 0
+
+    def test_no_empty_diff_both_none_equivalent(self):
+        """Passing empty strings (not None) still results in no empty-diff."""
+        group = _format_diff("", "")
+        assert len(group.renderables) == 0
+
+    def test_empty_old_string_only_new(self):
+        """Empty old_string with new content renders only additions."""
+        group = _format_diff("", "only added")
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert "+ only added" in rendered
+
+    def test_empty_new_string_only_old(self):
+        """Empty new_string with old content renders only deletions."""
+        group = _format_diff("only removed", "")
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert "- only removed" in rendered
+
+    def test_single_line_deletion(self):
+        """Single-line old_string produces exactly one deletion line."""
+        group = _format_diff("solo line\n", "")
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert rendered.count("- ") == 1
+        assert "- solo line" in rendered
+
+    def test_single_line_addition(self):
+        """Single-line new_string produces exactly one addition line."""
+        group = _format_diff("", "brand new\n")
+        rendered = "\n".join(str(r) for r in group.renderables)
+        assert rendered.count("+ ") == 1
+        assert "+ brand new" in rendered
+
+    def test_line_counting_matches_actual_lines(self):
+        """Line count in rendered output matches the number of non-empty lines in input."""
+        old_lines = ["def foo():", "    pass", "    return None"]
+        new_lines = ["def foo():", "    return True", "    raise NotImplemented"]
+        group = _format_diff("\n".join(old_lines), "\n".join(new_lines))
+
+        rendered = "\n".join(str(r) for r in group.renderables)
+        # 3 old lines → 3 deletion lines; 3 new lines → 3 addition lines
+        assert rendered.count("- ") == 3
+        assert rendered.count("+ ") == 3

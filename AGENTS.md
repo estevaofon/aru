@@ -86,12 +86,6 @@ Tree-sitter based Python parser. Extracts imports, classes, functions, decorator
 - `.aru/sessions/` → Saved conversation sessions (JSON)
 - `.claude/settings.local.json` → Permission allowlists
 
-## Dependencies
-
-Core: `agno`, `anthropic`, `tree-sitter>=0.23`, `tree-sitter-python`, `prompt-toolkit>=3.0`, `rich`, `pathspec>=0.12`, `art>=6.0`, `python-dotenv`, `httpx`, `sqlalchemy>=2.0.48`
-
-Python: **3.13+**
-
 ## Development Workflow
 
 ### Running Tests
