@@ -345,3 +345,92 @@ class TestRankFiles:
         # Both files should appear regardless of weight configuration
         assert "auth.py" in result_recency_heavy
         assert "database.py" in result_recency_heavy
+
+    def test_no_matching_files_returns_appropriate_message(self, tmp_path, monkeypatch):
+        """Test that rank_files handles case where no files match the task."""
+        monkeypatch.chdir(tmp_path)
+        # Create files with names that don't match any reasonable keywords
+        (tmp_path / "aaa.py").write_text("# placeholder")
+        (tmp_path / "bbb.py").write_text("# placeholder")
+        # Set all files to be very old (beyond max_age_days)
+        old_time = time.time() - (60 * 86400)
+        for f in ["aaa.py", "bbb.py"]:
+            os.utime(tmp_path / f, (old_time, old_time))
+
+        # With zero weight on name and recency, only structural remains
+        # but since there are no dependencies, all scores will be 0
+        with patch("aru.tools.ranker.WEIGHT_NAME", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_STRUCTURAL", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_RECENCY", 0.0):
+            result = rank_files("xyz nonexistent term", top_k=5)
+
+        # Should return a message about no relevant files found
+        assert "No files found" in result or "no files" in result.lower()
+
+    def test_structural_scores_with_real_imports(self, tmp_path, monkeypatch):
+        """Test that rank_files uses structural dependency scoring with real imports."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create files with real import statements
+        (tmp_path / "utils.py").write_text("def helper(): pass")
+        (tmp_path / "main.py").write_text("from utils import helper\ndef main(): pass")
+
+        # Set both files to be equally recent
+        current_time = time.time()
+        os.utime(tmp_path / "utils.py", (current_time, current_time))
+        os.utime(tmp_path / "main.py", (current_time, current_time))
+
+        # Search for "util" - utils.py should appear (name match on "util" matches "utils")
+        with patch("aru.tools.ranker.WEIGHT_NAME", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_STRUCTURAL", 1.0), \
+             patch("aru.tools.ranker.WEIGHT_RECENCY", 0.0):
+            result = rank_files("util", top_k=5)
+
+        # utils.py should be in results (dependency scoring looks at imports)
+        assert "utils.py" in result
+
+    def test_files_in_subdirectories_ranked_correctly(self, tmp_path, monkeypatch):
+        """Test that files in nested directories are ranked correctly."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create nested directory structure
+        (tmp_path / "auth").mkdir()
+        (tmp_path / "auth" / "login.py").write_text("def login(): pass")
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "config.py").write_text("DEBUG = True")
+
+        # Ensure both files have the same recent timestamp
+        current_time = time.time()
+        os.utime(tmp_path / "auth" / "login.py", (current_time, current_time))
+        os.utime(tmp_path / "core" / "config.py", (current_time, current_time))
+
+        result = rank_files("authentication")
+
+        # auth/login.py should rank higher because "auth" matches
+        lines = result.split("\n")
+        auth_line_idx = next((i for i, l in enumerate(lines) if "auth/login.py" in l), None)
+        config_line_idx = next((i for i, l in enumerate(lines) if "core/config.py" in l), None)
+
+        assert auth_line_idx is not None
+        assert config_line_idx is not None
+        assert auth_line_idx < config_line_idx  # auth should appear before config
+
+    def test_case_insensitive_path_matching(self, tmp_path, monkeypatch):
+        """Test that file path matching is case-insensitive."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create files with mixed case names
+        (tmp_path / "Auth.py").write_text("def authenticate(): pass")
+        (tmp_path / "USER.py").write_text("class User: pass")
+
+        current_time = time.time()
+        os.utime(tmp_path / "Auth.py", (current_time, current_time))
+        os.utime(tmp_path / "USER.py", (current_time, current_time))
+
+        # Search with lowercase - should find both due to case-insensitive matching
+        with patch("aru.tools.ranker.WEIGHT_NAME", 1.0), \
+             patch("aru.tools.ranker.WEIGHT_STRUCTURAL", 0.0), \
+             patch("aru.tools.ranker.WEIGHT_RECENCY", 0.0):
+            result = rank_files("auth", top_k=5)
+
+        assert "Auth.py" in result

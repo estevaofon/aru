@@ -21,12 +21,12 @@ def create_executor(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instru
         tools=EXECUTOR_TOOLS,
         instructions=build_instructions("executor", extra_instructions),
         markdown=True,
-        # Compress tool results after 6 uncompressed tool calls to save tokens
+        # Compress tool results after 10 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=6,
+            compress_tool_results_limit=10,
         ),
         tool_call_limit=20,
     )

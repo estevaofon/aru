@@ -50,3 +50,15 @@ class TestBuildInstructions:
     def test_invalid_role_raises(self):
         with pytest.raises(KeyError):
             build_instructions("unknown")
+            
+    def test_empty_extra_parameter(self):
+        """Test behavior when extra parameter is empty or None."""
+        # Case: Empty string
+        result_empty = build_instructions("general", extra="")
+        assert not result_empty.endswith("\n\n")
+        assert BASE_INSTRUCTIONS in result_empty
+        
+        # Case: None
+        result_none = build_instructions("general", extra=None)
+        assert not result_none.endswith("\n\n")
+        assert BASE_INSTRUCTIONS in result_none

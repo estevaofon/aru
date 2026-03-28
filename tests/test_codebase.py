@@ -183,3 +183,33 @@ def test_edit_file_basic(tmp_path):
 
     assert "Successfully edited" in result
     assert f.read_text() == "def hello():\n    return 'earth'\n"
+
+
+def test_edit_file_search_replace(tmp_path):
+    """Test edit_file with a multi-line search/replace block on a temp file."""
+    f = tmp_path / "config.py"
+    original = (
+        "DB_HOST = 'localhost'\n"
+        "DB_PORT = 5432\n"
+        "DB_NAME = 'mydb'\n"
+        "DEBUG = True\n"
+    )
+    f.write_text(original)
+
+    set_skip_permissions(True)
+    try:
+        result = edit_file(
+            str(f),
+            "DB_HOST = 'localhost'\nDB_PORT = 5432",
+            "DB_HOST = 'production.example.com'\nDB_PORT = 5433",
+        )
+    finally:
+        set_skip_permissions(False)
+
+    assert "Successfully edited" in result
+    updated = f.read_text()
+    assert "DB_HOST = 'production.example.com'" in updated
+    assert "DB_PORT = 5433" in updated
+    assert "DB_NAME = 'mydb'" in updated
+    assert "DEBUG = True" in updated
+    assert "localhost" not in updated

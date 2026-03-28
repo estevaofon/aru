@@ -8,6 +8,7 @@ from aru.context import (
     should_compact,
     compact_conversation,
     apply_compaction,
+    build_compaction_prompt,
 )
 
 
@@ -146,6 +147,22 @@ class TestCompactConversation:
         """Should handle empty conversation."""
         result = await compact_conversation([], model_ref="claude-haiku-4-5-20251001")
         assert isinstance(result, list)
+
+
+class TestBuildCompactionPrompt:
+    """Tests for build_compaction_prompt function."""
+
+    def test_build_context_excludes_empty_sections(self):
+        """Should omit optional sections (plan_task, messages) when not provided."""
+        result = build_compaction_prompt([], plan_task=None)
+
+        # The "Active task" section should not appear when plan_task is None
+        assert "Active task" not in result
+        # The base template header should still be present
+        assert "Conversation to summarize" in result
+        # No message blocks should be present
+        assert "**USER:**" not in result
+        assert "**ASSISTANT:**" not in result
 
 
 class TestApplyCompaction:

@@ -14,7 +14,7 @@ from aru.cli import (
     StatusBar,
     DEFAULT_MODEL,
 )
-from aru.providers import LEGACY_MODEL_ALIASES
+from aru.providers import MODEL_ALIASES
 
 
 # ── _generate_session_id ────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ class TestSessionFromDictLegacy:
             "model_key": "sonnet",   # old format, no "model_ref" key
         }
         s = Session.from_dict(data)
-        assert s.model_ref == LEGACY_MODEL_ALIASES["sonnet"]
+        assert s.model_ref == MODEL_ALIASES["sonnet"]
 
     def test_model_ref_takes_precedence_over_model_key(self):
         data = {

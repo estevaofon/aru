@@ -43,6 +43,12 @@ def _score_name_match(file_path: str, keywords: list[str]) -> float:
         # Partial match in full path
         elif kw in path_lower:
             matches += 1
+        # Check if any path component is a substring of the keyword (e.g., "auth" in "authentication")
+        else:
+            for part in path_parts:
+                if len(part) >= 3 and part in kw:
+                    matches += 1.5  # Higher than partial match, lower than exact
+                    break
 
     return min(matches / max(len(keywords), 1), 1.0)
 

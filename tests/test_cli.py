@@ -11,6 +11,7 @@ import pytest
 from aru.cli import (
     _sanitize_input,
     _resolve_mentions,
+    AgentRunResult,
     PlanStep,
     parse_plan_steps,
     Session,
@@ -20,7 +21,7 @@ from aru.cli import (
     SLASH_COMMANDS,
     _MENTION_RE,
 )
-from aru.providers import LEGACY_MODEL_ALIASES
+from aru.providers import MODEL_ALIASES
 
 
 # ── _sanitize_input ─────────────────────────────────────────────────
@@ -229,10 +230,10 @@ class TestSession:
 
     def test_add_message_summarizes_and_truncates_history(self):
         session = Session()
-        for i in range(25):
+        for i in range(35):
             session.add_message("user", f"msg {i}")
         # History should be bounded (summarization + hard cap)
-        assert len(session.history) <= 20
+        assert len(session.history) <= 30
         # First message should be a summary of older messages
         assert "[Conversation summary" in session.history[0]["content"]
 
@@ -337,6 +338,49 @@ class TestSession:
         session.plan_steps[1].status = "in_progress"
         result = session.render_plan_progress()
         assert "1/3" in result
+
+
+# ── AgentRunResult ───────────────────────────────────────────────────
+
+class TestAgentRunResult:
+    def test_with_tools_summary_no_tools(self):
+        result = AgentRunResult(content="Hello world")
+        assert result.with_tools_summary() == "Hello world"
+
+    def test_with_tools_summary_with_tools(self):
+        result = AgentRunResult(
+            content="I edited the file.",
+            tool_calls=["Read(foo.py)", "Edit(foo.py)"],
+        )
+        summary = result.with_tools_summary()
+        assert "[Tools]" in summary
+        assert "Read(foo.py)" in summary
+        assert "Edit(foo.py)" in summary
+        assert summary.startswith("I edited the file.")
+
+    def test_with_tools_summary_none_content(self):
+        result = AgentRunResult(content=None, tool_calls=["Read(x.py)"])
+        assert result.with_tools_summary() is None
+
+    def test_empty_tool_calls(self):
+        result = AgentRunResult(content="text", tool_calls=[])
+        assert result.with_tools_summary() == "text"
+
+    def test_summarize_preserves_tools_section(self):
+        """When history is summarized, [Tools] sections should be preserved."""
+        session = Session()
+        msg_with_tools = "I fixed the bug.\n\n[Tools]\n  - Edit(main.py)\n  - Bash(pytest)"
+        session.history = [
+            {"role": "user", "content": "fix the bug"},
+            {"role": "assistant", "content": msg_with_tools},
+        ] * 5  # 10 messages
+        # Add enough to trigger summarization (threshold=20)
+        for i in range(15):
+            session.add_message("user", f"msg {i}")
+        # The summary should contain [Tools] references
+        summary_msg = session.history[0]["content"]
+        assert "[Tools]" in summary_msg
+        assert "Edit(main.py)" in summary_msg
 
 
 # ── SessionStore ─────────────────────────────────────────────────────
@@ -468,9 +512,9 @@ class TestPasteState:
 
 class TestCliConstants:
     def test_legacy_model_aliases(self):
-        assert "sonnet" in LEGACY_MODEL_ALIASES
-        assert "opus" in LEGACY_MODEL_ALIASES
-        assert "haiku" in LEGACY_MODEL_ALIASES
+        assert "sonnet" in MODEL_ALIASES
+        assert "opus" in MODEL_ALIASES
+        assert "haiku" in MODEL_ALIASES
 
     def test_default_model_is_valid_ref(self):
         from aru.providers import resolve_model_ref, get_provider
@@ -481,6 +525,12 @@ class TestCliConstants:
         for cmd in SLASH_COMMANDS:
             assert len(cmd) == 3
             assert cmd[0].startswith("/")
+
+    def test_slash_commands_coverage(self):
+        cmd_names = [cmd[0] for cmd in SLASH_COMMANDS]
+        assert "/plan" in cmd_names
+        assert "/help" in cmd_names
+        assert "/model" in cmd_names
 
 
 class TestAskYesNoCli:

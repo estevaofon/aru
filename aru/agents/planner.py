@@ -21,9 +21,13 @@ Rules:
   Multiple steps that each produce a separate deliverable is scope creep — keep only the best one.
 - Multiple steps are OK only when they implement different parts of the SAME deliverable \
   or when the user explicitly asked for multiple things.
-- Never add steps, never rewrite steps, never change wording of kept steps
-- Return the plan in the EXACT same markdown format (## Summary then ## Steps)
-- If the plan is already correct, return it unchanged
+
+CRITICAL — preserve the original plan text:
+- You may ONLY delete entire steps that are scope creep. You must NOT rewrite, rephrase, \
+  translate, summarize, or simplify any step you keep.
+- Copy kept steps EXACTLY as they appear — same language, same wording, same detail level.
+- Return the plan in the EXACT same markdown format (## Summary then ## Steps).
+- If the plan is already correct, return it UNCHANGED — do not paraphrase it.
 
 Return ONLY the markdown plan. No explanation, no preamble.\
 """
@@ -70,12 +74,12 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
         tools=PLANNER_TOOLS,
         instructions=build_instructions("planner", extra_instructions),
         markdown=True,
-        # Compress tool results after 3 uncompressed tool calls to save tokens
+        # Compress tool results after 6 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=3,
+            compress_tool_results_limit=10,
         ),
-        tool_call_limit=8,
+        tool_call_limit=20,
     )

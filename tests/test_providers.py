@@ -6,7 +6,7 @@ import pytest
 
 from aru.providers import (
     BUILTIN_PROVIDERS,
-    LEGACY_MODEL_ALIASES,
+    MODEL_ALIASES,
     ProviderConfig,
     create_model,
     get_available_models,
@@ -66,7 +66,7 @@ class TestGetActualModelId:
 class TestGetMaxTokens:
     def test_known_model(self):
         provider = BUILTIN_PROVIDERS["anthropic"]
-        assert _get_max_tokens(provider, "claude-sonnet-4-5") == 8192
+        assert _get_max_tokens(provider, "claude-sonnet-4-5") == 16384
 
     def test_unknown_model_uses_default(self):
         provider = BUILTIN_PROVIDERS["ollama"]

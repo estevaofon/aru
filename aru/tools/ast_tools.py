@@ -136,7 +136,27 @@ def _extract_function(node: Any, source: bytes) -> dict:
             params = [p.strip().split(":")[0].strip().split("=")[0].strip()
                       for p in raw_params if p.strip()]
 
-    return {"name": name, "params": params}
+    # Extract docstring if present (first expression_statement with a string child)
+    docstring = ""
+    body = None
+    for child in node.children:
+        if child.type == "block":
+            body = child
+            break
+    if body and body.children:
+        first_stmt = body.children[0]
+        if first_stmt.type == "expression_statement":
+            for sc in first_stmt.children:
+                if sc.type == "string":
+                    docstring = source[sc.start_byte:sc.end_byte].decode("utf-8", errors="ignore")
+                    # Strip triple quotes
+                    for q in ('"""', "'''"):
+                        if docstring.startswith(q) and docstring.endswith(q):
+                            docstring = docstring[3:-3].strip()
+                            break
+                    break
+
+    return {"name": name, "params": params, "docstring": docstring}
 
 
 def _extract_decorators(node: Any, source: bytes) -> list[str]:
