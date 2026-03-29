@@ -1,69 +1,69 @@
 # aru
 
-Um assistente de codificação inteligente para o terminal, powered by LLMs e [Agno](https://github.com/agno-agi/agno) agents.
+An intelligent coding assistant for the terminal, powered by LLMs and [Agno](https://github.com/agno-agi/agno) agents.
 </br></br>
 <img width="600" alt="image" src="https://github.com/user-attachments/assets/36001faa-3163-4374-84fd-da8704a4ed9d" />
 
 
 
-## Destaques
+## Highlights
 
-- **Arquitetura Multi-Agente** — Agentes especializados para planejamento, execução e conversação
-- **CLI Interativa** — Respostas em streaming, paste multi-linha, gerenciamento de sessões
-- **16 Ferramentas Integradas** — Operações de arquivo, busca de código, shell, busca web, delegação de tarefas
-- **Planejamento de Tarefas** — Quebra de tarefas complexas em etapas com execução automática
-- **Multi-Provider** — Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek e outros via configuração custom
-- **Comandos e Skills Personalizados** — Estenda aru via diretório `.agents/`
-- **Suporte MCP** — Integração com Model Context Protocol servers
+- **Multi-Agent Architecture** — Specialized agents for planning, execution, and conversation
+- **Interactive CLI** — Streaming responses, multi-line paste, session management
+- **16 Integrated Tools** — File operations, code search, shell, web search, task delegation
+- **Task Planning** — Break down complex tasks into steps with automatic execution
+- **Multi-Provider** — Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek, and others via custom configuration
+- **Custom Commands and Skills** — Extend aru via the `.agents/` directory
+- **MCP Support** — Integration with Model Context Protocol servers
 
-## Início Rápido
+## Quick Start
 
-### 1. Instalar
+### 1. Install
 
 ```bash
 pip install -e .
 ```
 
-> **Requisitos:** Python 3.13+
+> **Requirements:** Python 3.13+
 
-### 2. Configurar a API Key
+### 2. Configure the API Key
 
-Aru usa o **Claude Sonnet 4.6** da Anthropic como modelo padrão. Você precisa de uma [chave de API da Anthropic](https://console.anthropic.com/) para começar.
+Aru uses **Claude Sonnet 4.6** from Anthropic as the default model. You need an [Anthropic API key](https://console.anthropic.com/) to get started.
 
-Crie um arquivo `.env` na raiz do projeto:
+Create a `.env` file in the project root:
 
 ```bash
 cp .env.example .env
 ```
 
-Edite o `.env` com sua chave:
+Edit the `.env` with your key:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-sua-chave-aqui
+ANTHROPIC_API_KEY=sk-ant-your-key-here
 ```
 
-> Usando outro provider? Veja a seção [Modelos e Providers](#modelos-e-providers) para configurar OpenAI, Ollama, Groq, etc.
+> Using another provider? See the [Models and Providers](#models-and-providers) section to configure OpenAI, Ollama, Groq, etc.
 
-### 3. Executar
+### 3. Run
 
 ```bash
 aru
 ```
 
-### Instalação Global (rodar `aru` de qualquer lugar)
+### Global Installation (run `aru` from anywhere)
 
-Para usar o aru como comando global no terminal, crie um ambiente virtual dedicado e um script wrapper:
+To use aru as a global command in the terminal, create a dedicated virtual environment and a wrapper script:
 
 <details>
 <summary><strong>Windows</strong></summary>
 
-1. Crie o ambiente virtual e instale:
+1. Create the virtual environment and install:
 ```bash
 python -m venv C:\aru-env
-C:\aru-env\Scripts\pip install -e C:\caminho\para\aru
+C:\aru-env\Scripts\pip install -e C:\path\to\aru
 ```
 
-2. Crie `aru.bat` em uma pasta no seu `PATH` (ex: `C:\Users\<user>\bin\`):
+2. Create `aru.bat` in a folder on your `PATH` (e.g., `C:\Users\<user>\bin\`):
 ```bat
 @echo off
 C:\aru-env\Scripts\python -m aru.cli %*
@@ -74,101 +74,101 @@ C:\aru-env\Scripts\python -m aru.cli %*
 <details>
 <summary><strong>Linux / macOS</strong></summary>
 
-1. Crie o ambiente virtual e instale:
+1. Create the virtual environment and install:
 ```bash
 python3 -m venv ~/.aru-env
-~/.aru-env/bin/pip install -e /caminho/para/aru
+~/.aru-env/bin/pip install -e /path/to/aru
 ```
 
-2. Crie o script `~/.local/bin/aru`:
+2. Create the script `~/.local/bin/aru`:
 ```bash
 #!/bin/bash
 ~/.aru-env/bin/python -m aru.cli "$@"
 ```
 
-3. Torne executável:
+3. Make it executable:
 ```bash
 chmod +x ~/.local/bin/aru
 ```
 
 </details>
 
-Pronto — agora `aru` funciona de qualquer diretório.
+Done — now `aru` works from any directory.
 
-## Uso
+## Usage
 
-### Comandos
+### Commands
 
-| Comando | Descrição |
-|---------|-----------|
-| Linguagem natural | Apenas digite — aru cuida do resto |
-| `/plan <tarefa>` | Cria plano de implementação detalhado |
-| `/model [provider/modelo]` | Alterna modelos e providers |
-| `/mcp` | Lista servidores e ferramentas MCP disponíveis |
-| `/commands` | Lista comandos personalizados |
-| `/skills` | Lista skills disponíveis |
-| `/sessions` | Lista sessões recentes |
-| `/help` | Mostra todos os comandos |
-| `! <comando>` | Executa comandos shell |
-| `/quit` ou `/exit` | Sai do aru |
+| Command | Description |
+|---------|-------------|
+| Natural language | Just type — aru handles the rest |
+| `/plan <task>` | Creates a detailed implementation plan |
+| `/model [provider/model]` | Switch models and providers |
+| `/mcp` | List available MCP servers and tools |
+| `/commands` | List custom commands |
+| `/skills` | List available skills |
+| `/sessions` | List recent sessions |
+| `/help` | Show all commands |
+| `! <command>` | Execute shell commands |
+| `/quit` or `/exit` | Exit aru |
 
-### Opções CLI
+### CLI Options
 
 ```bash
-aru                                    # Inicia nova sessão
-aru --resume <id>                      # Retoma sessão
-aru --resume last                      # Retoma última sessão
-aru --list                             # Lista sessões
-aru --dangerously-skip-permissions     # Pula prompts de permissão
+aru                                    # Start new session
+aru --resume <id>                      # Resume session
+aru --resume last                      # Resume last session
+aru --list                             # List sessions
+aru --dangerously-skip-permissions     # Skip permission prompts
 ```
 
-### Exemplos
+### Examples
 
 ```
-aru> /plan criar uma REST API com FastAPI para gerenciar usuários
+aru> /plan create a REST API with FastAPI to manage users
 
-aru> refatorar o módulo de autenticação para usar tokens JWT
+aru> refactor the authentication module to use JWT tokens
 
 aru> ! pytest tests/ -v
 
 aru> /model ollama/codellama
 ```
 
-## Configuração
+## Configuration
 
-### Modelos e Providers
+### Models and Providers
 
-Por padrão, aru utiliza o **Claude Sonnet 4.6** (Anthropic). Você pode alternar para qualquer provider suportado durante a sessão com `/model`:
+By default, aru uses **Claude Sonnet 4.6** (Anthropic). You can switch to any supported provider during a session with `/model`:
 
-| Provider | Comando | API Key (`.env`) | Instalação extra |
+| Provider | Command | API Key (`.env`) | Extra Installation |
 |----------|---------|-------------------|------------------|
-| **Anthropic** | `/model anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | — (incluído) |
+| **Anthropic** | `/model anthropic/claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | — (included) |
 | **Ollama** | `/model ollama/llama3.1` | — (local) | `pip install -e ".[ollama]"` |
 | **OpenAI** | `/model openai/gpt-4o` | `OPENAI_API_KEY` | `pip install -e ".[openai]"` |
 | **Groq** | `/model groq/llama-3.3-70b-versatile` | `GROQ_API_KEY` | `pip install -e ".[groq]"` |
 | **OpenRouter** | `/model openrouter/deepseek/deepseek-chat-v3-0324` | `OPENROUTER_API_KEY` | `pip install -e ".[openai]"` |
 
-Para instalar todos os providers de uma vez:
+To install all providers at once:
 
 ```bash
 pip install -e ".[all-providers]"
 ```
 
-#### Ollama (modelos locais)
+#### Ollama (local models)
 
-Para rodar modelos localmente sem API key, instale o [Ollama](https://ollama.com/), inicie o servidor e use qualquer modelo instalado:
+To run models locally without an API key, install [Ollama](https://ollama.com/), start the server, and use any installed model:
 
 ```bash
-ollama serve                    # Inicia o servidor Ollama
-ollama pull codellama           # Baixa um modelo
-aru                             # Inicia aru
-# Dentro do aru:
+ollama serve                    # Start the Ollama server
+ollama pull codellama           # Download a model
+aru                             # Start aru
+# Inside aru:
 /model ollama/codellama
 ```
 
-#### Configurando o modelo padrão
+#### Configuring the default model
 
-Você pode definir o provider/modelo padrão no `aru.json` para não precisar trocar manualmente toda sessão:
+You can set the default provider/model in `aru.json` so you don't need to switch manually every session:
 
 ```json
 {
@@ -182,11 +182,11 @@ Você pode definir o provider/modelo padrão no `aru.json` para não precisar tr
 }
 ```
 
-O campo `default` define o modelo principal. Os demais campos são aliases que podem ser usados com `/model <alias>`.
+The `default` field sets the main model. The other fields are aliases that can be used with `/model <alias>`.
 
-#### Providers customizados
+#### Custom providers
 
-Você pode configurar providers customizados com limites de tokens específicos:
+You can configure custom providers with specific token limits:
 
 ```json
 {
@@ -205,9 +205,9 @@ Você pode configurar providers customizados com limites de tokens específicos:
 }
 ```
 
-### Permissões (`aru.json`)
+### Permissions (`aru.json`)
 
-O arquivo `aru.json` na raiz do projeto controla quais comandos shell o aru pode executar **sem pedir confirmação**:
+The `aru.json` file in the project root controls which shell commands aru can execute **without asking for confirmation**:
 
 ```json
 {
@@ -223,119 +223,119 @@ O arquivo `aru.json` na raiz do projeto controla quais comandos shell o aru pode
 }
 ```
 
-Cada entrada é um padrão glob. Qualquer comando que não se encaixe em um padrão listado pedirá confirmação antes de executar.
+Each entry is a glob pattern. Any command that doesn't match a listed pattern will prompt for confirmation before executing.
 
-> O `aru.json` também pode ser colocado em `.aru/config.json`.
+> `aru.json` can also be placed at `.aru/config.json`.
 
 ### AGENTS.md
 
-Coloque um arquivo `AGENTS.md` na raiz do seu projeto com instruções personalizadas que serão anexadas a todos os prompts do sistema dos agentes.
+Place an `AGENTS.md` file in your project root with custom instructions that will be appended to all agent system prompts.
 
-### Diretório `.agents/`
+### `.agents/` Directory
 
 ```
 .agents/
-├── commands/       # Comandos slash personalizados (nome do arquivo = nome do comando)
-│   └── deploy.md   # Uso: /deploy <args>
-└── skills/         # Skills/personas personalizadas
-    └── review.md   # Carregado como instruções adicionais do agente
+├── commands/       # Custom slash commands (filename = command name)
+│   └── deploy.md   # Usage: /deploy <args>
+└── skills/         # Custom skills/personas
+    └── review.md   # Loaded as additional agent instructions
 ```
 
-Arquivos de comando suportam frontmatter com `description` e a variável template `$INPUT` para argumentos.
+Command files support frontmatter with `description` and the `$INPUT` template variable for arguments.
 
-### Suporte MCP (Model Context Protocol)
+### MCP Support (Model Context Protocol)
 
-Aru pode carregar ferramentas de servidores MCP. Configure em `.aru/mcp_config.json`:
+Aru can load tools from MCP servers. Configure in `.aru/mcp_config.json`:
 
 ```json
 {
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/caminho/permitido"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/allowed/path"]
     }
   }
 }
 ```
 
-## Agentes
+## Agents
 
-| Agente | Papel | Ferramentas |
-|--------|-------|-------------|
-| **Planner** | Analisa codebase, cria planos de implementação estruturados | Ferramentas somente leitura, busca, web |
-| **Executor** | Implementa mudanças de código baseadas em planos ou instruções | Todas as ferramentas incluindo delegação |
-| **General** | Lida com conversação e operações simples | Todas as ferramentas incluindo delegação |
+| Agent | Role | Tools |
+|-------|------|-------|
+| **Planner** | Analyzes codebase, creates structured implementation plans | Read-only tools, search, web |
+| **Executor** | Implements code changes based on plans or instructions | All tools including delegation |
+| **General** | Handles conversation and simple operations | All tools including delegation |
 
-## Ferramentas
+## Tools
 
-### Operações de Arquivo
-- `read_file` — Lê arquivos com suporte a range de linhas e detecção binária
-- `read_file_smart` — Leitura inteligente de arquivos com foco em trechos relevantes para a query
-- `write_file` / `write_files` — Escreve arquivos únicos ou em lote
-- `edit_file` / `edit_files` — Edições find-replace em múltiplos arquivos
+### File Operations
+- `read_file` — Reads files with line range support and binary detection
+- `read_file_smart` — Smart file reading focused on relevant snippets for the query
+- `write_file` / `write_files` — Writes single or batch files
+- `edit_file` / `edit_files` — Find-replace edits across multiple files
 
-### Busca & Descoberta
-- `glob_search` — Encontra arquivos por padrão (respeita .gitignore)
-- `grep_search` — Busca de conteúdo com regex e filtro de arquivos
-- `list_directory` — Listagem de diretório com filtro gitignore
-- `rank_files` — Ranking de relevância de arquivos multi-fator (nome, estrutura, recência)
+### Search & Discovery
+- `glob_search` — Find files by pattern (respects .gitignore)
+- `grep_search` — Content search with regex and file filtering
+- `list_directory` — Directory listing with gitignore filtering
+- `rank_files` — Multi-factor file relevance ranking (name, structure, recency)
 
-### Análise de Código
-- `code_structure` — Extrai classes, funções, imports via AST tree-sitter
-- `find_dependencies` — Analisa relacionamentos de imports entre arquivos
+### Code Analysis
+- `code_structure` — Extracts classes, functions, imports via tree-sitter AST
+- `find_dependencies` — Analyzes import relationships between files
 
 ### Shell & Web
-- `bash` — Executa comandos shell com gates de permissão
-- `web_search` — Busca na web via DuckDuckGo
-- `web_fetch` — Busca URLs e converte HTML para texto legível
+- `bash` — Executes shell commands with permission gates
+- `web_search` — Web search via DuckDuckGo
+- `web_fetch` — Fetches URLs and converts HTML to readable text
 
-### Avançado
-- `delegate_task` — Gera sub-agentes autônomos para execução paralela de tarefas
+### Advanced
+- `delegate_task` — Spawns autonomous sub-agents for parallel task execution
 
-## Arquitetura
+## Architecture
 
 ```
 aru-code/
 ├── aru/
-│   ├── cli.py              # CLI interativa com display em streaming
-│   ├── config.py           # Carregador de configuração (AGENTS.md, .agents/)
-│   ├── providers.py        # Abstração multi-provider de LLMs
+│   ├── cli.py              # Interactive CLI with streaming display
+│   ├── config.py           # Configuration loader (AGENTS.md, .agents/)
+│   ├── providers.py        # Multi-provider LLM abstraction
 │   ├── agents/
-│   │   ├── planner.py      # Agente de planejamento
-│   │   └── executor.py     # Agente de execução
+│   │   ├── planner.py      # Planning agent
+│   │   └── executor.py     # Execution agent
 │   └── tools/
-│       ├── codebase.py     # 16 ferramentas principais
-│       ├── ast_tools.py    # Análise de código tree-sitter
-│       ├── ranker.py       # Ranking de relevância de arquivos
-│       ├── mcp_client.py   # Cliente MCP
-│       └── gitignore.py    # Filtro gitignore-aware
-├── aru.json                # Permissões e configuração de modelos
-├── .env                    # API keys (não commitado)
-├── .aru/                   # Dados locais (sessões)
+│       ├── codebase.py     # 16 core tools
+│       ├── ast_tools.py    # Tree-sitter code analysis
+│       ├── ranker.py       # File relevance ranking
+│       ├── mcp_client.py   # MCP client
+│       └── gitignore.py    # Gitignore-aware filtering
+├── aru.json                # Permissions and model configuration
+├── .env                    # API keys (not committed)
+├── .aru/                   # Local data (sessions)
 └── pyproject.toml
 ```
 
-## Construído Com
+## Built With
 
-- **[Agno](https://github.com/agno-agi/agno)** — Framework de agentes com orquestração de ferramentas
+- **[Agno](https://github.com/agno-agi/agno)** — Agent framework with tool orchestration
 - **[Anthropic Claude](https://www.anthropic.com/)** — Sonnet 4.6, Opus 4.6, Haiku 4.5
-- **[tree-sitter](https://tree-sitter.github.io/)** — Análise de código baseada em AST
-- **[Rich](https://rich.readthedocs.io/)** — UI de terminal
-- **[prompt-toolkit](https://python-prompt-toolkit.readthedocs.io/)** — Manipulação avançada de input
+- **[tree-sitter](https://tree-sitter.github.io/)** — AST-based code analysis
+- **[Rich](https://rich.readthedocs.io/)** — Terminal UI
+- **[prompt-toolkit](https://python-prompt-toolkit.readthedocs.io/)** — Advanced input handling
 
-## Desenvolvimento
+## Development
 
 ```bash
-# Instalar com dependências de desenvolvimento
+# Install with development dependencies
 pip install -e ".[dev]"
 
-# Executar testes
+# Run tests
 pytest
 
-# Executar testes com cobertura
+# Run tests with coverage
 pytest --cov=aru --cov-report=term-missing
 ```
 
 ---
 
-Construído com Claude e Agno
+Built with Claude and Agno
