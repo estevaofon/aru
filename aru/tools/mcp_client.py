@@ -1,5 +1,7 @@
 """Model Context Protocol (MCP) client manager and tool generation."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
