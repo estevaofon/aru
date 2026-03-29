@@ -19,3 +19,4 @@ wheels/
 .coverage
 aru.bat
 coverage.json
+.pypirc

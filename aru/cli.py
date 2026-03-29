@@ -982,6 +982,7 @@ def _show_help(config: AgentConfig | None):
     table.add_row("/sessions", "List recent sessions")
     table.add_row("/commands", "List custom commands")
     table.add_row("/skills", "List available skills")
+    table.add_row("/mcp", "List loaded MCP tools")
     table.add_row("/help", "Show this help")
     table.add_row("/quit", "Exit aru")
     table.add_row("! <cmd>", "Run shell command")
