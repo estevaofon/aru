@@ -5,6 +5,8 @@ to plan and track subtasks within each plan step. Inspired by Claude Code
 and Antigravity's task management approach.
 """
 
+from __future__ import annotations
+
 import threading
 
 from rich.console import Console, Group

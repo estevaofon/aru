@@ -1,5 +1,7 @@
 """Interactive CLI for aru - a Claude Code clone."""
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json

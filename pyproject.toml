@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "A Claude Code clone built with Agno agents"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 authors = [
     { name = "Estevao", email = "estevaofon@gmail.com" },
 ]
@@ -17,6 +17,8 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
