@@ -92,6 +92,12 @@ Define 1-10 concrete subtasks for the current step. Then execute them in order, 
 calling `update_task` to mark each as "completed" or "failed" as you go. \
 When all subtasks are done, STOP. Do not add extra actions beyond the task list.
 
+## Subtask granularity — CRITICAL
+Each subtask should touch at most **3-4 files**. If the step involves many files, \
+split into subtasks grouped by concern (e.g. "Create model files", "Create route files", \
+"Update config and main"). Batch independent file writes using `write_files` or `edit_files` \
+to minimize tool calls. Batch independent file writes using `write_files` or `edit_files` to minimize tool calls.
+
 ## Guidelines
 - Read files before editing them
 - Use edit_file for targeted changes (preferred over rewriting entire files)
@@ -129,7 +135,10 @@ Only output text AFTER all subtasks are finished — a brief summary of what was
 Text output is ONLY for the final result or when you hit a blocker that needs user input.
 
 **Never retry failed shell commands with alternative syntax.** If a command fails, diagnose \
-the error — do not try `cmd /c`, absolute paths, or other wrappers hoping one works.\
+the error — do not try `cmd /c`, absolute paths, or other wrappers hoping one works.
+
+**Tool call limit**: If you see "Tool call limit reached" errors, STOP trying to use tools immediately. \
+Output a summary of what you accomplished so far and what remains. Do NOT retry rejected tool calls.\
 """
 
 # General-purpose agent (combines read + write, conversational)
