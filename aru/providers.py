@@ -219,6 +219,7 @@ def resolve_model_ref(model_ref: str) -> tuple[str, str]:
 
     if "/" in model_ref:
         provider_key, model_name = model_ref.split("/", 1)
+        provider_key = provider_key.lower()
     else:
         # Could be a provider name (use its default) or unknown
         if model_ref in _providers:

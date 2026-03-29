@@ -1068,6 +1068,7 @@ class AgentRunResult:
     """Result from run_agent_capture including text output and tool call history."""
     content: str | None = None
     tool_calls: list[str] = field(default_factory=list)
+    stalled: bool = False
 
     def with_tools_summary(self) -> str | None:
         """Return content with appended tool call summary for session history."""
@@ -1254,6 +1255,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
     console.print()
     final_content = None
     collected_tool_calls: list[str] = []
+    _stalled = False
 
     try:
         from aru.tools.codebase import set_display, set_live
@@ -1318,12 +1320,20 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
             tasklist_set_live(live)
             tasklist_set_display(display)
             accumulated = ""
+            # Stall detection: count consecutive events without useful work
+            # When tool_call_limit is hit, Agno silently rejects tool calls and
+            # keeps calling the model in a loop. We detect this by tracking
+            # consecutive events that aren't tool starts/completions/content.
+            _stall_counter = 0
+            _stalled = False
+            _STALL_LIMIT = 20  # break after 20 non-useful events (prevents infinite loop)
             async for event in agent.arun(agent_input, stream=True, stream_events=True, yield_run_output=True):
                 if isinstance(event, RunOutput):
                     run_output = event
                     break
 
                 if isinstance(event, ToolCallStartedEvent):
+                    _stall_counter = 0
                     if hasattr(event, "tool") and event.tool:
                         tool_name = event.tool.tool_name or "tool"
                         tool_args = event.tool.tool_args or None
@@ -1345,6 +1355,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
                     live.update(display)
 
                 elif isinstance(event, ToolCallCompletedEvent):
+                    _stall_counter = 0
                     if hasattr(event, "tool") and event.tool:
                         tool_id = getattr(event.tool, "tool_call_id", None) or getattr(event.tool, "tool_name", "tool")
                     else:
@@ -1365,6 +1376,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
                     live.update(display)
 
                 elif isinstance(event, RunContentEvent):
+                    _stall_counter = 0
                     if hasattr(event, "content") and event.content:
                         accumulated += event.content
                         unflushed = accumulated[display._flushed_len:]
@@ -1390,6 +1402,17 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
                         display.set_content(accumulated)
                         live.update(display)
+
+                else:
+                    # Unknown/internal event (e.g. model cycling after tool_call_limit)
+                    _stall_counter += 1
+                    if _stall_counter >= _STALL_LIMIT:
+                        _stalled = True
+                        live.console.print(
+                            "[yellow]Agent stalled (tool call limit likely reached). "
+                            "Moving on.[/yellow]"
+                        )
+                        break
 
         set_live(None)
         set_display(None)
@@ -1425,7 +1448,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         console.print(f"[red]Error: {escape(str(e))}[/red]")
 
     console.print()
-    return AgentRunResult(content=final_content, tool_calls=collected_tool_calls)
+    return AgentRunResult(content=final_content, tool_calls=collected_tool_calls, stalled=_stalled)
 
 
 def ask_yes_no(prompt: str) -> bool:
@@ -1532,6 +1555,59 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
         try:
             run_result = await run_agent_capture(executor, step_prompt, session, lightweight=True)
             content = run_result.content
+
+            # If agent stalled (tool call limit loop), show progress and let user decide
+            if run_result.stalled:
+                from aru.tools.tasklist import get_task_store
+                store = get_task_store()
+                all_tasks = store.get_all()
+                done = [t for t in all_tasks if t["status"] == "completed"]
+                pending = [t for t in all_tasks if t["status"] not in ("completed", "failed")]
+
+                console.print(f"\n[yellow]Step {step.index} stalled (tool call limit reached).[/yellow]")
+                if done:
+                    console.print(f"  [green]Completed:[/green] {len(done)}/{len(all_tasks)} subtasks")
+                if pending:
+                    console.print(f"  [yellow]Pending:[/yellow]")
+                    for t in pending:
+                        console.print(f"    - {t.get('description', t.get('id', '?'))}")
+
+                if get_skip_permissions():
+                    step.status = "failed"
+                    continue
+
+                console.print("\n[bold]Options:[/bold]")
+                console.print("  [cyan](r)[/cyan] Retry step with additional instructions")
+                console.print("  [cyan](s)[/cyan] Skip to next step")
+                console.print("  [cyan](a)[/cyan] Abort plan execution")
+                try:
+                    choice = console.input("[bold yellow]Choice (r/s/a):[/bold yellow] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    choice = "a"
+
+                if choice in ("r", "retry"):
+                    try:
+                        extra = console.input("[bold cyan]Additional instructions:[/bold cyan] ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        extra = ""
+                    if extra:
+                        # Re-run the same step with user's extra context appended
+                        step.status = "in_progress"
+                        reset_task_store()
+                        retry_prompt = step_prompt + f"\n\n## Additional Instructions\n{extra}"
+                        executor = executor_factory()
+                        run_result = await run_agent_capture(executor, retry_prompt, session, lightweight=True)
+                        content = run_result.content
+                        # Fall through to normal completion check below
+                    else:
+                        step.status = "failed"
+                        continue
+                elif choice in ("s", "skip"):
+                    step.status = "failed"
+                    continue
+                else:
+                    step.status = "failed"
+                    break
 
             # Check task store as ground truth for step completion
             from aru.tools.tasklist import get_task_store
@@ -1665,6 +1741,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         # Apply default model from config if set
         if config.model_defaults.get("default"):
             session.model_ref = config.model_defaults["default"]
+        _sync_model(session)
         _render_home(session, skip_permissions)
 
     # Wire file-mutation callback so context cache (tree/git) is invalidated

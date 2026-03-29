@@ -82,7 +82,7 @@ wheels = [
 [[package]]
 name = "aru-code"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "agno" },
     { name = "anthropic" },
@@ -124,7 +124,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agno" },
+    { name = "agno", specifier = ">=2.5.10,<3" },
     { name = "anthropic" },
     { name = "groq", marker = "extra == 'all-providers'", specifier = ">=0.4" },
     { name = "groq", marker = "extra == 'groq'", specifier = ">=0.4" },
