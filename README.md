@@ -4,8 +4,6 @@ An intelligent coding assistant for the terminal, powered by LLMs and [Agno](htt
 
 ![0329(3)](https://github.com/user-attachments/assets/e84d5139-ebaa-4d12-bbae-628fae7dbc7a)
 
-<img align="left" src="https://github.com/user-attachments/assets/e84d5139-ebaa-4d12-bbae-628fae7dbc7a" width="2000" />
-
 ## Highlights
 
 - **Multi-Agent Architecture** — Specialized agents for planning, execution, and conversation
