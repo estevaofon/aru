@@ -178,6 +178,8 @@ The `aru.json` file in the project root controls which shell commands aru can ex
 Each entry is a glob pattern. Any command that doesn't match a listed pattern will prompt for confirmation before executing.
 
 > `aru.json` can also be placed at `.aru/config.json`.
+>
+> A full `aru.json` config reference here: [`aru.json`](./aru.json)
 
 ### AGENTS.md
 
