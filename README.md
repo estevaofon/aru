@@ -1,14 +1,8 @@
 # aru
 
 An intelligent coding assistant for the terminal, powered by LLMs and [Agno](https://github.com/agno-agi/agno) agents.
-</br></br>
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/36001faa-3163-4374-84fd-da8704a4ed9d" />
 
-
-
-https://github.com/user-attachments/assets/17674bfc-3d49-4e25-bdc7-dc445d5a089d
-
-
+![0329(3)](https://github.com/user-attachments/assets/e84d5139-ebaa-4d12-bbae-628fae7dbc7a)
 
 ## Highlights
 
