@@ -7,7 +7,9 @@ from aru.config import (
     CustomCommand,
     Skill,
     _parse_frontmatter,
+    _parse_skill_metadata,
     render_command_template,
+    render_skill_template,
     load_config,
     MAX_README_CHARS,
 )
@@ -33,12 +35,33 @@ class TestDataClasses:
             name="review",
             description="Code review skill",
             content="Review the code carefully",
-            source_path="/path/to/review.md",
+            source_path="/path/to/review/SKILL.md",
         )
         assert skill.name == "review"
         assert skill.description == "Code review skill"
         assert skill.content == "Review the code carefully"
-        assert skill.source_path == "/path/to/review.md"
+        assert skill.source_path == "/path/to/review/SKILL.md"
+        # Defaults for new agentskills.io fields
+        assert skill.allowed_tools == []
+        assert skill.disable_model_invocation is False
+        assert skill.user_invocable is True
+        assert skill.argument_hint == ""
+
+    def test_skill_creation_with_extended_fields(self):
+        skill = Skill(
+            name="review",
+            description="Code review skill",
+            content="Review the code",
+            source_path="/path/to/review/SKILL.md",
+            allowed_tools=["Read", "Grep"],
+            disable_model_invocation=True,
+            user_invocable=False,
+            argument_hint="[file-path]",
+        )
+        assert skill.allowed_tools == ["Read", "Grep"]
+        assert skill.disable_model_invocation is True
+        assert skill.user_invocable is False
+        assert skill.argument_hint == "[file-path]"
 
     def test_agent_config_defaults(self):
         config = AgentConfig()
@@ -75,13 +98,17 @@ class TestDataClasses:
         assert "Follow these rules" in result
 
     def test_agent_config_get_extra_instructions_no_skills_by_default(self):
-        """Skills are only loaded when explicitly requested (token optimization)."""
+        """Skill content is only loaded when explicitly requested (token optimization)."""
         skill1 = Skill("review", "Review", "Review code", "/path1")
         skill2 = Skill("test", "Test", "Write tests", "/path2")
         config = AgentConfig(skills={"review": skill1, "test": skill2})
         result = config.get_extra_instructions()
         assert "## Skill: review" not in result
         assert "## Skill: test" not in result
+        # But skill catalog IS included for model awareness
+        assert "## Available Skills" in result
+        assert "/review" in result
+        assert "/test" in result
 
     def test_agent_config_get_extra_instructions_specific_skills(self):
         skill1 = Skill("review", "Review", "Review code", "/path1")
@@ -277,12 +304,12 @@ class TestLoadConfig:
         assert "test" in config.commands
 
     def test_load_config_with_skills(self, tmp_path):
-        skills_dir = tmp_path / ".agents" / "skills"
-        skills_dir.mkdir(parents=True)
-        
-        skill_file = skills_dir / "review.md"
+        skill_dir = tmp_path / ".agents" / "skills" / "review"
+        skill_dir.mkdir(parents=True)
+
+        skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("---\ndescription: Code review\n---\nReview carefully")
-        
+
         config = load_config(str(tmp_path))
         assert "review" in config.skills
         skill = config.skills["review"]
@@ -291,25 +318,35 @@ class TestLoadConfig:
         assert skill.content == "Review carefully"
 
     def test_load_config_skill_without_frontmatter(self, tmp_path):
-        skills_dir = tmp_path / ".agents" / "skills"
-        skills_dir.mkdir(parents=True)
-        
-        skill_file = skills_dir / "optimize.md"
+        skill_dir = tmp_path / ".agents" / "skills" / "optimize"
+        skill_dir.mkdir(parents=True)
+
+        skill_file = skill_dir / "SKILL.md"
         skill_file.write_text("Optimize the code")
-        
+
         config = load_config(str(tmp_path))
         assert "optimize" in config.skills
         skill = config.skills["optimize"]
         assert skill.description == "Skill: optimize"
         assert skill.content == "Optimize the code"
 
-    def test_load_config_ignores_non_md_skills(self, tmp_path):
+    def test_load_config_ignores_non_skill_dirs(self, tmp_path):
         skills_dir = tmp_path / ".agents" / "skills"
         skills_dir.mkdir(parents=True)
-        
-        (skills_dir / "valid.md").write_text("Content")
-        (skills_dir / "invalid.txt").write_text("Content")
-        
+
+        # Valid: directory with SKILL.md
+        valid_dir = skills_dir / "valid"
+        valid_dir.mkdir()
+        (valid_dir / "SKILL.md").write_text("Content")
+
+        # Invalid: flat file (not a directory)
+        (skills_dir / "invalid.md").write_text("Content")
+
+        # Invalid: directory without SKILL.md
+        no_skill = skills_dir / "no-skill"
+        no_skill.mkdir()
+        (no_skill / "README.md").write_text("Not a skill")
+
         config = load_config(str(tmp_path))
         assert len(config.skills) == 1
         assert "valid" in config.skills
@@ -330,11 +367,12 @@ class TestLoadConfig:
     def test_load_config_multiple_skills_sorted(self, tmp_path):
         skills_dir = tmp_path / ".agents" / "skills"
         skills_dir.mkdir(parents=True)
-        
-        (skills_dir / "z.md").write_text("Z")
-        (skills_dir / "a.md").write_text("A")
-        (skills_dir / "m.md").write_text("M")
-        
+
+        for name in ("z", "a", "m"):
+            d = skills_dir / name
+            d.mkdir()
+            (d / "SKILL.md").write_text(name.upper())
+
         config = load_config(str(tmp_path))
         keys = list(config.skills.keys())
         assert keys == ["a", "m", "z"]
@@ -361,18 +399,160 @@ class TestLoadConfig:
         # Create complete configuration
         (tmp_path / "README.md").write_text("# Project")
         (tmp_path / "AGENTS.md").write_text("Instructions")
-        
+
         commands_dir = tmp_path / ".agents" / "commands"
         commands_dir.mkdir(parents=True)
         (commands_dir / "test.md").write_text("---\ndescription: Test\n---\nRun $INPUT")
-        
-        skills_dir = tmp_path / ".agents" / "skills"
-        skills_dir.mkdir(parents=True)
-        (skills_dir / "review.md").write_text("---\ndescription: Review\n---\nReview code")
-        
+
+        skill_dir = tmp_path / ".agents" / "skills" / "review"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\ndescription: Review\n---\nReview code")
+
         config = load_config(str(tmp_path))
         assert config.readme_md == "# Project"
         assert config.agents_md == "Instructions"
         assert len(config.commands) == 1
         assert len(config.skills) == 1
         assert config.has_instructions
+
+    def test_load_config_skill_with_extended_frontmatter(self, tmp_path):
+        skill_dir = tmp_path / ".agents" / "skills" / "review"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: code-review\n"
+            "description: Deep code review\n"
+            "allowed-tools: Read, Grep, Glob\n"
+            "user-invocable: true\n"
+            "disable-model-invocation: true\n"
+            "argument-hint: [file-path]\n"
+            "---\n"
+            "Review $ARGUMENTS carefully"
+        )
+
+        config = load_config(str(tmp_path))
+        skill = config.skills["review"]
+        assert skill.name == "code-review"
+        assert skill.description == "Deep code review"
+        assert skill.allowed_tools == ["Read", "Grep", "Glob"]
+        assert skill.user_invocable is True
+        assert skill.disable_model_invocation is True
+        assert skill.argument_hint == "[file-path]"
+
+    def test_load_config_claude_skills_dir(self, tmp_path):
+        """Skills in .claude/skills/ should also be discovered."""
+        skill_dir = tmp_path / ".claude" / "skills" / "lint"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\ndescription: Lint code\n---\nLint it")
+
+        config = load_config(str(tmp_path))
+        assert "lint" in config.skills
+        assert config.skills["lint"].description == "Lint code"
+
+    def test_load_config_local_overrides_global(self, tmp_path, monkeypatch):
+        """Project-local skills override global user skills."""
+        # Simulate home directory
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        # Global skill
+        global_skill = fake_home / ".agents" / "skills" / "review"
+        global_skill.mkdir(parents=True)
+        (global_skill / "SKILL.md").write_text("---\ndescription: Global review\n---\nGlobal")
+
+        # Project-local skill (same name, should override)
+        project = tmp_path / "project"
+        project.mkdir()
+        local_skill = project / ".agents" / "skills" / "review"
+        local_skill.mkdir(parents=True)
+        (local_skill / "SKILL.md").write_text("---\ndescription: Local review\n---\nLocal")
+
+        config = load_config(str(project))
+        assert config.skills["review"].description == "Local review"
+        assert config.skills["review"].content == "Local"
+
+
+class TestParseSkillMetadata:
+    """Test _parse_skill_metadata helper."""
+
+    def test_empty_metadata(self):
+        result = _parse_skill_metadata({})
+        assert result["name"] == ""
+        assert result["description"] == ""
+        assert result["argument_hint"] == ""
+        assert result["user_invocable"] is True
+        assert result["disable_model_invocation"] is False
+        assert result["allowed_tools"] == []
+
+    def test_boolean_fields(self):
+        result = _parse_skill_metadata({
+            "disable-model-invocation": "true",
+            "user-invocable": "false",
+        })
+        assert result["disable_model_invocation"] is True
+        assert result["user_invocable"] is False
+
+    def test_boolean_case_insensitive(self):
+        result = _parse_skill_metadata({
+            "disable-model-invocation": "True",
+            "user-invocable": "FALSE",
+        })
+        assert result["disable_model_invocation"] is True
+        assert result["user_invocable"] is False
+
+    def test_allowed_tools_comma_separated(self):
+        result = _parse_skill_metadata({"allowed-tools": "Read, Edit, Grep"})
+        assert result["allowed_tools"] == ["Read", "Edit", "Grep"]
+
+    def test_allowed_tools_single(self):
+        result = _parse_skill_metadata({"allowed-tools": "Read"})
+        assert result["allowed_tools"] == ["Read"]
+
+    def test_allowed_tools_empty(self):
+        result = _parse_skill_metadata({"allowed-tools": ""})
+        assert result["allowed_tools"] == []
+
+    def test_name_override(self):
+        result = _parse_skill_metadata({"name": "my-custom-name"})
+        assert result["name"] == "my-custom-name"
+
+
+class TestRenderSkillTemplate:
+    """Test render_skill_template with argument substitution."""
+
+    def test_arguments_substitution(self):
+        result = render_skill_template("Review $ARGUMENTS carefully", "src/main.py")
+        assert result == "Review src/main.py carefully"
+
+    def test_indexed_arguments(self):
+        result = render_skill_template("File: $ARGUMENTS[0], Line: $ARGUMENTS[1]", "main.py 42")
+        assert result == "File: main.py, Line: 42"
+
+    def test_positional_arguments(self):
+        result = render_skill_template("File: $1, Line: $2", "main.py 42")
+        assert result == "File: main.py, Line: 42"
+
+    def test_empty_arguments(self):
+        result = render_skill_template("Review $ARGUMENTS", "")
+        assert result == "Review "
+
+    def test_missing_indexed_argument(self):
+        result = render_skill_template("$ARGUMENTS[0] and $ARGUMENTS[5]", "only-one")
+        assert result == "only-one and "
+
+    def test_missing_positional_argument(self):
+        result = render_skill_template("$1 and $3", "first second")
+        assert result == "first and "
+
+    def test_no_placeholders(self):
+        result = render_skill_template("Plain content", "args")
+        assert result == "Plain content"
+
+    def test_all_substitution_types(self):
+        result = render_skill_template(
+            "Full: $ARGUMENTS, First: $ARGUMENTS[0], Second: $2",
+            "foo bar"
+        )
+        assert result == "Full: foo bar, First: foo, Second: bar"

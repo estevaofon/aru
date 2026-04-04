@@ -32,7 +32,7 @@ from rich.text import Text
 
 from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
-from aru.config import AgentConfig, load_config, render_command_template
+from aru.config import AgentConfig, load_config, render_command_template, render_skill_template
 from aru.tools.codebase import get_skip_permissions
 from aru.providers import (
     MODEL_ALIASES,
@@ -195,7 +195,7 @@ TIPS = [
     "Type naturally — aru decides whether to plan or execute.",
     "Use /plan to break down complex tasks before executing.",
     "Place AGENTS.md in project root for custom instructions.",
-    "Use .agents/commands/ and .agents/skills/ for extensions.",
+    "Use .agents/commands/ and skills/<name>/SKILL.md for extensions.",
     "Use ! <command> to run shell commands directly.",
     "Use /model to switch providers (e.g., /model ollama/llama3.1).",
     "Use /sessions to resume previous conversations.",
@@ -258,8 +258,9 @@ SLASH_COMMANDS = [
 class SlashCommandCompleter(Completer):
     """Show slash commands only when '/' is typed as the first character."""
 
-    def __init__(self, custom_commands: dict | None = None):
+    def __init__(self, custom_commands: dict | None = None, skills: dict | None = None):
         self._custom_commands = custom_commands or {}
+        self._skills = skills or {}
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -284,6 +285,19 @@ class SlashCommandCompleter(Completer):
                     start_position=-len(text),
                     display=HTML(f"<b>{slash_name}</b>"),
                     display_meta=cmd_def.description,
+                )
+        # Skills from skills/<name>/SKILL.md
+        for name, skill in self._skills.items():
+            if not skill.user_invocable:
+                continue
+            slash_name = f"/{name}"
+            if slash_name.startswith(text):
+                hint = f" {skill.argument_hint}" if skill.argument_hint else ""
+                yield Completion(
+                    slash_name,
+                    start_position=-len(text),
+                    display=HTML(f"<b>{slash_name}</b>{hint}"),
+                    display_meta=f"[skill] {skill.description}",
                 )
 
 
@@ -357,8 +371,8 @@ class FileMentionCompleter(Completer):
 class AruCompleter(Completer):
     """Merges slash-command and @file completions."""
 
-    def __init__(self, custom_commands: dict | None = None):
-        self._slash = SlashCommandCompleter(custom_commands)
+    def __init__(self, custom_commands: dict | None = None, skills: dict | None = None):
+        self._slash = SlashCommandCompleter(custom_commands, skills)
         self._mention = FileMentionCompleter()
 
     def get_completions(self, document: Document, complete_event):
@@ -404,11 +418,12 @@ def _create_prompt_session(paste_state: PasteState, config: AgentConfig | None =
         event.current_buffer.insert_text("\n")
 
     custom_cmds = config.commands if config else {}
+    skills = config.skills if config else {}
     session = PromptSession(
         key_bindings=bindings,
         multiline=False,
         enable_open_in_editor=False,
-        completer=AruCompleter(custom_cmds),
+        completer=AruCompleter(custom_cmds, skills),
         complete_while_typing=True,
     )
 
@@ -1894,13 +1909,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
         if user_input.lower() == "/skills":
             if not config.skills:
-                console.print("[dim]No skills found. Add .md files to .agents/skills/[/dim]")
+                console.print("[dim]No skills found. Create skills/<name>/SKILL.md in .agents/ or .claude/[/dim]")
             else:
                 console.print("[bold]Available skills:[/bold]\n")
                 for name, skill in config.skills.items():
-                    console.print(f"  [bold cyan]{name}[/bold cyan]  [dim]{skill.description}[/dim]")
-                console.print(f"\n[dim]Source: .agents/skills/[/dim]")
-                console.print(f"\n[dim]Source: .agents/skills/[/dim]")
+                    invocable = "" if skill.user_invocable else " [dim](model-only)[/dim]"
+                    hint = f" [dim]{skill.argument_hint}[/dim]" if skill.argument_hint else ""
+                    console.print(f"  [bold cyan]/{name}[/bold cyan]{hint}  {skill.description}{invocable}")
+                console.print(f"\n[dim]Invoke with: /skill-name <arguments>[/dim]")
             continue
 
         if user_input.lower() == "/mcp":
@@ -1989,11 +2005,28 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 run_result = await run_agent_capture(agent, prompt, session)
                 if run_result.content:
                     session.add_message("assistant", run_result.with_tools_summary())
+            elif cmd_name in config.skills:
+                skill = config.skills[cmd_name]
+                if not skill.user_invocable:
+                    console.print(f"[yellow]Skill '{cmd_name}' is not user-invocable[/yellow]")
+                else:
+                    prompt = render_skill_template(skill.content, cmd_args)
+                    console.print(f"[bold magenta]Running skill /{cmd_name}...[/bold magenta]")
+
+                    agent = create_general_agent(session, config)
+                    session.add_message("user", user_input)
+                    run_result = await run_agent_capture(agent, prompt, session)
+                    if run_result.content:
+                        session.add_message("assistant", run_result.with_tools_summary())
             else:
                 console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
                 console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /quit[/dim]")
                 if config.commands:
                     console.print(f"[dim]Custom: {', '.join(f'/{k}' for k in config.commands)}[/dim]")
+                if config.skills:
+                    invocable = [k for k, v in config.skills.items() if v.user_invocable]
+                    if invocable:
+                        console.print(f"[dim]Skills: {', '.join(f'/{k}' for k in invocable)}[/dim]")
 
         else:
             agent = create_general_agent(session, config)
