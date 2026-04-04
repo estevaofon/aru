@@ -7,6 +7,7 @@ from aru.tools.codebase import (
     _html_to_text, clear_read_cache, set_on_file_mutation,
     reset_allowed_actions, _read_cache, _allowed_actions,
     read_file_smart, _format_diff, get_skip_permissions,
+    resolve_tools, TOOL_REGISTRY, GENERAL_TOOLS,
 )
 
 
@@ -701,3 +702,37 @@ class TestFormatDiff:
         # 3 old lines → 3 deletion lines; 3 new lines → 3 addition lines
         assert rendered.count("- ") == 3
         assert rendered.count("+ ") == 3
+
+
+class TestResolveTools:
+    """Test resolve_tools function."""
+
+    def test_empty_returns_general_tools(self):
+        result = resolve_tools([])
+        assert result == list(GENERAL_TOOLS)
+
+    def test_allowlist(self):
+        result = resolve_tools(["read_file", "bash"])
+        assert len(result) == 2
+        assert all(f.__name__ in ("read_file", "bash") for f in result)
+
+    def test_dict_disable(self):
+        result = resolve_tools({"bash": False})
+        names = [f.__name__ for f in result]
+        assert "bash" not in names
+        assert "read_file" in names  # other tools still present
+
+    def test_dict_enable_extra(self):
+        result = resolve_tools({"find_dependencies": True})
+        names = [f.__name__ for f in result]
+        assert "find_dependencies" in names
+
+    def test_unknown_tool_ignored(self):
+        result = resolve_tools(["read_file", "nonexistent_tool"])
+        assert len(result) == 1
+        assert result[0].__name__ == "read_file"
+
+    def test_registry_has_core_tools(self):
+        for name in ("read_file", "write_file", "edit_file", "bash",
+                      "glob_search", "grep_search", "delegate_task"):
+            assert name in TOOL_REGISTRY

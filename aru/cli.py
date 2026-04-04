@@ -32,7 +32,7 @@ from rich.text import Text
 
 from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
-from aru.config import AgentConfig, load_config, render_command_template
+from aru.config import AgentConfig, CustomAgent, load_config, render_command_template, render_skill_template
 from aru.tools.codebase import get_skip_permissions
 from aru.providers import (
     MODEL_ALIASES,
@@ -195,7 +195,7 @@ TIPS = [
     "Type naturally — aru decides whether to plan or execute.",
     "Use /plan to break down complex tasks before executing.",
     "Place AGENTS.md in project root for custom instructions.",
-    "Use .agents/commands/ and .agents/skills/ for extensions.",
+    "Use .agents/commands/ and skills/<name>/SKILL.md for extensions.",
     "Use ! <command> to run shell commands directly.",
     "Use /model to switch providers (e.g., /model ollama/llama3.1).",
     "Use /sessions to resume previous conversations.",
@@ -250,6 +250,7 @@ SLASH_COMMANDS = [
     ("/sessions", "List recent sessions", "/sessions"),
     ("/commands", "List custom commands", "/commands"),
     ("/skills", "List available skills", "/skills"),
+    ("/agents", "List custom agents", "/agents"),
     ("/mcp", "List loaded MCP tools", "/mcp"),
     ("/quit", "Exit aru", "/quit"),
 ]
@@ -258,8 +259,11 @@ SLASH_COMMANDS = [
 class SlashCommandCompleter(Completer):
     """Show slash commands only when '/' is typed as the first character."""
 
-    def __init__(self, custom_commands: dict | None = None):
+    def __init__(self, custom_commands: dict | None = None, skills: dict | None = None,
+                 custom_agents: dict | None = None):
         self._custom_commands = custom_commands or {}
+        self._skills = skills or {}
+        self._custom_agents = custom_agents or {}
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -284,6 +288,30 @@ class SlashCommandCompleter(Completer):
                     start_position=-len(text),
                     display=HTML(f"<b>{slash_name}</b>"),
                     display_meta=cmd_def.description,
+                )
+        # Skills from skills/<name>/SKILL.md
+        for name, skill in self._skills.items():
+            if not skill.user_invocable:
+                continue
+            slash_name = f"/{name}"
+            if slash_name.startswith(text):
+                yield Completion(
+                    slash_name,
+                    start_position=-len(text),
+                    display=HTML(f"<b>{slash_name}</b>"),
+                    display_meta=f"[skill] {skill.description}",
+                )
+        # Custom agents from .agents/agents/
+        for name, agent_def in self._custom_agents.items():
+            if agent_def.mode != "primary":
+                continue
+            slash_name = f"/{name}"
+            if slash_name.startswith(text):
+                yield Completion(
+                    slash_name,
+                    start_position=-len(text),
+                    display=HTML(f"<b>{slash_name}</b>"),
+                    display_meta=f"[agent] {agent_def.description}",
                 )
 
 
@@ -357,8 +385,9 @@ class FileMentionCompleter(Completer):
 class AruCompleter(Completer):
     """Merges slash-command and @file completions."""
 
-    def __init__(self, custom_commands: dict | None = None):
-        self._slash = SlashCommandCompleter(custom_commands)
+    def __init__(self, custom_commands: dict | None = None, skills: dict | None = None,
+                 custom_agents: dict | None = None):
+        self._slash = SlashCommandCompleter(custom_commands, skills, custom_agents)
         self._mention = FileMentionCompleter()
 
     def get_completions(self, document: Document, complete_event):
@@ -404,11 +433,13 @@ def _create_prompt_session(paste_state: PasteState, config: AgentConfig | None =
         event.current_buffer.insert_text("\n")
 
     custom_cmds = config.commands if config else {}
+    skills = config.skills if config else {}
+    custom_agents = config.custom_agents if config else {}
     session = PromptSession(
         key_bindings=bindings,
         multiline=False,
         enable_open_in_editor=False,
-        completer=AruCompleter(custom_cmds),
+        completer=AruCompleter(custom_cmds, skills, custom_agents),
         complete_while_typing=True,
     )
 
@@ -937,6 +968,39 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
     )
 
 
+def create_custom_agent_instance(agent_def: CustomAgent, session: "Session",
+                                  config: AgentConfig | None = None):
+    """Create an Agno Agent from a CustomAgent definition."""
+    from agno.agent import Agent
+    from agno.compression.manager import CompressionManager
+    from aru.agents.base import BASE_INSTRUCTIONS
+    from aru.tools.codebase import resolve_tools, _get_small_model_ref
+
+    model_ref = agent_def.model or session.model_ref
+    tools = resolve_tools(agent_def.tools)
+
+    extra = config.get_extra_instructions() if config else ""
+    parts = [agent_def.system_prompt, BASE_INSTRUCTIONS]
+    if extra:
+        parts.append(extra)
+    instructions = "\n\n".join(parts)
+
+    return Agent(
+        name=agent_def.name,
+        model=create_model(model_ref, max_tokens=8192),
+        tools=tools,
+        instructions=instructions,
+        markdown=True,
+        compress_tool_results=True,
+        compression_manager=CompressionManager(
+            model=create_model(_get_small_model_ref(), max_tokens=1024),
+            compress_tool_results=True,
+            compress_tool_results_limit=7,
+        ),
+        tool_call_limit=agent_def.max_turns or 20,
+    )
+
+
 def run_shell(command: str):
     """Run a shell command directly, streaming output to the terminal."""
     console.print()
@@ -984,6 +1048,7 @@ def _show_help(config: AgentConfig | None):
     table.add_row("/sessions", "List recent sessions")
     table.add_row("/commands", "List custom commands")
     table.add_row("/skills", "List available skills")
+    table.add_row("/agents", "List custom agents")
     table.add_row("/mcp", "List loaded MCP tools")
     table.add_row("/help", "Show this help")
     table.add_row("/quit", "Exit aru")
@@ -994,7 +1059,15 @@ def _show_help(config: AgentConfig | None):
         table.add_row("", "")  # Separator
         for name, cmd_def in config.commands.items():
             table.add_row(f"/{name}", cmd_def.description)
-    
+
+    # Custom agents
+    if config and config.custom_agents:
+        primary = {k: v for k, v in config.custom_agents.items() if v.mode == "primary"}
+        if primary:
+            table.add_row("", "")  # Separator
+            for name, agent_def in primary.items():
+                table.add_row(f"/{name}", f"[agent] {agent_def.description}")
+
     console.print(table)
     console.print()
 
@@ -1711,6 +1784,17 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         console.print(f"[dim]Loaded {len(config.commands)} custom command(s): {', '.join(f'/{k}' for k in config.commands)}[/dim]")
     if config.skills:
         console.print(f"[dim]Loaded {len(config.skills)} skill(s): {', '.join(config.skills.keys())}[/dim]")
+    if config.custom_agents:
+        primary = [k for k, v in config.custom_agents.items() if v.mode == "primary"]
+        subagents = [k for k, v in config.custom_agents.items() if v.mode == "subagent"]
+        parts = []
+        if primary:
+            parts.append(", ".join(f"/{k}" for k in primary))
+        if subagents:
+            parts.append(f"{len(subagents)} subagent(s)")
+        console.print(f"[dim]Loaded {len(config.custom_agents)} custom agent(s): {', '.join(parts)}[/dim]")
+        from aru.tools.codebase import set_custom_agents
+        set_custom_agents(config.custom_agents)
     permission_allow = config.permissions.get("allow", [])
     if permission_allow:
         set_permission_rules(permission_allow)
@@ -1894,13 +1978,26 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
         if user_input.lower() == "/skills":
             if not config.skills:
-                console.print("[dim]No skills found. Add .md files to .agents/skills/[/dim]")
+                console.print("[dim]No skills found. Create skills/<name>/SKILL.md in .agents/ or .claude/[/dim]")
             else:
                 console.print("[bold]Available skills:[/bold]\n")
                 for name, skill in config.skills.items():
-                    console.print(f"  [bold cyan]{name}[/bold cyan]  [dim]{skill.description}[/dim]")
-                console.print(f"\n[dim]Source: .agents/skills/[/dim]")
-                console.print(f"\n[dim]Source: .agents/skills/[/dim]")
+                    invocable = "" if skill.user_invocable else " [dim](model-only)[/dim]"
+                    hint = f" [dim]{skill.argument_hint}[/dim]" if skill.argument_hint else ""
+                    console.print(f"  [bold cyan]/{name}[/bold cyan]{hint}  {skill.description}{invocable}")
+                console.print(f"\n[dim]Invoke with: /skill-name <arguments>[/dim]")
+            continue
+
+        if user_input.lower() == "/agents":
+            if not config.custom_agents:
+                console.print("[dim]No custom agents found. Add .md files to .agents/agents/[/dim]")
+            else:
+                console.print("[bold]Custom agents:[/bold]\n")
+                for name, agent_def in config.custom_agents.items():
+                    mode_tag = " [dim](subagent)[/dim]" if agent_def.mode == "subagent" else ""
+                    model_tag = f" [dim]({agent_def.model})[/dim]" if agent_def.model else ""
+                    console.print(f"  [bold cyan]/{name}[/bold cyan]  {agent_def.description}{mode_tag}{model_tag}")
+                console.print(f"\n[dim]Source: .agents/agents/*.md[/dim]")
             continue
 
         if user_input.lower() == "/mcp":
@@ -1989,11 +2086,43 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 run_result = await run_agent_capture(agent, prompt, session)
                 if run_result.content:
                     session.add_message("assistant", run_result.with_tools_summary())
+            elif cmd_name in config.skills:
+                skill = config.skills[cmd_name]
+                if not skill.user_invocable:
+                    console.print(f"[yellow]Skill '{cmd_name}' is not user-invocable[/yellow]")
+                else:
+                    prompt = render_skill_template(skill.content, cmd_args)
+                    console.print(f"[bold magenta]Running skill /{cmd_name}...[/bold magenta]")
+
+                    agent = create_general_agent(session, config)
+                    session.add_message("user", user_input)
+                    run_result = await run_agent_capture(agent, prompt, session)
+                    if run_result.content:
+                        session.add_message("assistant", run_result.with_tools_summary())
+            elif cmd_name in config.custom_agents:
+                agent_def = config.custom_agents[cmd_name]
+                if agent_def.mode == "subagent":
+                    console.print(f"[yellow]Agent '{cmd_name}' is a subagent — invoke via delegate_task only[/yellow]")
+                else:
+                    console.print(f"[bold magenta]Running agent /{cmd_name}...[/bold magenta]")
+                    agent = create_custom_agent_instance(agent_def, session, config)
+                    session.add_message("user", user_input)
+                    run_result = await run_agent_capture(agent, cmd_args or user_input, session)
+                    if run_result.content:
+                        session.add_message("assistant", run_result.with_tools_summary())
             else:
                 console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
-                console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /quit[/dim]")
+                console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /agents, /quit[/dim]")
                 if config.commands:
                     console.print(f"[dim]Custom: {', '.join(f'/{k}' for k in config.commands)}[/dim]")
+                if config.skills:
+                    invocable = [k for k, v in config.skills.items() if v.user_invocable]
+                    if invocable:
+                        console.print(f"[dim]Skills: {', '.join(f'/{k}' for k in invocable)}[/dim]")
+                if config.custom_agents:
+                    primary = [k for k, v in config.custom_agents.items() if v.mode == "primary"]
+                    if primary:
+                        console.print(f"[dim]Agents: {', '.join(f'/{k}' for k in primary)}[/dim]")
 
         else:
             agent = create_general_agent(session, config)

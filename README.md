@@ -11,7 +11,7 @@ An intelligent coding assistant for the terminal, powered by LLMs and [Agno](htt
 - **16 Integrated Tools** — File operations, code search, shell, web search, task delegation
 - **Task Planning** — Break down complex tasks into steps with automatic execution
 - **Multi-Provider** — Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek, and others via custom configuration
-- **Custom Commands and Skills** — Extend aru via the `.agents/` directory
+- **Custom Commands, Skills, and Agents** — Extend aru via the `.agents/` directory
 - **MCP Support** — Integration with Model Context Protocol servers
 
 ## Quick Start
@@ -56,6 +56,7 @@ That's it — `aru` is available globally after install.
 | `/mcp` | List available MCP servers and tools |
 | `/commands` | List custom commands |
 | `/skills` | List available skills |
+| `/agents` | List custom agents |
 | `/sessions` | List recent sessions |
 | `/help` | Show all commands |
 | `! <command>` | Execute shell commands |
@@ -189,13 +190,65 @@ Place an `AGENTS.md` file in your project root with custom instructions that wil
 
 ```
 .agents/
+├── agents/         # Custom agents with their own model, tools, and prompt
+│   └── reviewer.md # Usage: /reviewer <args>
 ├── commands/       # Custom slash commands (filename = command name)
 │   └── deploy.md   # Usage: /deploy <args>
 └── skills/         # Custom skills/personas
-    └── review.md   # Loaded as additional agent instructions
+    └── review/
+        └── SKILL.md
 ```
 
 Command files support frontmatter with `description` and the `$INPUT` template variable for arguments.
+
+### Custom Agents
+
+Custom agents are Markdown files with YAML frontmatter stored in `.agents/agents/`. Each agent runs with its own system prompt, model, and tool set — unlike commands and skills, which reuse the General Agent.
+
+```markdown
+---
+name: Code Reviewer
+description: Review code for quality, bugs, and best practices
+model: anthropic/claude-sonnet-4-5
+tools: read_file, grep_search, glob_search, code_structure
+max_turns: 15
+mode: primary
+---
+
+You are an expert code reviewer. Analyze code for bugs, security,
+performance, and readability. Do NOT modify files.
+```
+
+#### Frontmatter fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Display name of the agent |
+| `description` | Yes | When to use this agent (shown in `/agents` and tab completion) |
+| `model` | No | Provider/model reference (e.g., `anthropic/claude-sonnet-4-5`). Defaults to session model |
+| `tools` | No | Comma-separated tool names (allowlist) or JSON object for granular control (e.g., `{"bash": false}`). Defaults to all general tools |
+| `max_turns` | No | Max tool calls before the agent stops. Default: 20 |
+| `mode` | No | `primary` (invocable via `/name`) or `subagent` (only via `delegate_task`). Default: `primary` |
+
+#### Invocation
+
+```
+aru> /reviewer src/auth.py        # invoke by slash + filename (without .md)
+aru> /agents                       # list all custom agents
+```
+
+#### Discovery paths
+
+Agents are discovered from multiple locations (later overrides earlier):
+
+1. `~/.agents/agents/` — global (available in all projects)
+2. `~/.claude/agents/` — global (Claude Code compatible path)
+3. `.agents/agents/` — project-local
+4. `.claude/agents/` — project-local
+
+#### Subagent mode
+
+Agents with `mode: subagent` can be referenced by the LLM via `delegate_task(task, agent="name")` but are not directly invocable from the CLI.
 
 ### MCP Support (Model Context Protocol)
 

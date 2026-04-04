@@ -43,7 +43,7 @@ aru/
 Loads project-level customization into an `AgentConfig` object:
 - `AGENTS.md` → extra instructions appended to all agent prompts
 - `.agents/commands/*.md` → custom slash commands (filename = command name)
-- `.agents/skills/*.md` → custom skills with YAML frontmatter
+- `skills/<name>/SKILL.md` → custom skills (agentskills.io format, searched in `.agents/`, `.claude/`, and `~/`)
 
 ### `agents/planner.py` — Planner Agent
 

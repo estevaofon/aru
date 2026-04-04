@@ -18,7 +18,7 @@ main.py → cli.run_cli() → REPL loop
 | File | Purpose |
 |------|---------|
 | `aru/cli.py` | Interactive CLI, session management, command routing |
-| `aru/config.py` | Loads AGENTS.md, `.agents/commands/`, `.agents/skills/` |
+| `aru/config.py` | Loads AGENTS.md, `.agents/commands/`, skills (agentskills.io) |
 | `aru/providers.py` | Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.) |
 | `aru/agents/base.py` | Shared instruction templates (BASE_INSTRUCTIONS, roles) |
 | `aru/agents/planner.py` | Planning agent — read-only tools, structured markdown output |
@@ -72,5 +72,5 @@ main.py → cli.run_cli() → REPL loop
 - `.env` → `ANTHROPIC_API_KEY`
 - `aru.json` → permissions, model defaults, custom providers
 - `.agents/commands/*.md` → custom slash commands
-- `.agents/skills/*.md` → custom skills with YAML frontmatter
+- `skills/<name>/SKILL.md` → agentskills.io skills (searched in `.agents/`, `.claude/`, `~/.agents/`, `~/.claude/`)
 - `.aru/` → runtime data (sessions)

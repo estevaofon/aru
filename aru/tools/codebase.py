@@ -1209,40 +1209,54 @@ _SUBAGENT_TOOLS = [
 ]
 
 
-async def delegate_task(task: str, context: str = "") -> str:
+async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
     """Delegate a task to a sub-agent that runs autonomously. Multiple calls run concurrently.
     Use for independent research or subtasks to keep your own context clean.
 
     Args:
         task: What the sub-agent should do.
         context: Optional extra context (file paths, constraints).
+        agent: Optional custom agent name (from .agents/agents/) to use instead of the generic sub-agent.
     """
     from agno.agent import Agent
     from aru.providers import create_model
 
     agent_id = _next_subagent_id()
     cwd = os.getcwd()
-
-    # Use a small/fast model for sub-agents. Resolve from the global _model_id's provider
-    # to pick the right "small" model, falling back to anthropic/claude-haiku-4-5.
     small_model_ref = _get_small_model_ref()
 
-    instructions = f"""\
+    if agent and agent in _custom_agent_defs:
+        agent_def = _custom_agent_defs[agent]
+        tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
+        tools = [t for t in tools if t is not delegate_task]
+        instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
+        if context:
+            instructions += f"\nAdditional context:\n{context}\n"
+        model_ref = agent_def.model or small_model_ref
+        sub = Agent(
+            name=f"{agent_def.name}-{agent_id}",
+            model=create_model(model_ref, max_tokens=4096),
+            tools=tools,
+            instructions=instructions,
+            markdown=True,
+        )
+    else:
+        instructions = f"""\
 You are a sub-agent (#{agent_id}) working on a specific task. Be focused and concise.
 Complete the task and return a clear summary of what you did or found.
 The current working directory is: {cwd}
 Do not create documentation files unless explicitly asked.
 """
-    if context:
-        instructions += f"\nAdditional context:\n{context}\n"
+        if context:
+            instructions += f"\nAdditional context:\n{context}\n"
 
-    sub = Agent(
-        name=f"SubAgent-{agent_id}",
-        model=create_model(small_model_ref, max_tokens=4096),
-        tools=_SUBAGENT_TOOLS,
-        instructions=instructions,
-        markdown=True,
-    )
+        sub = Agent(
+            name=f"SubAgent-{agent_id}",
+            model=create_model(small_model_ref, max_tokens=4096),
+            tools=_SUBAGENT_TOOLS,
+            instructions=instructions,
+            markdown=True,
+        )
 
     try:
         result = await sub.arun(task, stream=False)
@@ -1312,6 +1326,54 @@ GENERAL_TOOLS = [
     web_fetch,
     delegate_task,
 ]
+
+# Registry mapping tool name strings to function references
+TOOL_REGISTRY: dict[str, object] = {f.__name__: f for f in ALL_TOOLS}
+TOOL_REGISTRY["create_task_list"] = create_task_list
+TOOL_REGISTRY["update_task"] = update_task
+
+
+def resolve_tools(tool_spec: list[str] | dict[str, bool]) -> list:
+    """Resolve a tool specification to a list of tool functions.
+
+    Args:
+        tool_spec: Either:
+            - Empty list: returns GENERAL_TOOLS (default set)
+            - List of strings: allowlist of tool names
+            - Dict[str, bool]: starts from GENERAL_TOOLS, adds/removes by name
+    """
+    if isinstance(tool_spec, dict):
+        result = list(GENERAL_TOOLS)
+        for name, enabled in tool_spec.items():
+            func = TOOL_REGISTRY.get(name)
+            if func is None:
+                continue
+            if enabled and func not in result:
+                result.append(func)
+            elif not enabled and func in result:
+                result.remove(func)
+        return result
+
+    if not tool_spec:
+        return list(GENERAL_TOOLS)
+
+    resolved = []
+    for name in tool_spec:
+        func = TOOL_REGISTRY.get(name)
+        if func:
+            resolved.append(func)
+    return resolved
+
+
+# Custom agent definitions for delegate_task (populated at startup)
+_custom_agent_defs: dict = {}
+
+
+def set_custom_agents(agents: dict):
+    """Register custom agent definitions for use by delegate_task."""
+    global _custom_agent_defs
+    _custom_agent_defs = {k: v for k, v in agents.items() if v.mode == "subagent"}
+
 
 async def load_mcp_tools():
     """Initialize MCP servers and inject their tools into tool lists dynamically."""
