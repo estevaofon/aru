@@ -62,7 +62,9 @@
             ".venv/Scripts/python.exe *": "allow",
             ".venv/bin/python *": "allow",
             "uv run pytest *": "allow",
-            "uv run python *": "allow"
+            "uv run python *": "allow",
+            "cd *": "allow",
+            "find *": "allow"
         }
     },
     "instructions": [

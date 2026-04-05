@@ -327,10 +327,21 @@ performance, and readability. Do NOT modify files.
 
 #### Invocation
 
+There are three ways to invoke a custom agent:
+
+| Method | Syntax | When to use |
+|--------|--------|-------------|
+| **Slash command** | `/reviewer src/auth.py` | Directly invoke a `primary` agent by name |
+| **@mention** | `@reviewer check this function` | Mention an agent anywhere in your message |
+| **delegate_task** | Automatic (subagents only) | Subagent names and descriptions are injected into the `delegate_task` tool description, so the LLM sees them and can call `delegate_task(task="...", agent="name")` on its own when it judges the task fits |
+
 ```
-aru> /reviewer src/auth.py        # invoke by slash + filename (without .md)
-aru> /agents                       # list all custom agents
+aru> /reviewer src/auth.py           # slash command (primary agents)
+aru> @reviewer check the auth module  # @mention (primary or subagent)
+aru> /agents                          # list all custom agents
 ```
+
+> **Note:** Slash commands (`/name`) are only available for `primary` agents — subagents are blocked with a warning. `@mention` works for any agent regardless of mode. Subagents can be invoked in two ways: automatically by the LLM via `delegate_task`, or manually by the user via `@name`.
 
 #### Discovery paths
 

@@ -3,7 +3,7 @@ name: Code Reviewer
 description: Review code for quality, bugs, security, and best practices
 tools: read_file, read_file_smart, glob_search, grep_search, list_directory, code_structure
 max_turns: 15
-mode: primary
+mode: subagent
 ---
 
 You are an expert code reviewer. When invoked, analyze the specified code and provide specific, actionable feedback.

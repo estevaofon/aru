@@ -1023,8 +1023,19 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
 
         agent_perm = None
         custom_agent_defs = get_ctx().custom_agent_defs
-        if agent and agent in custom_agent_defs:
-            agent_def = custom_agent_defs[agent]
+        # Agno may pass the caller Agent object instead of a string — coerce to str
+        agent_name = str(agent) if agent and isinstance(agent, str) else ""
+
+        # Print delegation info so the user sees what's happening
+        from rich.console import Console
+        _console = Console()
+        if agent_name and agent_name in custom_agent_defs:
+            _console.print(f"[dim]  → Delegating to agent [bold]{agent_name}[/bold] (task: {task[:80]}{'...' if len(task) > 80 else ''})[/dim]")
+        else:
+            _console.print(f"[dim]  → Delegating to sub-agent #{agent_id} (task: {task[:80]}{'...' if len(task) > 80 else ''})[/dim]")
+
+        if agent_name and agent_name in custom_agent_defs:
+            agent_def = custom_agent_defs[agent_name]
             agent_perm = agent_def.permission
             tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
             tools = [t for t in tools if t is not delegate_task]
@@ -1186,13 +1197,15 @@ def _update_delegate_task_docstring():
     Args:
         task: What the sub-agent should do.
         context: Optional extra context (file paths, constraints).
-        agent: Optional custom agent name to use instead of the generic sub-agent."""
+        agent: Name of a specialized agent to use. ALWAYS prefer a specialized agent when one matches the task."""
 
     custom_agent_defs = get_ctx().custom_agent_defs
     if custom_agent_defs:
-        lines = [f"\n\n    Available specialized agents (use the agent parameter to invoke):"]
+        lines = [f"\n\n    IMPORTANT: When a specialized agent matches the task, you MUST pass its name in the agent parameter."]
+        lines.append(f"    Available specialized agents:")
         for name, agent_def in custom_agent_defs.items():
             lines.append(f"    - agent=\"{name}\": {agent_def.description}")
+        lines.append(f"\n    If no specialized agent fits, omit the agent parameter to use a generic sub-agent.")
         base_doc += "\n".join(lines)
 
     delegate_task.__doc__ = base_doc
