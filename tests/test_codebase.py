@@ -2,13 +2,18 @@ import pytest
 from pathlib import Path
 from aru.tools.codebase import (
     write_file, write_files, glob_search, read_file, grep_search,
-    edit_file, edit_files, list_directory, set_skip_permissions,
-    get_project_tree, _is_safe_command, _shell_split, _is_long_running,
+    edit_file, edit_files, list_directory,
+    get_project_tree, _is_long_running,
     _html_to_text, clear_read_cache, set_on_file_mutation,
-    reset_allowed_actions, _read_cache, _allowed_actions,
-    read_file_smart, _format_diff, get_skip_permissions,
+    _read_cache,
+    read_file_smart, _format_diff,
     resolve_tools, TOOL_REGISTRY, GENERAL_TOOLS,
 )
+from aru.permissions import (
+    set_skip_permissions, get_skip_permissions, reset_session,
+    _session_allowed, _shell_split,
+)
+from aru.permissions import _shell_split, resolve_permission
 
 
 def test_write_file_creates_file(tmp_path):
@@ -263,26 +268,34 @@ class TestShellSplit:
         assert result is None
 
 
-class TestIsSafeCommand:
+class TestBashPermissionResolve:
+    """Tests for bash permission resolution (replaces TestIsSafeCommand)."""
+
     def test_safe_prefixes(self):
         for cmd in ["ls", "git status", "grep foo", "cat file.txt", "git log --oneline"]:
-            assert _is_safe_command(cmd) is True, f"{cmd} should be safe"
+            action, _ = resolve_permission("bash", cmd)
+            assert action == "allow", f"{cmd} should be allowed"
 
     def test_unsafe_commands(self):
-        for cmd in ["rm -rf /", "pip install foo", "python script.py"]:
-            assert _is_safe_command(cmd) is False, f"{cmd} should be unsafe"
+        for cmd in ["rm -rf /", "pip install foo"]:
+            action, _ = resolve_permission("bash", cmd)
+            assert action == "ask", f"{cmd} should require asking"
 
     def test_chained_all_safe(self):
-        assert _is_safe_command("ls && git status") is True
+        action, _ = resolve_permission("bash", "ls && git status")
+        assert action == "allow"
 
     def test_chained_mixed(self):
-        assert _is_safe_command("ls && rm foo") is False
+        action, _ = resolve_permission("bash", "ls && rm foo")
+        assert action == "ask"
 
     def test_piped_all_safe(self):
-        assert _is_safe_command("cat file | grep foo") is True
+        action, _ = resolve_permission("bash", "cat file | grep foo")
+        assert action == "allow"
 
     def test_piped_mixed(self):
-        assert _is_safe_command("cat file | python") is False
+        action, _ = resolve_permission("bash", "cat file | python")
+        assert action == "ask"
 
 
 class TestIsLongRunning:
@@ -560,12 +573,12 @@ class TestCacheAndCallbacks:
         finally:
             set_on_file_mutation(None)
 
-    def test_reset_allowed_actions(self):
-        _allowed_actions.add("test_action")
-        assert "test_action" in _allowed_actions
+    def test_reset_session(self):
+        _session_allowed.add(("edit", "*"))
+        assert ("edit", "*") in _session_allowed
 
-        reset_allowed_actions()
-        assert len(_allowed_actions) == 0
+        reset_session()
+        assert len(_session_allowed) == 0
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,7 @@ from rich.text import Text
 from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
 from aru.config import AgentConfig, CustomAgent, load_config, render_command_template, render_skill_template
-from aru.tools.codebase import get_skip_permissions
+from aru.permissions import get_skip_permissions
 from aru.providers import (
     MODEL_ALIASES,
     create_model,
@@ -1335,6 +1335,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
     try:
         from aru.tools.codebase import set_display, set_live
+        from aru.permissions import set_live as perm_set_live, set_display as perm_set_display
         from aru.tools.tasklist import set_live as tasklist_set_live, set_display as tasklist_set_display
 
         status = StatusBar(interval=3.0)
@@ -1393,6 +1394,8 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         with Live(display, console=console, refresh_per_second=10) as live:
             set_live(live)
             set_display(display)
+            perm_set_live(live)
+            perm_set_display(display)
             tasklist_set_live(live)
             tasklist_set_display(display)
             accumulated = ""
@@ -1492,6 +1495,8 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
 
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
@@ -1516,10 +1521,14 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
     except (KeyboardInterrupt, asyncio.CancelledError):
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
         console.print("\n[yellow]Interrupted.[/yellow]")
     except Exception as e:
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
         from rich.markup import escape
         console.print(f"[red]Error: {escape(str(e))}[/red]")
 
@@ -1752,8 +1761,17 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
 
 async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     """Main REPL loop."""
-    from aru.tools.codebase import set_console, set_model_id, set_small_model_ref, set_skip_permissions, reset_allowed_actions, set_permission_rules, set_on_file_mutation
+    from aru.tools.codebase import set_model_id, set_small_model_ref, set_on_file_mutation
+    from aru.permissions import (
+        set_config as set_perm_config,
+        set_skip_permissions,
+        set_console as perm_set_console,
+        reset_session as perm_reset_session,
+        parse_permission_config,
+    )
+    from aru.tools.codebase import set_console
     set_console(console)
+    perm_set_console(console)
     set_skip_permissions(skip_permissions)
 
     store = SessionStore()
@@ -1795,10 +1813,10 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         console.print(f"[dim]Loaded {len(config.custom_agents)} custom agent(s): {', '.join(parts)}[/dim]")
         from aru.tools.codebase import set_custom_agents
         set_custom_agents(config.custom_agents)
-    permission_allow = config.permissions.get("allow", [])
-    if permission_allow:
-        set_permission_rules(permission_allow)
-        console.print(f"[dim]Loaded {len(permission_allow)} permission rule(s)[/dim]")
+    if config.permissions:
+        perm_config = parse_permission_config(config.permissions)
+        set_perm_config(perm_config)
+        console.print("[dim]Loaded permission config[/dim]")
 
     extra_instructions = config.get_extra_instructions()
 
@@ -1893,7 +1911,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             continue
 
         # Reset "allow all" approvals for each new user message
-        reset_allowed_actions()
+        perm_reset_session()
 
         if user_input.lower() in ("/quit", "/exit", "quit", "exit"):
             store.save(session)
