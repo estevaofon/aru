@@ -6,9 +6,9 @@ from agno.compression.manager import CompressionManager
 from aru.agents.base import build_instructions
 from aru.providers import create_model
 from aru.tools.codebase import (
-    _get_small_model_ref,
     glob_search, grep_search, list_directory, read_file, read_file_smart,
 )
+from aru.runtime import get_ctx
 
 REVIEWER_INSTRUCTIONS = """\
 You are a plan scope reviewer. You receive a user request and a generated implementation plan.
@@ -47,7 +47,7 @@ async def review_plan(request: str, plan: str) -> str:
     """
     reviewer = Agent(
         name="Reviewer",
-        model=create_model(_get_small_model_ref(), max_tokens=2048),
+        model=create_model(get_ctx().small_model_ref, max_tokens=2048),
         instructions=REVIEWER_INSTRUCTIONS,
         markdown=True,
     )
@@ -77,7 +77,7 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
         # Compress tool results after 6 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=CompressionManager(
-            model=create_model(_get_small_model_ref(), max_tokens=1024),
+            model=create_model(get_ctx().small_model_ref, max_tokens=1024),
             compress_tool_results=True,
             compress_tool_results_limit=15,
         ),

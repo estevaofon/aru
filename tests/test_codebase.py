@@ -4,17 +4,16 @@ from aru.tools.codebase import (
     write_file, write_files, glob_search, read_file, grep_search,
     edit_file, edit_files, list_directory,
     get_project_tree, _is_long_running,
-    _html_to_text, clear_read_cache, set_on_file_mutation,
-    _read_cache,
+    _html_to_text, clear_read_cache,
     read_file_smart, _format_diff,
     resolve_tools, TOOL_REGISTRY, GENERAL_TOOLS,
     delegate_task, set_custom_agents,
 )
 from aru.permissions import (
     set_skip_permissions, get_skip_permissions, reset_session,
-    _session_allowed, _shell_split,
+    _shell_split, resolve_permission,
 )
-from aru.permissions import _shell_split, resolve_permission
+from aru.runtime import get_ctx
 
 
 def test_write_file_creates_file(tmp_path):
@@ -271,6 +270,9 @@ class TestShellSplit:
 
 class TestBashPermissionResolve:
     """Tests for bash permission resolution (replaces TestIsSafeCommand)."""
+
+    def setup_method(self):
+        get_ctx().skip_permissions = False
 
     def test_safe_prefixes(self):
         for cmd in ["ls", "git status", "grep foo", "cat file.txt", "git log --oneline"]:
@@ -548,10 +550,10 @@ class TestCacheAndCallbacks:
 
         try:
             read_file(str(f), start_line=1, end_line=1)
-            assert len(_read_cache) > 0
+            assert len(get_ctx().read_cache) > 0
 
             clear_read_cache()
-            assert len(_read_cache) == 0
+            assert len(get_ctx().read_cache) == 0
         finally:
             clear_read_cache()
 
@@ -561,25 +563,23 @@ class TestCacheAndCallbacks:
         def on_mutation():
             calls.append(True)
 
-        set_on_file_mutation(on_mutation)
+        ctx = get_ctx()
+        ctx.on_file_mutation = on_mutation
         try:
             target = tmp_path / "mutated.txt"
-            set_skip_permissions(True)
-            try:
-                write_file(str(target), "content")
-            finally:
-                set_skip_permissions(False)
+            write_file(str(target), "content")
 
             assert len(calls) > 0, "Mutation callback should have been invoked"
         finally:
-            set_on_file_mutation(None)
+            ctx.on_file_mutation = None
 
     def test_reset_session(self):
-        _session_allowed.add(("edit", "*"))
-        assert ("edit", "*") in _session_allowed
+        ctx = get_ctx()
+        ctx.session_allowed.add(("edit", "*"))
+        assert ("edit", "*") in ctx.session_allowed
 
         reset_session()
-        assert len(_session_allowed) == 0
+        assert len(ctx.session_allowed) == 0
 
 
 @pytest.mark.asyncio

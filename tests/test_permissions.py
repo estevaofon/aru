@@ -12,7 +12,6 @@ from aru.permissions import (
     _most_restrictive,
     _normalize_cmd,
     _resolve_bash_compound,
-    _session_allowed,
     _shell_split,
     check_permission,
     get_skip_permissions,
@@ -24,6 +23,7 @@ from aru.permissions import (
     set_config,
     set_skip_permissions,
 )
+from aru.runtime import get_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -295,13 +295,13 @@ class TestResolvePermission:
         assert action == "deny"
 
     def test_session_allowed(self):
-        _session_allowed.add(("edit", "*"))
+        get_ctx().session_allowed.add(("edit", "*"))
         action, _ = resolve_permission("edit", "main.py")
         assert action == "allow"
         reset_session()
 
     def test_session_allowed_pattern(self):
-        _session_allowed.add(("bash", "npm *"))
+        get_ctx().session_allowed.add(("bash", "npm *"))
         action, _ = resolve_permission("bash", "npm install")
         assert action == "allow"
         reset_session()
@@ -489,54 +489,60 @@ class TestCheckPermissionInteractive:
         reset_session()
 
     def test_ask_always_session_saves_pattern(self, monkeypatch):
-        from aru.permissions import _console, _session_allowed
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
         inputs = iter(["a"])
-        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+        monkeypatch.setattr(ctx.console, "input", lambda _: next(inputs))
 
         result = check_permission("edit", "main.py", "editing main.py")
         assert result is True
-        assert ("edit", "*") in _session_allowed
+        assert ("edit", "*") in ctx.session_allowed
 
     def test_ask_no_denies(self, monkeypatch):
-        from aru.permissions import _console
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
         inputs = iter(["n"])
-        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+        monkeypatch.setattr(ctx.console, "input", lambda _: next(inputs))
 
         result = check_permission("edit", "src/app.py", "editing src/app.py")
         assert result is False
 
     def test_ask_yes_allows_once(self, monkeypatch):
-        from aru.permissions import _console
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
         inputs = iter(["y"])
-        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+        monkeypatch.setattr(ctx.console, "input", lambda _: next(inputs))
 
         result = check_permission("edit", "src/app.py", "editing")
         assert result is True
 
     def test_ask_keyboard_interrupt_returns_false(self, monkeypatch):
-        from aru.permissions import _console
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
-        monkeypatch.setattr(_console, "input", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
+        monkeypatch.setattr(ctx.console, "input", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
 
         result = check_permission("edit", "main.py", "editing")
         assert result is False
 
     def test_ask_eof_error_returns_false(self, monkeypatch):
-        from aru.permissions import _console
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
-        monkeypatch.setattr(_console, "input", lambda _: (_ for _ in ()).throw(EOFError))
+        monkeypatch.setattr(ctx.console, "input", lambda _: (_ for _ in ()).throw(EOFError))
 
         result = check_permission("edit", "main.py", "editing")
         assert result is False
 
     def test_sim_portuguese_accepted(self, monkeypatch):
-        from aru.permissions import _console
+        ctx = get_ctx()
+        ctx.skip_permissions = False
 
         inputs = iter(["sim"])
-        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+        monkeypatch.setattr(ctx.console, "input", lambda _: next(inputs))
 
         result = check_permission("edit", "main.py", "editing")
         assert result is True
@@ -727,14 +733,14 @@ class TestPermissionScope:
         assert action4 == "ask"
 
     def test_session_isolated(self):
-        import aru.permissions as pmod
+        ctx = get_ctx()
         set_config(parse_permission_config({"edit": "ask"}))
-        _session_allowed.add(("edit", "*"))
+        ctx.session_allowed.add(("edit", "*"))
         with permission_scope({"edit": "ask"}):
             # Inside scope, session memory is fresh — no "always" carry-over
-            assert ("edit", "*") not in pmod._session_allowed
+            assert ("edit", "*") not in ctx.session_allowed
         # After scope, original session memory restored
-        assert ("edit", "*") in pmod._session_allowed
+        assert ("edit", "*") in ctx.session_allowed
         reset_session()
 
     def test_unspecified_categories_inherit(self):

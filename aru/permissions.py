@@ -19,14 +19,15 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generator, Literal
 
-from rich.console import Console, Group
+from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
+
+from aru.runtime import get_ctx
 
 PermissionAction = Literal["allow", "ask", "deny"]
 
@@ -96,62 +97,24 @@ for _prefix in SAFE_COMMAND_PREFIXES:
 
 
 # ---------------------------------------------------------------------------
-# Module-level state
+# Thin wrappers over RuntimeContext (preserve public API for callers)
 # ---------------------------------------------------------------------------
 
-_config: PermissionConfig = PermissionConfig()
-_session_allowed: set[tuple[str, str]] = set()  # (category, pattern) approved via "always"
-_skip_permissions: bool = False
-_permission_lock = threading.Lock()
-_live = None
-_display = None
-_console = Console()
+def set_config(config: PermissionConfig) -> None:
+    get_ctx().perm_config = config
 
 
-# ---------------------------------------------------------------------------
-# Setters
-# ---------------------------------------------------------------------------
-
-def set_config(config: PermissionConfig):
-    global _config
-    _config = config
-
-
-def set_skip_permissions(value: bool):
-    global _skip_permissions
-    _skip_permissions = value
+def set_skip_permissions(value: bool) -> None:
+    get_ctx().skip_permissions = value
 
 
 def get_skip_permissions() -> bool:
-    return _skip_permissions
+    return get_ctx().skip_permissions
 
 
-def set_live(live):
-    global _live
-    _live = live
-
-
-def set_display(display):
-    global _display
-    _display = display
-
-
-def set_console(console: Console):
-    global _console
-    _console = console
-
-
-def reset_session():
+def reset_session() -> None:
     """Reset session-level permission state (call between conversations)."""
-    _session_allowed.clear()
-
-
-# ---------------------------------------------------------------------------
-# Agent-level permission scoping
-# ---------------------------------------------------------------------------
-
-_config_stack: list[PermissionConfig] = []
-_session_stack: list[set[tuple[str, str]]] = []
+    get_ctx().session_allowed.clear()
 
 
 def merge_configs(base: PermissionConfig, overlay: PermissionConfig) -> PermissionConfig:
@@ -175,22 +138,22 @@ def permission_scope(overlay_raw: dict[str, Any] | None) -> Generator[None, None
     Each scope gets its own fresh "always" session memory, so agent approvals
     don't leak to the global scope or other agents.
     """
-    global _config, _session_allowed
     if not overlay_raw:
         yield
         return
 
-    _config_stack.append(_config)
-    _session_stack.append(_session_allowed)
-    _session_allowed = set()
+    ctx = get_ctx()
+    ctx.config_stack.append(ctx.perm_config)
+    ctx.session_stack.append(ctx.session_allowed)
+    ctx.session_allowed = set()
 
     overlay = parse_permission_config(overlay_raw)
-    _config = merge_configs(_config, overlay)
+    ctx.perm_config = merge_configs(ctx.perm_config, overlay)
     try:
         yield
     finally:
-        _config = _config_stack.pop()
-        _session_allowed = _session_stack.pop()
+        ctx.perm_config = ctx.config_stack.pop()
+        ctx.session_allowed = ctx.session_stack.pop()
 
 
 # ---------------------------------------------------------------------------
@@ -304,8 +267,9 @@ def _build_rules(category: str) -> list[PermissionRule]:
         rules.extend(_SENSITIVE_FILE_RULES)
 
     # Add user-configured rules
-    if category in _config.categories:
-        rules.extend(_config.categories[category])
+    ctx = get_ctx()
+    if category in ctx.perm_config.categories:
+        rules.extend(ctx.perm_config.categories[category])
 
     return rules
 
@@ -382,7 +346,7 @@ def _resolve_bash_compound(command: str) -> tuple[PermissionAction, str]:
 def _resolve_bash_single(command: str) -> tuple[PermissionAction, str]:
     """Resolve permission for a single (non-compound) bash command."""
     rules = _build_rules("bash")
-    result: PermissionAction = CATEGORY_DEFAULTS.get("bash", _config.default)
+    result: PermissionAction = CATEGORY_DEFAULTS.get("bash", get_ctx().perm_config.default)
     matched_pattern = "*"
 
     for rule in rules:
@@ -419,11 +383,12 @@ def resolve_permission(
     4. For others: walk rules (defaults + user config), last-match-wins
     5. Fallback: category default, then global default
     """
-    if _skip_permissions:
+    ctx = get_ctx()
+    if ctx.skip_permissions:
         return ("allow", "*")
 
     # Check session memory
-    for cat, pattern in _session_allowed:
+    for cat, pattern in ctx.session_allowed:
         if cat == category and _match_rule(pattern, subject):
             return ("allow", pattern)
 
@@ -433,7 +398,7 @@ def resolve_permission(
 
     # All other categories
     rules = _build_rules(category)
-    result: PermissionAction = CATEGORY_DEFAULTS.get(category, _config.default)
+    result: PermissionAction = CATEGORY_DEFAULTS.get(category, ctx.perm_config.default)
     matched_pattern = "*"
 
     for rule in rules:
@@ -465,7 +430,8 @@ def check_permission(
         return False
 
     # action == "ask" -> prompt user
-    with _permission_lock:
+    ctx = get_ctx()
+    with ctx.permission_lock:
         # Re-check after acquiring lock (another thread may have resolved it)
         action2, pattern2 = resolve_permission(category, subject)
         if action2 == "allow":
@@ -474,25 +440,25 @@ def check_permission(
             return False
 
         # Pause Live and flush already-streamed content
-        if _live:
-            _live.stop()
-        if _display:
-            _display.flush()
+        if ctx.live:
+            ctx.live.stop()
+        if ctx.display:
+            ctx.display.flush()
 
         title = f"{category}: {subject}" if subject else category
-        _console.print()
-        _console.print(Panel(
+        ctx.console.print()
+        ctx.console.print(Panel(
             display_details,
             title=f"[bold yellow]{title}[/bold yellow]",
             border_style="yellow",
             expand=False,
         ))
         try:
-            answer = _console.input(
+            answer = ctx.console.input(
                 "[bold yellow]Allow? (y)es once / (a)lways / (n)o:[/bold yellow] "
             ).strip().lower()
             if answer in ("a", "always", "all"):
-                _session_allowed.add((category, matched_pattern))
+                ctx.session_allowed.add((category, matched_pattern))
                 allowed = True
             else:
                 allowed = answer in ("y", "yes", "s", "sim")
@@ -500,8 +466,8 @@ def check_permission(
             allowed = False
 
         # Resume Live display
-        if _live:
-            _live.start()
-            _live._live_render._shape = None
+        if ctx.live:
+            ctx.live.start()
+            ctx.live._live_render._shape = None
 
         return allowed

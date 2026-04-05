@@ -13,6 +13,16 @@ import pytest
 sys._called_from_test = True
 
 
+@pytest.fixture(autouse=True)
+def fresh_runtime_context():
+    """Provide an isolated RuntimeContext for every test."""
+    from rich.console import Console
+    from aru.runtime import init_ctx
+    ctx = init_ctx(console=Console())
+    ctx.skip_permissions = True
+    yield ctx
+
+
 @pytest.fixture
 def temp_dir() -> Iterator[Path]:
     """Create a temporary directory for testing.

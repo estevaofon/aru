@@ -104,24 +104,18 @@ from aru.providers import (
 
 async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     """Main REPL loop."""
-    from aru.tools.codebase import set_model_id, set_small_model_ref, set_on_file_mutation
-    from aru.permissions import (
-        set_config as set_perm_config,
-        set_skip_permissions,
-        set_console as perm_set_console,
-        reset_session as perm_reset_session,
-        parse_permission_config,
-    )
-    from aru.tools.codebase import set_console
-    set_console(console)
-    perm_set_console(console)
-    set_skip_permissions(skip_permissions)
+    import atexit
+    from aru.runtime import init_ctx, get_ctx
+    from aru.permissions import parse_permission_config, reset_session as perm_reset_session
+    from aru.tools.codebase import cleanup_processes
+
+    ctx = init_ctx(console=console, skip_permissions=skip_permissions)
 
     store = SessionStore()
 
     def _sync_model(sess: Session):
-        """Sync the model IDs to the tools module from the session's model_ref."""
-        set_model_id(sess.model_id)
+        """Sync the model IDs to the RuntimeContext from the session's model_ref."""
+        ctx.model_id = sess.model_id
         small_ref = config.model_aliases.get("small") if config else None
         if not small_ref:
             provider_key, _ = resolve_model_ref(sess.model_ref)
@@ -133,7 +127,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 "ollama": "ollama/llama3.1",
             }
             small_ref = _small_defaults.get(provider_key, sess.model_ref)
-        set_small_model_ref(small_ref)
+        ctx.small_model_ref = small_ref
 
     # Load project configuration
     config = load_config()
@@ -155,8 +149,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         from aru.tools.codebase import set_custom_agents
         set_custom_agents(config.custom_agents)
     if config.permissions:
-        perm_config = parse_permission_config(config.permissions)
-        set_perm_config(perm_config)
+        ctx.perm_config = parse_permission_config(config.permissions)
         console.print("[dim]Loaded permission config[/dim]")
 
     extra_instructions = config.get_extra_instructions()
@@ -188,8 +181,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         _sync_model(session)
         _render_home(session, skip_permissions)
 
-    # Wire file-mutation callback
-    set_on_file_mutation(session.invalidate_context_cache)
+    # Wire file-mutation callback and atexit cleanup
+    ctx.on_file_mutation = session.invalidate_context_cache
+    atexit.register(lambda: cleanup_processes(ctx.tracked_processes))
 
     planner = None
     executor = None

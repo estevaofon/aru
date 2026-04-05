@@ -1,5 +1,6 @@
 """Custom tools for codebase exploration and manipulation."""
 
+import asyncio
 import fnmatch
 import html.parser
 import os
@@ -14,68 +15,25 @@ from aru.tools.gitignore import is_ignored, walk_filtered
 
 import httpx
 
-from rich.console import Console, Group
+from rich.console import Group
 from rich.syntax import Syntax
 from rich.text import Text
 
 from aru.permissions import check_permission, get_skip_permissions
-
-_console = Console()
-_live = None       # Reference to the active Rich Live instance
-_display = None    # Reference to the active StreamingDisplay
-_model_id: str = "claude-sonnet-4-5-20250929"  # Current model for sub-agents
-_on_file_mutation = None  # Callback to invalidate context cache after file writes
-
-
-def set_on_file_mutation(callback):
-    """Set a callback invoked after any file write/edit/bash operation."""
-    global _on_file_mutation
-    _on_file_mutation = callback
+from aru.runtime import get_ctx
 
 
 def _notify_file_mutation():
     """Notify the session that files changed so caches are invalidated."""
-    _read_cache.clear()
-    if _on_file_mutation:
-        _on_file_mutation()
-
-
-
-_small_model_ref: str = "anthropic/claude-haiku-4-5"  # Small model for sub-agents
-
-
-def set_model_id(model_id: str):
-    global _model_id
-    _model_id = model_id
-
-
-def set_small_model_ref(model_ref: str):
-    """Set the small/fast model reference used by sub-agents."""
-    global _small_model_ref
-    _small_model_ref = model_ref
+    ctx = get_ctx()
+    ctx.read_cache.clear()
+    if ctx.on_file_mutation:
+        ctx.on_file_mutation()
 
 
 def _get_small_model_ref() -> str:
     """Get the small model reference for sub-agents."""
-    return _small_model_ref
-
-
-def set_live(live):
-    """Set the active Live instance so tools can pause it during permission prompts."""
-    global _live
-    _live = live
-
-
-def set_display(display):
-    """Set the active StreamingDisplay so tools can flush content before permission prompts."""
-    global _display
-    _display = display
-
-
-def set_console(console: Console):
-    """Share the main console instance to avoid conflicts with Live display."""
-    global _console
-    _console = console
+    return get_ctx().small_model_ref
 
 
 
@@ -99,14 +57,9 @@ def _format_diff(old_string: str, new_string: str) -> Group:
 # Hard ceiling per tool result (~15K tokens). Even max_size=0 respects this per chunk.
 _READ_HARD_CAP = 60_000  # bytes
 
-# Per-session read cache: avoids re-reading the same file+range multiple times.
-# Key = (resolved_path, start_line, end_line, max_size), Value = short metadata description.
-_read_cache: dict[tuple, str] = {}
-
-
 def clear_read_cache():
     """Clear the read cache. Call after file mutations to avoid stale data."""
-    _read_cache.clear()
+    get_ctx().read_cache.clear()
 
 
 def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 15_000) -> str:
@@ -126,6 +79,7 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
         cache_key = (resolved, start_line, end_line, max_size)
         # Only cache specific range reads — full-file reads may have been compressed
         # out of context, so blocking them causes the agent to get stuck
+        _read_cache = get_ctx().read_cache
         if cache_key in _read_cache and (start_line > 0 or end_line > 0):
             lines_info = _read_cache[cache_key]
             return (
@@ -684,27 +638,28 @@ def get_project_tree(root_dir: str, max_depth: int = 3, max_files_per_dir: int =
 
 
 
-import atexit
-
 # ── Process tracking ──────────────────────────────────────────────
 # Keep references to long-running background processes so we can kill
 # them when the main ARC process exits (avoid zombie / ghost processes).
-_tracked_processes: list[subprocess.Popen] = []
 
 
-def _register_process(process: subprocess.Popen):
+def _register_process(process):
     """Track a background process for cleanup on exit."""
-    _tracked_processes.append(process)
+    get_ctx().tracked_processes.append(process)
 
 
-def _cleanup_processes():
-    """Kill all tracked background processes on exit."""
-    for proc in _tracked_processes:
-        if proc.poll() is None:  # still running
+def cleanup_processes(processes: list | None = None):
+    """Kill all tracked background processes on exit.
+
+    Args:
+        processes: Explicit list to clean up. If None, reads from RuntimeContext.
+    """
+    procs = processes if processes is not None else get_ctx().tracked_processes
+    for proc in procs:
+        # Compatible with both subprocess.Popen and asyncio.subprocess.Process
+        still_running = proc.poll() is None if hasattr(proc, "poll") else proc.returncode is None
+        if still_running:
             _kill_process_tree(proc)
-
-
-atexit.register(_cleanup_processes)
 
 
 BACKGROUND_PATTERNS = (
@@ -720,7 +675,7 @@ BACKGROUND_PATTERNS = (
 )
 
 
-def _kill_process_tree(process: subprocess.Popen):
+def _kill_process_tree(process):
     """Kill a process and all its children. On Windows, process.kill() only
     kills the shell wrapper — child processes (e.g. npm → node) keep running.
     Use taskkill /T to kill the entire tree."""
@@ -762,8 +717,8 @@ def _is_long_running(command: str) -> bool:
     return any(pattern in cmd for pattern in BACKGROUND_PATTERNS)
 
 
-def run_command(command: str, timeout: int = 60, working_directory: str = "") -> str:
-    """Execute a shell command and return output.
+async def run_command(command: str, timeout: int = 60, working_directory: str = "") -> str:
+    """Execute a shell command and return output (async, non-blocking).
 
     Args:
         command: The command to execute.
@@ -774,55 +729,37 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
 
     # Long-running commands: start, capture initial output for a few seconds, then detach
     if _is_long_running(command):
-        import threading
-        import time
-
         startup_seconds = 5
         try:
             bg_kwargs: dict = dict(
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
             )
             if sys.platform != "win32":
                 bg_kwargs["start_new_session"] = True
-            process = subprocess.Popen(command, **bg_kwargs)
+            process = await asyncio.create_subprocess_shell(command, **bg_kwargs)
 
-            # Read stdout in a thread so we don't block on Windows
+            # Read stdout asynchronously until startup period expires or process exits
             lines: list[str] = []
-            stop_event = threading.Event()
-
-            def _reader():
-                while not stop_event.is_set():
-                    try:
-                        line = process.stdout.readline()
-                        if line:
-                            lines.append(line.rstrip())
-                        elif process.poll() is not None:
+            try:
+                async with asyncio.timeout(startup_seconds):
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
                             break
-                    except Exception:
-                        break
+                        lines.append(line.decode("utf-8", errors="replace").rstrip())
+            except TimeoutError:
+                pass  # startup period expired, process still running
 
-            reader_thread = threading.Thread(target=_reader, daemon=True)
-            reader_thread.start()
-
-            # Wait for startup output or early exit
-            time.sleep(startup_seconds)
-            stop_event.set()
-            reader_thread.join(timeout=1)
-
-            exit_code = process.poll()
+            exit_code = process.returncode
             output = "\n".join(lines) if lines else "(no output yet)"
 
             if exit_code is not None:
                 # Process already finished (likely an error)
                 return f"Process exited immediately (code {exit_code}):\n{output}"
 
-            # Track so it gets killed when ARC exits
+            # Track so it gets killed when Aru exits
             _register_process(process)
 
             return (
@@ -833,24 +770,42 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             return f"Error starting background process: {e}"
 
     try:
-        popen_kwargs = dict(
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        create_kwargs: dict = dict(
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
         if sys.platform == "win32":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            create_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
-            # Start in a new process group so _kill_process_tree (os.killpg)
-            # does not accidentally kill the parent process when timing out.
-            popen_kwargs["start_new_session"] = True
+            create_kwargs["start_new_session"] = True
 
-        process = subprocess.Popen(command, **popen_kwargs)
-        stdout, stderr = process.communicate(timeout=timeout)
+        process = await asyncio.create_subprocess_shell(command, **create_kwargs)
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            # Kill the entire process tree, not just the shell wrapper
+            _kill_process_tree(process)
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(), timeout=5
+                )
+            except (asyncio.TimeoutError, Exception):
+                stdout_bytes, stderr_bytes = b"", b""
+            partial = (
+                (stdout_bytes or b"") + (stderr_bytes or b"")
+            ).decode("utf-8", errors="replace").strip()
+            msg = f"Error: Command timed out after {timeout} seconds."
+            if partial:
+                tail = "\n".join(partial.splitlines()[-20:])
+                msg += f"\nLast output:\n{tail}"
+            msg += "\nHint: if this is a server/long-running process, it will be detected and run in background automatically."
+            return msg
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
 
         parts = []
         if stdout:
@@ -861,26 +816,11 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
             parts.append(f"Exit code: {process.returncode}")
 
         return "\n".join(parts).strip() or "(no output)"
-    except subprocess.TimeoutExpired:
-        # Kill the entire process tree, not just the shell wrapper
-        _kill_process_tree(process)
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except Exception:
-            stdout, stderr = "", ""
-        partial = (stdout or "") + (stderr or "")
-        partial = partial.strip()
-        msg = f"Error: Command timed out after {timeout} seconds."
-        if partial:
-            tail = "\n".join(partial.splitlines()[-20:])
-            msg += f"\nLast output:\n{tail}"
-        msg += "\nHint: if this is a server/long-running process, it will be detected and run in background automatically."
-        return msg
     except Exception as e:
         return f"Error running command: {e}"
 
 
-def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
+async def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
     """Execute a shell command (tests, git, install, build, etc).
 
     Args:
@@ -895,7 +835,7 @@ def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
     )
     if not check_permission("bash", command, cmd_display):
         return f"Permission denied: {command}"
-    result = run_command(command, timeout=timeout, working_directory=working_directory)
+    result = await run_command(command, timeout=timeout, working_directory=working_directory)
     # Bash can modify files, so always invalidate cache
     _notify_file_mutation()
     return result
@@ -1028,15 +968,11 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
     return _truncate_output(text)
 
 
-_SUBAGENT_COUNTER = 0
-_SUBAGENT_COUNTER_LOCK = threading.Lock()
-
-
 def _next_subagent_id() -> int:
-    global _SUBAGENT_COUNTER
-    with _SUBAGENT_COUNTER_LOCK:
-        _SUBAGENT_COUNTER += 1
-        return _SUBAGENT_COUNTER
+    ctx = get_ctx()
+    with ctx.subagent_counter_lock:
+        ctx.subagent_counter += 1
+        return ctx.subagent_counter
 
 
 # Import new tools
@@ -1071,57 +1007,69 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
         context: Optional extra context (file paths, constraints).
         agent: Optional custom agent name to use instead of the generic sub-agent.
     """
-    from agno.agent import Agent
-    from aru.providers import create_model
 
-    agent_id = _next_subagent_id()
-    cwd = os.getcwd()
-    small_model_ref = _get_small_model_ref()
+    async def _run() -> str:
+        # Fork the RuntimeContext so this sub-agent has isolated permission state.
+        # asyncio.create_task copies contextvars, so set_ctx only affects this task.
+        from aru.runtime import fork_ctx, set_ctx
+        set_ctx(fork_ctx())
 
-    agent_perm = None
-    if agent and agent in _custom_agent_defs:
-        agent_def = _custom_agent_defs[agent]
-        agent_perm = agent_def.permission
-        tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
-        tools = [t for t in tools if t is not delegate_task]
-        instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
-        if context:
-            instructions += f"\nAdditional context:\n{context}\n"
-        model_ref = agent_def.model or small_model_ref
-        sub = Agent(
-            name=f"{agent_def.name}-{agent_id}",
-            model=create_model(model_ref, max_tokens=4096),
-            tools=tools,
-            instructions=instructions,
-            markdown=True,
-        )
-    else:
-        instructions = f"""\
+        from agno.agent import Agent
+        from aru.providers import create_model
+
+        agent_id = _next_subagent_id()
+        cwd = os.getcwd()
+        small_model_ref = _get_small_model_ref()
+
+        agent_perm = None
+        custom_agent_defs = get_ctx().custom_agent_defs
+        if agent and agent in custom_agent_defs:
+            agent_def = custom_agent_defs[agent]
+            agent_perm = agent_def.permission
+            tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
+            tools = [t for t in tools if t is not delegate_task]
+            instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
+            if context:
+                instructions += f"\nAdditional context:\n{context}\n"
+            model_ref = agent_def.model or small_model_ref
+            sub = Agent(
+                name=f"{agent_def.name}-{agent_id}",
+                model=create_model(model_ref, max_tokens=4096),
+                tools=tools,
+                instructions=instructions,
+                markdown=True,
+            )
+        else:
+            instructions = f"""\
 You are a sub-agent (#{agent_id}) working on a specific task. Be focused and concise.
 Complete the task and return a clear summary of what you did or found.
 The current working directory is: {cwd}
 Do not create documentation files unless explicitly asked.
 """
-        if context:
-            instructions += f"\nAdditional context:\n{context}\n"
+            if context:
+                instructions += f"\nAdditional context:\n{context}\n"
 
-        sub = Agent(
-            name=f"SubAgent-{agent_id}",
-            model=create_model(small_model_ref, max_tokens=4096),
-            tools=_SUBAGENT_TOOLS,
-            instructions=instructions,
-            markdown=True,
-        )
+            sub = Agent(
+                name=f"SubAgent-{agent_id}",
+                model=create_model(small_model_ref, max_tokens=4096),
+                tools=_SUBAGENT_TOOLS,
+                instructions=instructions,
+                markdown=True,
+            )
 
-    try:
-        from aru.permissions import permission_scope
-        with permission_scope(agent_perm):
-            result = await sub.arun(task, stream=False)
-        if result and result.content:
-            return _truncate_output(f"[SubAgent-{agent_id}] {result.content}")
-        return f"[SubAgent-{agent_id}] Task completed but no output was returned."
-    except Exception as e:
-        return f"[SubAgent-{agent_id}] Error: {e}"
+        try:
+            from aru.permissions import permission_scope
+            with permission_scope(agent_perm):
+                result = await sub.arun(task, stream=False)
+            if result and result.content:
+                return _truncate_output(f"[SubAgent-{agent_id}] {result.content}")
+            return f"[SubAgent-{agent_id}] Task completed but no output was returned."
+        except Exception as e:
+            return f"[SubAgent-{agent_id}] Error: {e}"
+
+    # Run in a separate asyncio Task so each sub-agent gets its own
+    # contextvars snapshot — essential for parallel permission_scope isolation.
+    return await asyncio.create_task(_run())
 
 
 # All tools as a list for easy import
@@ -1222,14 +1170,10 @@ def resolve_tools(tool_spec: list[str] | dict[str, bool]) -> list:
     return resolved
 
 
-# Custom agent definitions for delegate_task (populated at startup)
-_custom_agent_defs: dict = {}
-
-
 def set_custom_agents(agents: dict):
     """Register custom agent definitions and update delegate_task docstring."""
-    global _custom_agent_defs
-    _custom_agent_defs = {k: v for k, v in agents.items() if v.mode == "subagent"}
+    ctx = get_ctx()
+    ctx.custom_agent_defs = {k: v for k, v in agents.items() if v.mode == "subagent"}
     # Update delegate_task docstring with available subagents so the LLM knows about them
     _update_delegate_task_docstring()
 
@@ -1244,9 +1188,10 @@ def _update_delegate_task_docstring():
         context: Optional extra context (file paths, constraints).
         agent: Optional custom agent name to use instead of the generic sub-agent."""
 
-    if _custom_agent_defs:
+    custom_agent_defs = get_ctx().custom_agent_defs
+    if custom_agent_defs:
         lines = [f"\n\n    Available specialized agents (use the agent parameter to invoke):"]
-        for name, agent_def in _custom_agent_defs.items():
+        for name, agent_def in custom_agent_defs.items():
             lines.append(f"    - agent=\"{name}\": {agent_def.description}")
         base_doc += "\n".join(lines)
 
@@ -1259,10 +1204,10 @@ async def load_mcp_tools():
     try:
         mcp_tools = await init_mcp()
         if mcp_tools:
-            _console.print(f"[dim]Loaded {len(mcp_tools)} tools from MCP servers.[/dim]")
+            get_ctx().console.print(f"[dim]Loaded {len(mcp_tools)} tools from MCP servers.[/dim]")
             for t in mcp_tools:
                 ALL_TOOLS.append(t)
                 EXECUTOR_TOOLS.append(t)
                 GENERAL_TOOLS.append(t)
     except Exception as e:
-        _console.print(f"[dim]Failed to load MCP tools: {e}[/dim]")
+        get_ctx().console.print(f"[dim]Failed to load MCP tools: {e}[/dim]")
