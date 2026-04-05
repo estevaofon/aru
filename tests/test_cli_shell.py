@@ -15,7 +15,7 @@ class TestRunShell:
     @pytest.fixture
     def mock_console(self):
         """Mock console for testing."""
-        with patch("aru.cli.console") as console:
+        with patch("aru.commands.console") as console:
             yield console
 
     def test_run_shell_success(self, mock_console):
@@ -131,39 +131,39 @@ class TestAskYesNo:
         yes_responses = ["y", "Y", "yes", "YES", "Yes", "s", "S", "sim", "SIM"]
         
         for response in yes_responses:
-            with patch("aru.cli.console.input", return_value=response):
+            with patch("aru.commands.console.input", return_value=response):
                 assert ask_yes_no("Continue?") is True
-                
+
     def test_ask_yes_no_no_variations(self):
         """Test different no responses."""
         from aru.cli import ask_yes_no
-        
+
         no_responses = ["n", "N", "no", "NO", "No", "nao", "não", "anything", ""]
-        
+
         for response in no_responses:
-            with patch("aru.cli.console.input", return_value=response):
+            with patch("aru.commands.console.input", return_value=response):
                 assert ask_yes_no("Continue?") is False
-                
+
     def test_ask_yes_no_keyboard_interrupt(self):
         """Test handling of keyboard interrupt."""
         from aru.cli import ask_yes_no
-        
-        with patch("aru.cli.console.input", side_effect=KeyboardInterrupt()):
+
+        with patch("aru.commands.console.input", side_effect=KeyboardInterrupt()):
             assert ask_yes_no("Continue?") is False
-            
+
     def test_ask_yes_no_eof_error(self):
         """Test handling of EOF error."""
         from aru.cli import ask_yes_no
-        
-        with patch("aru.cli.console.input", side_effect=EOFError()):
+
+        with patch("aru.commands.console.input", side_effect=EOFError()):
             assert ask_yes_no("Continue?") is False
-            
+
     def test_ask_yes_no_whitespace_handling(self):
         """Test that whitespace is stripped from response."""
         from aru.cli import ask_yes_no
-        
-        with patch("aru.cli.console.input", return_value="  y  "):
+
+        with patch("aru.commands.console.input", return_value="  y  "):
             assert ask_yes_no("Continue?") is True
-            
-        with patch("aru.cli.console.input", return_value="  n  "):
+
+        with patch("aru.commands.console.input", return_value="  n  "):
             assert ask_yes_no("Continue?") is False
