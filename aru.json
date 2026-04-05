@@ -22,33 +22,40 @@
         }
     },
     "permission": {
-        "allow": [
-            "git *",
-            "npm *",
-            "pytest",
-            "pytest *",
-            "cd *",
-            "find *",
-            "xargs *",
-            "wc *",
-            "tail *",
-            "python *",
-            ".venv/bin/pytest",
-            ".venv/bin/pytest *",
-            ".venv/Scripts/pytest",
-            ".venv/Scripts/pytest *",
-            ".venv/Scripts/pytest.exe",
-            ".venv/Scripts/pytest.exe *",
-            "uv run pytest",
-            "uv run pytest *",
-            "uv run python -m pytest",
-            "uv run python -m pytest *",
-            ".venv/bin/python -m pytest *",
-            ".venv/bin/python *",
-            ".venv/Scripts/python -m pytest *",
-            ".venv/Scripts/python *",
-            ".venv/Scripts/python.exe -m pytest *",
-            ".venv/Scripts/python.exe *"
-        ]
+        "*": "ask",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "web_search": "allow",
+        "web_fetch": "allow",
+        "delegate_task": "allow",
+        "edit": {
+            "*": "allow",
+            "*.env": "deny",
+            "*.env.*": "deny",
+            "*.env.example": "allow"
+        },
+        "write": {
+            "*": "allow",
+            "*.env": "deny"
+        },
+        "bash": {
+            "*": "ask",
+            "git *": "allow",
+            "npm *": "allow",
+            "pytest": "allow",
+            "pytest *": "allow",
+            "python *": "allow",
+            "xargs *": "allow",
+            ".venv/bin/pytest *": "allow",
+            ".venv/Scripts/pytest *": "allow",
+            ".venv/Scripts/pytest.exe *": "allow",
+            ".venv/Scripts/python *": "allow",
+            ".venv/Scripts/python.exe *": "allow",
+            ".venv/bin/python *": "allow",
+            "uv run pytest *": "allow",
+            "uv run python *": "allow"
+        }
     }
 }
