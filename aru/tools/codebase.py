@@ -1069,7 +1069,7 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
     Args:
         task: What the sub-agent should do.
         context: Optional extra context (file paths, constraints).
-        agent: Optional custom agent name (from .agents/agents/) to use instead of the generic sub-agent.
+        agent: Optional custom agent name to use instead of the generic sub-agent.
     """
     from agno.agent import Agent
     from aru.providers import create_model
@@ -1078,8 +1078,10 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
     cwd = os.getcwd()
     small_model_ref = _get_small_model_ref()
 
+    agent_perm = None
     if agent and agent in _custom_agent_defs:
         agent_def = _custom_agent_defs[agent]
+        agent_perm = agent_def.permission
         tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
         tools = [t for t in tools if t is not delegate_task]
         instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
@@ -1112,7 +1114,9 @@ Do not create documentation files unless explicitly asked.
         )
 
     try:
-        result = await sub.arun(task, stream=False)
+        from aru.permissions import permission_scope
+        with permission_scope(agent_perm):
+            result = await sub.arun(task, stream=False)
         if result and result.content:
             return _truncate_output(f"[SubAgent-{agent_id}] {result.content}")
         return f"[SubAgent-{agent_id}] Task completed but no output was returned."
@@ -1223,9 +1227,30 @@ _custom_agent_defs: dict = {}
 
 
 def set_custom_agents(agents: dict):
-    """Register custom agent definitions for use by delegate_task."""
+    """Register custom agent definitions and update delegate_task docstring."""
     global _custom_agent_defs
     _custom_agent_defs = {k: v for k, v in agents.items() if v.mode == "subagent"}
+    # Update delegate_task docstring with available subagents so the LLM knows about them
+    _update_delegate_task_docstring()
+
+
+def _update_delegate_task_docstring():
+    """Dynamically update delegate_task's docstring to list available subagents."""
+    base_doc = """Delegate a task to a sub-agent that runs autonomously. Multiple calls run concurrently.
+    Use for independent research or subtasks to keep your own context clean.
+
+    Args:
+        task: What the sub-agent should do.
+        context: Optional extra context (file paths, constraints).
+        agent: Optional custom agent name to use instead of the generic sub-agent."""
+
+    if _custom_agent_defs:
+        lines = [f"\n\n    Available specialized agents (use the agent parameter to invoke):"]
+        for name, agent_def in _custom_agent_defs.items():
+            lines.append(f"    - agent=\"{name}\": {agent_def.description}")
+        base_doc += "\n".join(lines)
+
+    delegate_task.__doc__ = base_doc
 
 
 async def load_mcp_tools():

@@ -10,12 +10,15 @@ from aru.permissions import (
     _match_bash_rule,
     _match_rule,
     _most_restrictive,
+    _normalize_cmd,
     _resolve_bash_compound,
     _session_allowed,
     _shell_split,
     check_permission,
     get_skip_permissions,
+    merge_configs,
     parse_permission_config,
+    permission_scope,
     reset_session,
     resolve_permission,
     set_config,
@@ -133,6 +136,18 @@ class TestMatchBashRule:
     def test_rm_deny(self):
         assert _match_bash_rule("rm -rf *", "rm -rf /") is True
         assert _match_bash_rule("rm -rf *", "rm file.txt") is False
+
+    def test_windows_backslash_and_dot_prefix(self):
+        # .\.venv\Scripts\python.exe should match .venv/Scripts/python.exe *
+        assert _match_bash_rule(
+            ".venv/Scripts/python.exe *",
+            r".\.venv\Scripts\python.exe -m pytest",
+        ) is True
+        # Also without .\ prefix
+        assert _match_bash_rule(
+            ".venv/Scripts/python.exe *",
+            r".venv\Scripts\python.exe -m pytest",
+        ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +370,236 @@ class TestCheckPermission:
 
 
 # ---------------------------------------------------------------------------
+# _build_rules
+# ---------------------------------------------------------------------------
+
+
+class TestBuildRules:
+    def setup_method(self):
+        set_config(PermissionConfig())
+
+    def test_bash_includes_safe_prefix_rules(self):
+        rules = _build_rules("bash")
+        patterns = [r.pattern for r in rules]
+        assert "ls" in patterns
+        assert "git status" in patterns
+        assert "git status *" in patterns
+
+    def test_read_includes_sensitive_file_rules(self):
+        rules = _build_rules("read")
+        patterns = [r.pattern for r in rules]
+        assert "*.env" in patterns
+        assert "*.env.*" in patterns
+        assert "*.env.example" in patterns
+
+    def test_edit_includes_sensitive_file_rules(self):
+        rules = _build_rules("edit")
+        patterns = [r.pattern for r in rules]
+        assert "*.env" in patterns
+
+    def test_write_includes_sensitive_file_rules(self):
+        rules = _build_rules("write")
+        patterns = [r.pattern for r in rules]
+        assert "*.env" in patterns
+
+    def test_unknown_category_returns_empty(self):
+        rules = _build_rules("unknown")
+        assert rules == []
+
+    def test_user_config_appended_after_defaults(self):
+        config = parse_permission_config({
+            "read": {"*.md": "allow"},
+        })
+        set_config(config)
+        rules = _build_rules("read")
+        patterns = [r.pattern for r in rules]
+        # defaults first, user rule last
+        assert patterns[0] == "*.env"
+        assert "*.md" in patterns
+
+    def test_glob_category_no_special_rules(self):
+        rules = _build_rules("glob")
+        patterns = [r.pattern for r in rules]
+        assert "*.env" not in patterns
+
+
+# ---------------------------------------------------------------------------
+# _resolve_bash_single
+# ---------------------------------------------------------------------------
+
+
+class TestResolveBashSingle:
+    def setup_method(self):
+        set_config(PermissionConfig())
+
+    def test_returns_tuple_action_and_pattern(self):
+        from aru.permissions import _resolve_bash_single
+        action, pattern = _resolve_bash_single("ls")
+        assert action == "allow"
+        assert pattern == "ls"
+
+    def test_unsafe_returns_ask(self):
+        from aru.permissions import _resolve_bash_single
+        action, pattern = _resolve_bash_single("pip install foo")
+        assert action == "ask"
+
+    def test_rm_command_unsafe(self):
+        from aru.permissions import _resolve_bash_single
+        # rm is not in SAFE_COMMAND_PREFIXES, so it defaults to ask
+        action, _ = _resolve_bash_single("rm file.txt")
+        assert action == "ask"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_bash_compound
+# ---------------------------------------------------------------------------
+
+
+class TestResolveBashCompound:
+    def setup_method(self):
+        set_config(PermissionConfig())
+
+    def test_semicolon_compound(self):
+        action, _ = _resolve_bash_compound("ls; rm foo")
+        assert action == "ask"
+
+    def test_mixed_operators(self):
+        action, _ = _resolve_bash_compound("ls && git status | grep foo")
+        assert action == "allow"
+
+    def test_pipe_most_restrictive_wins(self):
+        # echo is safe (allow), rm is not in safe list (ask)
+        action, _ = _resolve_bash_compound("echo hello | rm -rf /")
+        assert action == "ask"
+
+    def test_mixed_safe_and_unsafe_is_ask(self):
+        action, _ = _resolve_bash_compound("ls && npm install")
+        assert action == "ask"
+
+
+# ---------------------------------------------------------------------------
+# check_permission interactive scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPermissionInteractive:
+    def setup_method(self):
+        set_skip_permissions(False)
+        set_config(PermissionConfig())
+        reset_session()
+
+    def test_ask_always_session_saves_pattern(self, monkeypatch):
+        from aru.permissions import _console, _session_allowed
+
+        inputs = iter(["a"])
+        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+
+        result = check_permission("edit", "main.py", "editing main.py")
+        assert result is True
+        assert ("edit", "*") in _session_allowed
+
+    def test_ask_no_denies(self, monkeypatch):
+        from aru.permissions import _console
+
+        inputs = iter(["n"])
+        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+
+        result = check_permission("edit", "src/app.py", "editing src/app.py")
+        assert result is False
+
+    def test_ask_yes_allows_once(self, monkeypatch):
+        from aru.permissions import _console
+
+        inputs = iter(["y"])
+        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+
+        result = check_permission("edit", "src/app.py", "editing")
+        assert result is True
+
+    def test_ask_keyboard_interrupt_returns_false(self, monkeypatch):
+        from aru.permissions import _console
+
+        monkeypatch.setattr(_console, "input", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
+
+        result = check_permission("edit", "main.py", "editing")
+        assert result is False
+
+    def test_ask_eof_error_returns_false(self, monkeypatch):
+        from aru.permissions import _console
+
+        monkeypatch.setattr(_console, "input", lambda _: (_ for _ in ()).throw(EOFError))
+
+        result = check_permission("edit", "main.py", "editing")
+        assert result is False
+
+    def test_sim_portuguese_accepted(self, monkeypatch):
+        from aru.permissions import _console
+
+        inputs = iter(["sim"])
+        monkeypatch.setattr(_console, "input", lambda _: next(inputs))
+
+        result = check_permission("edit", "main.py", "editing")
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# parse_permission_config edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestParsePermissionConfigEdgeCases:
+    def test_invalid_action_in_dict_defaults_to_ask(self):
+        config = parse_permission_config({
+            "read": "invalid_action",
+        })
+        # Invalid action should be normalized to "ask"
+        assert config.categories["read"][0].action == "ask"
+
+    def test_invalid_action_in_pattern_defaults_to_ask(self):
+        config = parse_permission_config({
+            "bash": {"rm *": "bad_action"},
+        })
+        assert config.categories["bash"][0].action == "ask"
+
+    def test_wrong_type_value_skipped(self):
+        config = parse_permission_config({
+            "read": 123,
+        })
+        # Non-string/non-dict value is ignored
+        assert config.categories == {}
+
+
+# ---------------------------------------------------------------------------
+# resolve_permission edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePermissionEdgeCases:
+    def setup_method(self):
+        set_skip_permissions(False)
+        set_config(PermissionConfig())
+        reset_session()
+
+    def test_edit_env_default_deny_always_wins(self):
+        """Default hardcoded deny for *.env takes precedence."""
+        config = parse_permission_config({
+            "edit": {"*.env": "allow", "*": "ask"},
+        })
+        set_config(config)
+        action, _ = resolve_permission("edit", ".env")
+        assert action == "ask"
+
+    def test_resolve_permission_returns_matched_pattern(self):
+        _, pattern = resolve_permission("bash", "git status --short")
+        assert pattern == "git status --short" or pattern == "git status *"
+
+    def test_resolve_permission_empty_subject(self):
+        # glob/grep use empty subject
+        action, _ = resolve_permission("grep", "")
+        assert action == "allow"
+
+
+# ---------------------------------------------------------------------------
 # set/get skip_permissions
 # ---------------------------------------------------------------------------
 
@@ -373,9 +618,131 @@ class TestSkipPermissions:
             set_skip_permissions(original)
 
     def test_set_false(self):
-        set_skip_permissions(True)
+        original = get_skip_permissions()
         try:
+            set_skip_permissions(True)
             set_skip_permissions(False)
             assert get_skip_permissions() is False
         finally:
-            set_skip_permissions(False)
+            set_skip_permissions(original)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_cmd
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeCmd:
+    def test_forward_slash_unchanged(self):
+        assert _normalize_cmd("git status") == "git status"
+
+    def test_backslash_converted_to_forward(self):
+        assert _normalize_cmd("dir\\path") == "dir/path"
+
+    def test_leading_dot_slash_removed(self):
+        assert _normalize_cmd("./git status") == "git status"
+        assert _normalize_cmd(".\\git status") == "git status"
+
+    def test_complex_path(self):
+        assert _normalize_cmd(".\\.venv\\Scripts\\python.exe") == ".venv/Scripts/python.exe"
+
+
+# ---------------------------------------------------------------------------
+# merge_configs
+# ---------------------------------------------------------------------------
+
+
+class TestMergeConfigs:
+    def test_overlay_replaces_category(self):
+        base = parse_permission_config({"edit": "allow"})
+        overlay = parse_permission_config({"edit": "deny"})
+        merged = merge_configs(base, overlay)
+        assert merged.categories["edit"][0].action == "deny"
+
+    def test_unspecified_categories_inherited(self):
+        base = parse_permission_config({"read": "allow", "edit": "ask"})
+        overlay = parse_permission_config({"edit": "deny"})
+        merged = merge_configs(base, overlay)
+        # read inherited from base
+        assert merged.categories["read"][0].action == "allow"
+        # edit replaced by overlay
+        assert merged.categories["edit"][0].action == "deny"
+
+    def test_base_default_preserved(self):
+        base = PermissionConfig(default="allow")
+        overlay = parse_permission_config({"edit": "deny"})
+        merged = merge_configs(base, overlay)
+        assert merged.default == "allow"
+
+    def test_empty_overlay(self):
+        base = parse_permission_config({"read": "allow"})
+        overlay = PermissionConfig()
+        merged = merge_configs(base, overlay)
+        assert merged.categories["read"][0].action == "allow"
+
+
+# ---------------------------------------------------------------------------
+# permission_scope
+# ---------------------------------------------------------------------------
+
+
+class TestPermissionScope:
+    def setup_method(self):
+        set_skip_permissions(False)
+        set_config(PermissionConfig())
+        reset_session()
+
+    def test_activates_overlay(self):
+        set_config(parse_permission_config({"edit": "ask"}))
+        with permission_scope({"edit": "allow"}):
+            action, _ = resolve_permission("edit", "main.py")
+            assert action == "allow"
+
+    def test_restores_after_exit(self):
+        set_config(parse_permission_config({"edit": "ask"}))
+        with permission_scope({"edit": "allow"}):
+            pass
+        action, _ = resolve_permission("edit", "main.py")
+        assert action == "ask"
+
+    def test_none_is_noop(self):
+        set_config(parse_permission_config({"edit": "ask"}))
+        with permission_scope(None):
+            action, _ = resolve_permission("edit", "main.py")
+            assert action == "ask"
+
+    def test_nested_stacking(self):
+        set_config(parse_permission_config({"edit": "ask", "write": "ask"}))
+        with permission_scope({"edit": "allow"}):
+            action, _ = resolve_permission("edit", "main.py")
+            assert action == "allow"
+            with permission_scope({"edit": "deny"}):
+                action2, _ = resolve_permission("edit", "main.py")
+                assert action2 == "deny"
+            # Back to first overlay
+            action3, _ = resolve_permission("edit", "main.py")
+            assert action3 == "allow"
+        # Back to original
+        action4, _ = resolve_permission("edit", "main.py")
+        assert action4 == "ask"
+
+    def test_session_isolated(self):
+        import aru.permissions as pmod
+        set_config(parse_permission_config({"edit": "ask"}))
+        _session_allowed.add(("edit", "*"))
+        with permission_scope({"edit": "ask"}):
+            # Inside scope, session memory is fresh — no "always" carry-over
+            assert ("edit", "*") not in pmod._session_allowed
+        # After scope, original session memory restored
+        assert ("edit", "*") in pmod._session_allowed
+        reset_session()
+
+    def test_unspecified_categories_inherit(self):
+        set_config(parse_permission_config({"read": "allow", "edit": "ask"}))
+        with permission_scope({"edit": "deny"}):
+            # read should inherit from global
+            action_read, _ = resolve_permission("read", "main.py")
+            assert action_read == "allow"
+            # edit should be overridden
+            action_edit, _ = resolve_permission("edit", "main.py")
+            assert action_edit == "deny"

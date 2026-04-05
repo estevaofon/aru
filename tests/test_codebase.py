@@ -8,6 +8,7 @@ from aru.tools.codebase import (
     _read_cache,
     read_file_smart, _format_diff,
     resolve_tools, TOOL_REGISTRY, GENERAL_TOOLS,
+    delegate_task, set_custom_agents,
 )
 from aru.permissions import (
     set_skip_permissions, get_skip_permissions, reset_session,
@@ -749,3 +750,32 @@ class TestResolveTools:
         for name in ("read_file", "write_file", "edit_file", "bash",
                       "glob_search", "grep_search", "delegate_task"):
             assert name in TOOL_REGISTRY
+
+
+class TestDelegateTaskDocstring:
+    """Tests for dynamic delegate_task docstring with available subagents."""
+
+    def test_docstring_includes_subagents(self):
+        from aru.config import CustomAgent
+        agents = {
+            "reviewer": CustomAgent(
+                name="Reviewer", description="Review code for quality",
+                system_prompt="p", source_path="/f.md", mode="subagent",
+            ),
+            "primary_agent": CustomAgent(
+                name="Primary", description="Primary agent",
+                system_prompt="p", source_path="/f.md", mode="primary",
+            ),
+        }
+        set_custom_agents(agents)
+        doc = delegate_task.__doc__
+        assert 'agent="reviewer"' in doc
+        assert "Review code for quality" in doc
+        # Primary agents should not be listed (only subagents are registered)
+        assert "Primary" not in doc
+
+    def test_docstring_without_subagents(self):
+        set_custom_agents({})
+        doc = delegate_task.__doc__
+        assert "Available specialized agents" not in doc
+        assert "delegate" in doc.lower()

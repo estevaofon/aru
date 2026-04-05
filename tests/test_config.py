@@ -183,13 +183,11 @@ class TestParseFrontmatter:
         assert metadata == {}
         assert body == content
 
-    def test_frontmatter_line_without_colon(self):
+    def test_frontmatter_invalid_yaml_returns_empty(self):
         content = "---\ndescription: Test\nInvalid line\nkey: value\n---\nBody"
         metadata, body = _parse_frontmatter(content)
-        # Should skip lines without colons
-        assert "description" in metadata
-        assert "key" in metadata
-        assert "Invalid line" not in metadata
+        # Invalid YAML (bare line without colon) → graceful fallback to empty dict
+        assert metadata == {}
         assert body == "Body"
 
 
@@ -733,3 +731,57 @@ class TestDiscoverAgents:
         config = load_config(str(tmp_path))
         assert "reviewer" in config.custom_agents
         assert config.custom_agents["reviewer"].model == "anthropic/claude-sonnet-4-5"
+
+
+class TestAgentPermissions:
+    """Tests for agent-level permission parsing."""
+
+    def test_parse_agent_permission_from_frontmatter(self, tmp_path):
+        agents_dir = tmp_path / ".agents" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "safe.md").write_text(
+            "---\nname: Safe Agent\ndescription: Read-only\npermission:\n  edit: deny\n  bash: deny\n---\nYou are safe."
+        )
+        agents = _discover_agents([tmp_path / ".agents"])
+        assert "safe" in agents
+        assert agents["safe"].permission == {"edit": "deny", "bash": "deny"}
+
+    def test_parse_agent_permission_nested_bash(self, tmp_path):
+        agents_dir = tmp_path / ".agents" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "builder.md").write_text(
+            "---\nname: Builder\ndescription: Build things\npermission:\n  bash:\n    git *: allow\n    npm *: allow\n---\nBuild stuff."
+        )
+        agents = _discover_agents([tmp_path / ".agents"])
+        assert agents["builder"].permission == {
+            "bash": {"git *": "allow", "npm *": "allow"},
+        }
+
+    def test_agent_no_permission_is_none(self, tmp_path):
+        agents_dir = tmp_path / ".agents" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "basic.md").write_text(
+            "---\nname: Basic\ndescription: Basic agent\n---\nDo stuff."
+        )
+        agents = _discover_agents([tmp_path / ".agents"])
+        assert agents["basic"].permission is None
+
+    def test_aru_json_agent_permission_override(self, tmp_path):
+        # Create agent file
+        agents_dir = tmp_path / ".agents" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "worker.md").write_text(
+            "---\nname: Worker\ndescription: Worker agent\npermission:\n  edit: allow\n---\nWork."
+        )
+        # Create aru.json with agent override
+        import json
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "agent": {
+                "worker": {
+                    "permission": {"edit": "deny"}
+                }
+            }
+        }))
+        config = load_config(str(tmp_path))
+        # aru.json override should win
+        assert config.custom_agents["worker"].permission == {"edit": "deny"}

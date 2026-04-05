@@ -298,6 +298,7 @@ performance, and readability. Do NOT modify files.
 | `tools` | No | Comma-separated tool names (allowlist) or JSON object for granular control (e.g., `{"bash": false}`). Defaults to all general tools |
 | `max_turns` | No | Max tool calls before the agent stops. Default: 20 |
 | `mode` | No | `primary` (invocable via `/name`) or `subagent` (only via `delegate_task`). Default: `primary` |
+| `permission` | No | Permission overrides (same format as `aru.json` permission section). Replaces global rules for specified categories while the agent runs |
 
 #### Invocation
 
@@ -314,6 +315,37 @@ Agents are discovered from multiple locations (later overrides earlier):
 2. `~/.claude/agents/` — global (Claude Code compatible path)
 3. `.agents/agents/` — project-local
 4. `.claude/agents/` — project-local
+
+#### Agent-level permissions
+
+Agents can override global permission rules. Overrides replace the entire category — unspecified categories inherit from global config.
+
+```markdown
+---
+name: Code Reviewer
+description: Read-only code reviewer
+permission:
+  edit: deny
+  write: deny
+  bash:
+    git diff *: allow
+    grep *: allow
+---
+```
+
+You can also set agent permissions in `aru.json` (overrides frontmatter):
+
+```json
+{
+  "agent": {
+    "reviewer": {
+      "permission": { "edit": "deny", "write": "deny" }
+    }
+  }
+}
+```
+
+Each agent gets its own isolated "always" memory — approvals during an agent's run don't carry over to the global scope.
 
 #### Subagent mode
 
