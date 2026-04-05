@@ -405,7 +405,14 @@ Aru can load tools from MCP servers. Configure in `.aru/mcp_config.json`:
 ```
 aru-code/
 ├── aru/
-│   ├── cli.py              # Interactive CLI with streaming display
+│   ├── cli.py              # Main REPL loop, argument parsing, and entry point
+│   ├── agent_factory.py    # Agent instantiation (general and custom agents)
+│   ├── commands.py         # Slash commands, help display, shell execution
+│   ├── completers.py       # Input completions, paste detection, @file mentions
+│   ├── context.py          # Token optimization (pruning, truncation, compaction)
+│   ├── display.py          # Terminal display (logo, status bar, streaming output)
+│   ├── runner.py           # Agent execution orchestration with streaming
+│   ├── session.py          # Session state, persistence, plan tracking
 │   ├── config.py           # Configuration loader (AGENTS.md, .agents/)
 │   ├── providers.py        # Multi-provider LLM abstraction
 │   ├── permissions.py      # Granular permission system (allow/ask/deny)

@@ -523,17 +523,19 @@ class TestParseSkillMetadata:
 class TestRenderSkillTemplate:
     """Test render_skill_template with argument substitution."""
 
+    _HEADER = "> **Skill argument:** `{arg}`\n> Use this value exactly where the skill instructions reference the argument.\n\n"
+
     def test_arguments_substitution(self):
         result = render_skill_template("Review $ARGUMENTS carefully", "src/main.py")
-        assert result == "Review src/main.py carefully"
+        assert result == self._HEADER.format(arg="src/main.py") + "Review src/main.py carefully"
 
     def test_indexed_arguments(self):
         result = render_skill_template("File: $ARGUMENTS[0], Line: $ARGUMENTS[1]", "main.py 42")
-        assert result == "File: main.py, Line: 42"
+        assert result == self._HEADER.format(arg="main.py 42") + "File: main.py, Line: 42"
 
     def test_positional_arguments(self):
         result = render_skill_template("File: $1, Line: $2", "main.py 42")
-        assert result == "File: main.py, Line: 42"
+        assert result == self._HEADER.format(arg="main.py 42") + "File: main.py, Line: 42"
 
     def test_empty_arguments(self):
         result = render_skill_template("Review $ARGUMENTS", "")
@@ -541,22 +543,37 @@ class TestRenderSkillTemplate:
 
     def test_missing_indexed_argument(self):
         result = render_skill_template("$ARGUMENTS[0] and $ARGUMENTS[5]", "only-one")
-        assert result == "only-one and "
+        assert result == self._HEADER.format(arg="only-one") + "only-one and "
 
     def test_missing_positional_argument(self):
         result = render_skill_template("$1 and $3", "first second")
-        assert result == "first and "
+        assert result == self._HEADER.format(arg="first second") + "first and "
 
     def test_no_placeholders(self):
         result = render_skill_template("Plain content", "args")
-        assert result == "Plain content"
+        assert result == self._HEADER.format(arg="args") + "Plain content"
 
     def test_all_substitution_types(self):
         result = render_skill_template(
             "Full: $ARGUMENTS, First: $ARGUMENTS[0], Second: $2",
             "foo bar"
         )
-        assert result == "Full: foo bar, First: foo, Second: bar"
+        assert result == self._HEADER.format(arg="foo bar") + "Full: foo bar, First: foo, Second: bar"
+
+    def test_header_not_added_for_empty_arguments(self):
+        result = render_skill_template("No args here", "")
+        assert result == "No args here"
+        assert "Skill argument" not in result
+
+    def test_header_not_added_for_whitespace_arguments(self):
+        result = render_skill_template("No args here", "   ")
+        assert result == "No args here"
+        assert "Skill argument" not in result
+
+    def test_header_contains_exact_argument_value(self):
+        result = render_skill_template("Base: $ARGUMENTS", "develop")
+        assert "> **Skill argument:** `develop`" in result
+        assert result.startswith("> **Skill argument:**")
 
 
 class TestCustomAgent:

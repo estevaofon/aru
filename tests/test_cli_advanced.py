@@ -169,7 +169,7 @@ class TestStreamingDisplay:
         display.set_content("Test content")
         
         # Mock console.print to verify flush
-        with patch("aru.cli.console") as mock_console:
+        with patch("aru.display.console") as mock_console:
             display.flush()
             assert display._flushed_len == len("Test content")
             assert display.content is None
@@ -180,8 +180,8 @@ class TestStreamingDisplay:
         display.set_content("First\n")
         display.flush()
         display.set_content("First\nSecond\n")
-        
-        with patch("aru.cli.console") as mock_console:
+
+        with patch("aru.display.console") as mock_console:
             display.flush()
             # Should only print "Second\n"
             assert display._flushed_len == len("First\nSecond\n")

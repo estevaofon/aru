@@ -440,6 +440,9 @@ def render_skill_template(content: str, arguments: str) -> str:
     - $ARGUMENTS: Full argument string
     - $ARGUMENTS[N]: Nth argument (0-indexed)
     - $1, $2, ...: Nth argument (1-indexed, shell-style)
+
+    Also prepends an explicit argument context block so the agent cannot
+    miss or misread the user-supplied value.
     """
     parts = arguments.split() if arguments else []
 
@@ -459,5 +462,10 @@ def render_skill_template(content: str, arguments: str) -> str:
 
     # Replace $ARGUMENTS last
     result = result.replace("$ARGUMENTS", arguments)
+
+    # Prepend an explicit context block so the agent cannot miss the argument
+    if arguments and arguments.strip():
+        header = f"> **Skill argument:** `{arguments.strip()}`\n> Use this value exactly where the skill instructions reference the argument.\n\n"
+        result = header + result
 
     return result

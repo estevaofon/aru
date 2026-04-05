@@ -17,7 +17,14 @@ All agents use Claude models (sonnet/opus/haiku) via Agno's `Agent` class with s
 
 ```
 aru/
-├── cli.py              # Interactive CLI, session management, command routing
+├── cli.py              # Main REPL loop, argument parsing, entry point
+├── agent_factory.py    # Agent instantiation (general and custom agents)
+├── commands.py         # Slash commands, help display, shell execution
+├── completers.py       # Input completions, paste detection, @file mentions
+├── context.py          # Token optimization (pruning, truncation, compaction)
+├── display.py          # Terminal display (logo, status bar, streaming output)
+├── runner.py           # Agent execution orchestration with streaming
+├── session.py          # Session state, persistence, plan tracking
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
@@ -34,12 +41,16 @@ aru/
 
 ## Key Modules
 
-### `cli.py` — Entry Point & REPL
+### CLI Modules (refactored from `cli.py`)
 
-- `run_cli()`: Main async loop — loads config, creates session, processes input
-- `Session`: Conversation history (last 20 msgs), plan tracking, model selection, token metrics. Persisted as JSON in `.aru/sessions/`
-- Command routing: `/` slash commands, `!` shell passthrough, natural language → agent
-- `StreamingDisplay` + `StatusBar`: Rich-based live terminal rendering
+- **`cli.py`**: Entry point (`run_cli()`), main async REPL loop, argument parsing
+- **`agent_factory.py`**: Creates general-purpose and custom agents with tools and instructions
+- **`commands.py`**: Slash command definitions, help display, shell execution, user prompts
+- **`completers.py`**: Input completions, paste detection, `@file` mention resolution
+- **`context.py`**: Token optimization — pruning, truncation, and compaction of conversation history
+- **`display.py`**: Rich-based terminal rendering (`StreamingDisplay`, `StatusBar`, logo)
+- **`runner.py`**: Agent execution orchestration with live streaming and plan step tracking
+- **`session.py`**: Session state (conversation history, plan tracking, model selection, token metrics). Persisted as JSON in `.aru/sessions/`
 
 ### `config.py` — Project Configuration
 
