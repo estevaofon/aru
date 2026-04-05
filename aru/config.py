@@ -27,6 +27,8 @@ class CustomCommand:
     description: str
     template: str
     source_path: str
+    agent: str | None = None
+    model: str | None = None
 
 
 @dataclass
@@ -325,6 +327,8 @@ def _load_commands(agents_dir: Path) -> dict[str, CustomCommand]:
             description=description,
             template=body,
             source_path=str(filepath),
+            agent=metadata.get("agent") or None,
+            model=metadata.get("model") or None,
         )
 
     return commands
@@ -518,26 +522,17 @@ def load_config(cwd: str | None = None) -> AgentConfig:
     return config
 
 
-def render_command_template(template: str, user_input: str) -> str:
-    """Render a command template with user input.
-
-    Replaces $INPUT with the user's arguments.
-    Also supports $SELECTION (empty if not provided) for future use.
-    """
-    result = template.replace("$INPUT", user_input)
-    result = result.replace("$SELECTION", "")
-    return result
-
-
-def render_skill_template(content: str, arguments: str) -> str:
-    """Render a skill template with argument substitution (agentskills.io).
+def render_template_arguments(
+    content: str, arguments: str, *, context_label: str = "Argument",
+) -> str:
+    """Render a template with $ARGUMENTS / $1 / $2 substitution.
 
     Supports:
     - $ARGUMENTS: Full argument string
     - $ARGUMENTS[N]: Nth argument (0-indexed)
     - $1, $2, ...: Nth argument (1-indexed, shell-style)
 
-    Also prepends an explicit argument context block so the agent cannot
+    Also prepends an explicit context block so the agent cannot
     miss or misread the user-supplied value.
     """
     parts = arguments.split() if arguments else []
@@ -561,7 +556,17 @@ def render_skill_template(content: str, arguments: str) -> str:
 
     # Prepend an explicit context block so the agent cannot miss the argument
     if arguments and arguments.strip():
-        header = f"> **Skill argument:** `{arguments.strip()}`\n> Use this value exactly where the skill instructions reference the argument.\n\n"
+        header = f"> **{context_label}:** `{arguments.strip()}`\n> Use this value exactly where the instructions reference the argument.\n\n"
         result = header + result
 
     return result
+
+
+def render_command_template(template: str, user_input: str) -> str:
+    """Render a command template with OpenCode-style argument substitution."""
+    return render_template_arguments(template, user_input, context_label="Command argument")
+
+
+def render_skill_template(content: str, arguments: str) -> str:
+    """Render a skill template with argument substitution (agentskills.io)."""
+    return render_template_arguments(content, arguments, context_label="Skill argument")

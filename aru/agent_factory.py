@@ -8,7 +8,11 @@ from aru.providers import create_model
 from aru.session import Session
 
 
-def create_general_agent(session: Session, config: AgentConfig | None = None):
+def create_general_agent(
+    session: Session,
+    config: AgentConfig | None = None,
+    model_override: str | None = None,
+):
     """Create the general-purpose agent."""
     from agno.agent import Agent
     from agno.compression.manager import CompressionManager
@@ -17,10 +21,11 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
     from aru.runtime import get_ctx
 
     extra = config.get_extra_instructions() if config else ""
+    model_ref = model_override or session.model_ref
 
     return Agent(
         name="Aru",
-        model=create_model(session.model_ref, max_tokens=8192),
+        model=create_model(model_ref, max_tokens=8192),
         tools=GENERAL_TOOLS,
         instructions=_build_instructions("general", extra),
         markdown=True,

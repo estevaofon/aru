@@ -19,6 +19,7 @@ from aru.config import (
     _url_cache,
     render_command_template,
     render_skill_template,
+    render_template_arguments,
     load_config,
     MAX_README_CHARS,
 )
@@ -31,13 +32,27 @@ class TestDataClasses:
         cmd = CustomCommand(
             name="test",
             description="Test command",
-            template="Do $INPUT",
+            template="Do $ARGUMENTS",
             source_path="/path/to/test.md",
         )
         assert cmd.name == "test"
         assert cmd.description == "Test command"
-        assert cmd.template == "Do $INPUT"
+        assert cmd.template == "Do $ARGUMENTS"
         assert cmd.source_path == "/path/to/test.md"
+        assert cmd.agent is None
+        assert cmd.model is None
+
+    def test_custom_command_with_agent_and_model(self):
+        cmd = CustomCommand(
+            name="review",
+            description="Review code",
+            template="Review $ARGUMENTS",
+            source_path="/path/to/review.md",
+            agent="reviewer",
+            model="anthropic/claude-sonnet-4-5",
+        )
+        assert cmd.agent == "reviewer"
+        assert cmd.model == "anthropic/claude-sonnet-4-5"
 
     def test_skill_creation(self):
         skill = Skill(
@@ -198,37 +213,57 @@ class TestParseFrontmatter:
 
 
 class TestRenderCommandTemplate:
-    """Test command template rendering."""
+    """Test command template rendering with OpenCode-style arguments."""
 
-    def test_render_with_input(self):
-        template = "Execute $INPUT in the codebase"
-        result = render_command_template(template, "refactoring")
-        assert result == "Execute refactoring in the codebase"
+    def test_render_with_arguments(self):
+        result = render_command_template("Execute $ARGUMENTS in the codebase", "refactoring")
+        assert "Execute refactoring in the codebase" in result
 
-    def test_render_multiple_input_placeholders(self):
-        template = "Run $INPUT and verify $INPUT works"
-        result = render_command_template(template, "tests")
-        assert result == "Run tests and verify tests works"
+    def test_render_positional_args(self):
+        result = render_command_template("File: $1, Line: $2", "main.py 42")
+        assert "File: main.py, Line: 42" in result
 
-    def test_render_removes_selection(self):
-        template = "Process $INPUT and $SELECTION"
-        result = render_command_template(template, "data")
-        assert result == "Process data and "
+    def test_render_indexed_args(self):
+        result = render_command_template("$ARGUMENTS[0] and $ARGUMENTS[1]", "foo bar")
+        assert "foo and bar" in result
 
     def test_render_no_placeholders(self):
         template = "Just plain text"
         result = render_command_template(template, "input")
-        assert result == "Just plain text"
+        # Header is prepended but template body is unchanged
+        assert "Just plain text" in result
 
     def test_render_empty_input(self):
-        template = "Do $INPUT now"
-        result = render_command_template(template, "")
+        result = render_command_template("Do $ARGUMENTS now", "")
         assert result == "Do  now"
 
     def test_render_with_special_characters(self):
-        template = "Run $INPUT"
-        result = render_command_template(template, "pytest -v --cov")
-        assert result == "Run pytest -v --cov"
+        result = render_command_template("Run $ARGUMENTS", "pytest -v --cov")
+        assert "Run pytest -v --cov" in result
+
+    def test_render_missing_positional(self):
+        result = render_command_template("$1 and $3", "first second")
+        assert "first and " in result
+
+    def test_command_context_header(self):
+        result = render_command_template("Do $ARGUMENTS", "something")
+        assert result.startswith("> **Command argument:**")
+
+    def test_no_header_when_empty_args(self):
+        result = render_command_template("Do $ARGUMENTS", "")
+        assert not result.startswith(">")
+
+
+class TestRenderTemplateArguments:
+    """Test the shared render_template_arguments function."""
+
+    def test_custom_context_label(self):
+        result = render_template_arguments("Do $ARGUMENTS", "test", context_label="Custom label")
+        assert "> **Custom label:** `test`" in result
+
+    def test_delegates_correctly(self):
+        result = render_template_arguments("$1 + $2 = $ARGUMENTS", "a b")
+        assert "a + b = a b" in result
 
 
 class TestLoadConfig:
@@ -274,16 +309,32 @@ class TestLoadConfig:
     def test_load_config_with_commands(self, tmp_path):
         commands_dir = tmp_path / ".agents" / "commands"
         commands_dir.mkdir(parents=True)
-        
+
         cmd_file = commands_dir / "deploy.md"
-        cmd_file.write_text("---\ndescription: Deploy the app\n---\nDeploy $INPUT")
-        
+        cmd_file.write_text("---\ndescription: Deploy the app\n---\nDeploy $ARGUMENTS")
+
         config = load_config(str(tmp_path))
         assert "deploy" in config.commands
         cmd = config.commands["deploy"]
         assert cmd.name == "deploy"
         assert cmd.description == "Deploy the app"
-        assert cmd.template == "Deploy $INPUT"
+        assert cmd.template == "Deploy $ARGUMENTS"
+        assert cmd.agent is None
+        assert cmd.model is None
+
+    def test_load_config_command_with_agent_and_model(self, tmp_path):
+        commands_dir = tmp_path / ".agents" / "commands"
+        commands_dir.mkdir(parents=True)
+
+        cmd_file = commands_dir / "review.md"
+        cmd_file.write_text(
+            "---\ndescription: Review code\nagent: reviewer\nmodel: anthropic/claude-sonnet-4-5\n---\nReview $ARGUMENTS"
+        )
+
+        config = load_config(str(tmp_path))
+        cmd = config.commands["review"]
+        assert cmd.agent == "reviewer"
+        assert cmd.model == "anthropic/claude-sonnet-4-5"
 
     def test_load_config_command_without_frontmatter(self, tmp_path):
         commands_dir = tmp_path / ".agents" / "commands"
@@ -409,7 +460,7 @@ class TestLoadConfig:
 
         commands_dir = tmp_path / ".agents" / "commands"
         commands_dir.mkdir(parents=True)
-        (commands_dir / "test.md").write_text("---\ndescription: Test\n---\nRun $INPUT")
+        (commands_dir / "test.md").write_text("---\ndescription: Test\n---\nRun $ARGUMENTS")
 
         skill_dir = tmp_path / ".agents" / "skills" / "review"
         skill_dir.mkdir(parents=True)
@@ -529,7 +580,7 @@ class TestParseSkillMetadata:
 class TestRenderSkillTemplate:
     """Test render_skill_template with argument substitution."""
 
-    _HEADER = "> **Skill argument:** `{arg}`\n> Use this value exactly where the skill instructions reference the argument.\n\n"
+    _HEADER = "> **Skill argument:** `{arg}`\n> Use this value exactly where the instructions reference the argument.\n\n"
 
     def test_arguments_substitution(self):
         result = render_skill_template("Review $ARGUMENTS carefully", "src/main.py")

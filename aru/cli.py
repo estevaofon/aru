@@ -430,7 +430,16 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 prompt = render_command_template(cmd_def.template, cmd_args)
                 console.print(f"[bold magenta]Running /{cmd_name}...[/bold magenta]")
 
-                agent = create_general_agent(session, config)
+                if cmd_def.agent and cmd_def.agent in config.custom_agents:
+                    agent_def = config.custom_agents[cmd_def.agent]
+                    agent = create_custom_agent_instance(agent_def, session, config)
+                elif cmd_def.agent:
+                    console.print(f"[yellow]Warning: agent '{cmd_def.agent}' not found, using default[/yellow]")
+                    agent = create_general_agent(session, config, model_override=cmd_def.model)
+                elif cmd_def.model:
+                    agent = create_general_agent(session, config, model_override=cmd_def.model)
+                else:
+                    agent = create_general_agent(session, config)
                 session.add_message("user", user_input)
                 run_result = await run_agent_capture(agent, prompt, session)
                 if run_result.content:

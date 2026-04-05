@@ -70,7 +70,7 @@ def project_dir(temp_dir: Path) -> Path:
         "---\n"
         "description: Deploy the application\n"
         "---\n"
-        "Deploy with args: $INPUT"
+        "Deploy with args: $ARGUMENTS"
     )
     
     # Create sample skill

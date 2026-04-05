@@ -293,7 +293,7 @@ All resolved content is combined and appended to the agent's system prompt along
         └── SKILL.md
 ```
 
-Command files support frontmatter with `description` and the `$INPUT` template variable for arguments.
+Command files support frontmatter with `description`, `agent`, and `model` fields, plus OpenCode-style argument placeholders: `$ARGUMENTS` (full string), `$1`/`$2` (positional), and `$ARGUMENTS[N]` (0-indexed).
 
 ### Custom Agents
 
