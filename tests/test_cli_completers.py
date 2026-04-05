@@ -12,8 +12,9 @@ from aru.cli import (
     FileMentionCompleter,
     AruCompleter,
     SLASH_COMMANDS,
+    _extract_agent_mention,
 )
-from aru.config import CustomCommand
+from aru.config import CustomAgent, CustomCommand
 
 
 # ── SlashCommandCompleter ────────────────────────────────────────────
@@ -492,3 +493,104 @@ class TestAruCompleter:
 
         file_names = [c.text for c in completions]
         assert "config.py" in file_names
+
+
+# ── @agent mention completions ──────────────────────────────────────
+
+
+class TestAgentMentionCompleter:
+    """Tests for @agent autocomplete in FileMentionCompleter."""
+
+    def _make_agent(self, name="test", desc="Test agent", mode="subagent"):
+        return CustomAgent(
+            name=name, description=desc, system_prompt="prompt",
+            source_path="/fake.md", mode=mode,
+        )
+
+    def test_suggests_agent_names(self, tmp_path):
+        agents = {"reviewer": self._make_agent("Reviewer", "Review code")}
+        completer = FileMentionCompleter(agents)
+        doc = Document("@rev")
+        with patch("os.getcwd", return_value=str(tmp_path)):
+            completions = list(completer.get_completions(doc, Mock()))
+        names = [c.text for c in completions]
+        assert "reviewer" in names
+
+    def test_no_match_returns_empty_agents(self, tmp_path):
+        agents = {"reviewer": self._make_agent("Reviewer", "Review code")}
+        completer = FileMentionCompleter(agents)
+        doc = Document("@xyz")
+        with patch("os.getcwd", return_value=str(tmp_path)):
+            with patch("aru.tools.gitignore.is_ignored", return_value=False):
+                completions = list(completer.get_completions(doc, Mock()))
+        names = [c.text for c in completions]
+        assert "reviewer" not in names
+
+    def test_agent_and_file_both_suggested(self, tmp_path):
+        (tmp_path / "readme.txt").touch()
+        agents = {"reader": self._make_agent("Reader", "Read files")}
+        completer = FileMentionCompleter(agents)
+        doc = Document("@rea")
+        with patch("os.getcwd", return_value=str(tmp_path)):
+            with patch("aru.tools.gitignore.is_ignored", return_value=False):
+                completions = list(completer.get_completions(doc, Mock()))
+        names = [c.text for c in completions]
+        assert "reader" in names
+        assert "readme.txt" in names
+
+
+# ── _extract_agent_mention ──────────────────────────────────────────
+
+
+class TestExtractAgentMention:
+    """Tests for @agent detection in user input."""
+
+    def _make_agents(self):
+        return {
+            "reviewer": CustomAgent(
+                name="Reviewer", description="Review", system_prompt="p",
+                source_path="/f.md", mode="primary",
+            ),
+            "builder": CustomAgent(
+                name="Builder", description="Build", system_prompt="p",
+                source_path="/f.md", mode="subagent",
+            ),
+        }
+
+    def test_detects_agent_at_start(self):
+        agents = self._make_agents()
+        result = _extract_agent_mention("@reviewer check this code", agents)
+        assert result == ("reviewer", "@reviewer check this code")
+
+    def test_detects_agent_in_middle(self):
+        agents = self._make_agents()
+        result = _extract_agent_mention("use @reviewer to check this", agents)
+        assert result == ("reviewer", "use @reviewer to check this")
+
+    def test_returns_none_for_unknown_agent(self):
+        agents = self._make_agents()
+        assert _extract_agent_mention("@unknown do something", agents) is None
+
+    def test_returns_none_for_no_mention(self):
+        agents = self._make_agents()
+        assert _extract_agent_mention("just a regular message", agents) is None
+
+    def test_works_with_no_message_body(self):
+        agents = self._make_agents()
+        result = _extract_agent_mention("@builder", agents)
+        assert result == ("builder", "@builder")
+
+    def test_case_insensitive(self):
+        agents = self._make_agents()
+        result = _extract_agent_mention("@Reviewer check code", agents)
+        assert result == ("reviewer", "@Reviewer check code")
+
+    def test_agent_mixed_with_file_mentions(self):
+        agents = self._make_agents()
+        result = _extract_agent_mention("use @reviewer to check @main.py", agents)
+        assert result == ("reviewer", "use @reviewer to check @main.py")
+
+    def test_agent_not_matched_if_attached_to_word(self):
+        agents = self._make_agents()
+        # @reviewer preceded by non-whitespace should not match
+        assert _extract_agent_mention("email@reviewer", agents) is None

@@ -15,18 +15,15 @@ from aru.tools.gitignore import is_ignored, walk_filtered
 import httpx
 
 from rich.console import Console, Group
-from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
+from aru.permissions import check_permission, get_skip_permissions
+
 _console = Console()
-_skip_permissions = False
 _live = None       # Reference to the active Rich Live instance
-_permission_lock = threading.Lock()  # Serialize permission prompts
-_allowed_actions: set[str] = set()   # Actions auto-approved via "allow all"
 _display = None    # Reference to the active StreamingDisplay
 _model_id: str = "claude-sonnet-4-5-20250929"  # Current model for sub-agents
-_permission_rules: list[str] = []  # User-defined glob patterns from aru.json
 _on_file_mutation = None  # Callback to invalidate context cache after file writes
 
 
@@ -42,14 +39,6 @@ def _notify_file_mutation():
     if _on_file_mutation:
         _on_file_mutation()
 
-
-def set_skip_permissions(value: bool):
-    global _skip_permissions
-    _skip_permissions = value
-
-
-def get_skip_permissions() -> bool:
-    return _skip_permissions
 
 
 _small_model_ref: str = "anthropic/claude-haiku-4-5"  # Small model for sub-agents
@@ -89,11 +78,6 @@ def set_console(console: Console):
     _console = console
 
 
-def set_permission_rules(rules: list[str]):
-    """Set user-defined permission rules (glob patterns) from aru.json."""
-    global _permission_rules
-    _permission_rules = list(rules)
-
 
 def _format_diff(old_string: str, new_string: str) -> Group:
     """Format old/new strings as a colored diff (red background for deletions, green for additions)."""
@@ -110,60 +94,6 @@ def _format_diff(old_string: str, new_string: str) -> Group:
             ))
     return Group(*parts)
 
-
-def reset_allowed_actions():
-    """Reset auto-approved actions (call between conversations if needed)."""
-    _allowed_actions.clear()
-
-
-def _ask_permission(action: str, details: str | Text | Group) -> bool:
-    """Ask user permission before executing a dangerous action.
-
-    Uses a lock to serialize prompts when multiple tools run in parallel.
-    Supports 'a' (allow all) to auto-approve all future calls of the same action type.
-    """
-    if _skip_permissions:
-        return True
-
-    if action in _allowed_actions:
-        return True
-
-    with _permission_lock:
-        # Re-check after acquiring lock (another thread may have allowed it)
-        if action in _allowed_actions:
-            return True
-
-        # Pause Live and flush already-streamed content so it doesn't re-render
-        if _live:
-            _live.stop()
-        if _display:
-            _display.flush()
-
-        _console.print()
-        _console.print(Panel(
-            details,
-            title=f"[bold yellow]{action}[/bold yellow]",
-            border_style="yellow",
-            expand=False,
-        ))
-        try:
-            answer = _console.input(
-                "[bold yellow]Allow? (y)es / (a)llow all / (n)o:[/bold yellow] "
-            ).strip().lower()
-            if answer in ("a", "allow all", "all"):
-                _allowed_actions.add(action)
-                allowed = True
-            else:
-                allowed = answer in ("y", "yes", "s", "sim")
-        except (EOFError, KeyboardInterrupt):
-            allowed = False
-
-        # Resume Live display (now clean — flushed content won't re-render)
-        if _live:
-            _live.start()
-            _live._live_render._shape = None  # prevent overwriting static Panel
-
-        return allowed
 
 
 # Hard ceiling per tool result (~15K tokens). Even max_size=0 respects this per chunk.
@@ -379,7 +309,7 @@ def write_file(file_path: str, content: str) -> str:
     preview = content[:500] + ("..." if len(content) > 500 else "")
     header = Text(file_path, style="bold")
     diff = _format_diff("", preview)
-    if not _ask_permission("Write File", Group(header, Text(), diff)):
+    if not check_permission("write", file_path, Group(header, Text(), diff)):
         return f"Permission denied: write to {file_path}"
     try:
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
@@ -409,7 +339,7 @@ def write_files(file_list: list[dict]) -> str:
         parts.append(Text(p, style="bold dim"))
         parts.append(_format_diff("", preview))
         parts.append(Text())
-    if not _ask_permission("Write Files", Group(*parts)):
+    if not check_permission("write", ", ".join(e.get("path", "") for e in file_list), Group(*parts)):
         return f"Permission denied: batch write of {len(file_list)} files"
 
     results = []
@@ -447,7 +377,7 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
     """
     header = Text(file_path, style="bold")
     diff = _format_diff(old_string, new_string)
-    if not _ask_permission("Edit File", Group(header, Text(), diff)):
+    if not check_permission("edit", file_path, Group(header, Text(), diff)):
         return f"Permission denied: edit {file_path}"
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -489,7 +419,7 @@ def edit_files(edits: list[dict]) -> str:
         parts.append(Text(p, style="bold dim"))
         parts.append(_format_diff(old, new))
         parts.append(Text())
-    if not _ask_permission("Edit Files", Group(*parts)):
+    if not check_permission("edit", ", ".join(e.get("path", "") for e in edits), Group(*parts)):
         return f"Permission denied: batch edit of {len(edits)} files"
 
     results = []
@@ -950,82 +880,6 @@ def run_command(command: str, timeout: int = 60, working_directory: str = "") ->
         return f"Error running command: {e}"
 
 
-SAFE_COMMAND_PREFIXES = (
-    # File/directory inspection
-    "ls", "dir", "find", "tree", "cat", "head", "tail", "less", "more", "wc",
-    "file", "stat", "du", "df",
-    # Search
-    "grep", "rg", "ag", "ack",
-    # Git read-only
-    "git status", "git log", "git diff", "git show", "git branch", "git tag",
-    "git remote", "git stash list", "git blame", "git shortlog",
-    # System info / navigation
-    "cd", "echo", "pwd", "whoami", "which", "where", "type", "env", "printenv",
-    "uname", "hostname", "ps", "top", "free", "uptime",
-    # Language versions
-    "python --version", "python3 --version", "node --version", "npm --version",
-    "cargo --version", "go version", "java --version", "uv --version",
-    # Sort/filter (typically piped)
-    "sort", "uniq", "cut", "tr", "awk", "sed -n", "jq",
-)
-
-
-def _shell_split(command: str, separators: tuple[str, ...]) -> list[str] | None:
-    """Split command by shell operators, respecting quotes.
-
-    Returns list of parts if any separator found, None otherwise.
-    """
-    parts = []
-    current = []
-    in_single = False
-    in_double = False
-    i = 0
-    chars = command
-    while i < len(chars):
-        c = chars[i]
-        if c == "'" and not in_double:
-            in_single = not in_single
-            current.append(c)
-        elif c == '"' and not in_single:
-            in_double = not in_double
-            current.append(c)
-        elif not in_single and not in_double:
-            matched = False
-            for sep in separators:
-                if chars[i:i+len(sep)] == sep:
-                    parts.append("".join(current).strip())
-                    current = []
-                    i += len(sep)
-                    matched = True
-                    break
-            if matched:
-                continue
-            current.append(c)
-        else:
-            current.append(c)
-        i += 1
-    if parts:  # at least one separator was found
-        parts.append("".join(current).strip())
-        return [p for p in parts if p]
-    return None
-
-
-def _is_safe_command(command: str) -> bool:
-    """Check if a command is read-only and safe to run without permission."""
-    cmd = command.strip()
-    # Handle chained commands (&&, ;): safe only if ALL parts are safe
-    parts = _shell_split(cmd, ("&&", ";"))
-    if parts:
-        return all(_is_safe_command(p) for p in parts)
-    # Handle piped commands: safe only if ALL parts are safe
-    parts = _shell_split(cmd, ("|",))
-    if parts:
-        return all(_is_safe_command(p) for p in parts)
-    if any(cmd == prefix or cmd.startswith(prefix + " ") for prefix in SAFE_COMMAND_PREFIXES):
-        return True
-    return any(fnmatch.fnmatch(cmd, rule) for rule in _permission_rules)
-
-
 def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
     """Execute a shell command (tests, git, install, build, etc).
 
@@ -1035,13 +889,12 @@ def bash(command: str, timeout: int = 60, working_directory: str = "") -> str:
         working_directory: Directory to run in. Default: cwd.
     """
     cwd = working_directory or os.getcwd()
-    if not _is_safe_command(command):
-        cmd_display = Group(
-            Syntax(command, "bash", theme="monokai"),
-            Text(f"cwd: {cwd}", style="dim"),
-        )
-        if not _ask_permission("Bash Command", cmd_display):
-            return f"Permission denied: {command}"
+    cmd_display = Group(
+        Syntax(command, "bash", theme="monokai"),
+        Text(f"cwd: {cwd}", style="dim"),
+    )
+    if not check_permission("bash", command, cmd_display):
+        return f"Permission denied: {command}"
     result = run_command(command, timeout=timeout, working_directory=working_directory)
     # Bash can modify files, so always invalidate cache
     _notify_file_mutation()
@@ -1216,7 +1069,7 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
     Args:
         task: What the sub-agent should do.
         context: Optional extra context (file paths, constraints).
-        agent: Optional custom agent name (from .agents/agents/) to use instead of the generic sub-agent.
+        agent: Optional custom agent name to use instead of the generic sub-agent.
     """
     from agno.agent import Agent
     from aru.providers import create_model
@@ -1225,8 +1078,10 @@ async def delegate_task(task: str, context: str = "", agent: str = "") -> str:
     cwd = os.getcwd()
     small_model_ref = _get_small_model_ref()
 
+    agent_perm = None
     if agent and agent in _custom_agent_defs:
         agent_def = _custom_agent_defs[agent]
+        agent_perm = agent_def.permission
         tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
         tools = [t for t in tools if t is not delegate_task]
         instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
@@ -1259,7 +1114,9 @@ Do not create documentation files unless explicitly asked.
         )
 
     try:
-        result = await sub.arun(task, stream=False)
+        from aru.permissions import permission_scope
+        with permission_scope(agent_perm):
+            result = await sub.arun(task, stream=False)
         if result and result.content:
             return _truncate_output(f"[SubAgent-{agent_id}] {result.content}")
         return f"[SubAgent-{agent_id}] Task completed but no output was returned."
@@ -1370,9 +1227,30 @@ _custom_agent_defs: dict = {}
 
 
 def set_custom_agents(agents: dict):
-    """Register custom agent definitions for use by delegate_task."""
+    """Register custom agent definitions and update delegate_task docstring."""
     global _custom_agent_defs
     _custom_agent_defs = {k: v for k, v in agents.items() if v.mode == "subagent"}
+    # Update delegate_task docstring with available subagents so the LLM knows about them
+    _update_delegate_task_docstring()
+
+
+def _update_delegate_task_docstring():
+    """Dynamically update delegate_task's docstring to list available subagents."""
+    base_doc = """Delegate a task to a sub-agent that runs autonomously. Multiple calls run concurrently.
+    Use for independent research or subtasks to keep your own context clean.
+
+    Args:
+        task: What the sub-agent should do.
+        context: Optional extra context (file paths, constraints).
+        agent: Optional custom agent name to use instead of the generic sub-agent."""
+
+    if _custom_agent_defs:
+        lines = [f"\n\n    Available specialized agents (use the agent parameter to invoke):"]
+        for name, agent_def in _custom_agent_defs.items():
+            lines.append(f"    - agent=\"{name}\": {agent_def.description}")
+        base_doc += "\n".join(lines)
+
+    delegate_task.__doc__ = base_doc
 
 
 async def load_mcp_tools():

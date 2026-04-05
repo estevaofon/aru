@@ -50,6 +50,7 @@ class CustomAgent:
     tools: list[str] | dict[str, bool] = field(default_factory=list)
     max_turns: int | None = None
     mode: str = "primary"  # "primary" | "subagent"
+    permission: dict[str, Any] | None = None
 
 
 MAX_README_CHARS = 2000  # Reduced from 8000 to save ~1.7K tokens per request
@@ -103,70 +104,105 @@ class AgentConfig:
         return "\n\n".join(parts)
 
 
-def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
-    """Parse YAML-like frontmatter from a markdown file.
+def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+    """Parse YAML frontmatter from a markdown file.
 
+    Uses PyYAML for robust parsing of nested structures.
     Returns (metadata_dict, body_content).
     """
-    metadata: dict[str, str] = {}
-    body = content
+    if not content.startswith("---"):
+        return {}, content
 
-    if content.startswith("---"):
-        lines = content.split("\n")
-        end_idx = -1
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end_idx = i
-                break
-        if end_idx > 0:
-            for line in lines[1:end_idx]:
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    metadata[key.strip()] = value.strip()
-            body = "\n".join(lines[end_idx + 1:]).strip()
+    # Find closing --- delimiter (after the opening ---)
+    lines = content.split("\n")
+    end_idx = -1
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end_idx = i
+            break
 
-    return metadata, body
+    if end_idx < 0:
+        return {}, content
+
+    yaml_block = "\n".join(lines[1:end_idx])
+    body = "\n".join(lines[end_idx + 1:])
+
+    try:
+        import yaml
+        metadata = yaml.safe_load(yaml_block)
+    except Exception:
+        metadata = None
+
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return metadata, body.strip()
 
 
-def _parse_skill_metadata(metadata: dict[str, str]) -> dict[str, Any]:
-    """Interpret raw frontmatter strings into typed Skill fields."""
+def _parse_skill_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Interpret frontmatter values into typed Skill fields."""
     result: dict[str, Any] = {}
-    result["name"] = metadata.get("name", "")
-    result["description"] = metadata.get("description", "")
-    result["argument_hint"] = metadata.get("argument-hint", "")
-    result["user_invocable"] = metadata.get("user-invocable", "true").lower() != "false"
-    result["disable_model_invocation"] = metadata.get("disable-model-invocation", "false").lower() == "true"
+    result["name"] = str(metadata.get("name", ""))
+    result["description"] = str(metadata.get("description", ""))
+    hint = metadata.get("argument-hint", "")
+    # YAML parses [text] as a list — convert back to string for display
+    if isinstance(hint, list):
+        hint = "[" + ", ".join(str(x) for x in hint) + "]"
+    result["argument_hint"] = str(hint)
 
-    tools_str = metadata.get("allowed-tools", "")
-    if tools_str:
-        result["allowed_tools"] = [t.strip() for t in tools_str.split(",") if t.strip()]
+    ui = metadata.get("user-invocable", True)
+    result["user_invocable"] = ui if isinstance(ui, bool) else str(ui).lower() != "false"
+
+    dmi = metadata.get("disable-model-invocation", False)
+    result["disable_model_invocation"] = dmi if isinstance(dmi, bool) else str(dmi).lower() == "true"
+
+    tools_raw = metadata.get("allowed-tools", "")
+    if isinstance(tools_raw, list):
+        result["allowed_tools"] = [str(t).strip() for t in tools_raw]
+    elif tools_raw:
+        result["allowed_tools"] = [t.strip() for t in str(tools_raw).split(",") if t.strip()]
     else:
         result["allowed_tools"] = []
 
     return result
 
 
-def _parse_agent_metadata(metadata: dict[str, str]) -> dict[str, Any]:
-    """Interpret raw frontmatter strings into typed CustomAgent fields."""
+def _parse_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Interpret frontmatter values into typed CustomAgent fields."""
     result: dict[str, Any] = {}
-    result["name"] = metadata.get("name", "")
-    result["description"] = metadata.get("description", "")
+    result["name"] = str(metadata.get("name", ""))
+    result["description"] = str(metadata.get("description", ""))
     result["model"] = metadata.get("model", None) or None
-    result["mode"] = metadata.get("mode", "primary").lower()
+    mode_val = metadata.get("mode", "primary")
+    result["mode"] = str(mode_val).lower() if mode_val else "primary"
 
-    max_turns_str = metadata.get("max_turns", "") or metadata.get("max-turns", "")
-    result["max_turns"] = int(max_turns_str) if max_turns_str.strip().isdigit() else None
-
-    tools_str = metadata.get("tools", "").strip()
-    if not tools_str:
-        result["tools"] = []
-    elif tools_str.startswith("{"):
-        try:
-            result["tools"] = json.loads(tools_str)
-        except json.JSONDecodeError:
-            result["tools"] = []
+    max_turns_raw = metadata.get("max_turns") or metadata.get("max-turns")
+    if isinstance(max_turns_raw, int):
+        result["max_turns"] = max_turns_raw
+    elif max_turns_raw and str(max_turns_raw).strip().isdigit():
+        result["max_turns"] = int(str(max_turns_raw).strip())
     else:
-        result["tools"] = [t.strip() for t in tools_str.split(",") if t.strip()]
+        result["max_turns"] = None
+
+    tools_raw = metadata.get("tools")
+    if isinstance(tools_raw, dict):
+        result["tools"] = tools_raw
+    elif isinstance(tools_raw, list):
+        result["tools"] = [str(t).strip() for t in tools_raw]
+    elif tools_raw:
+        tools_str = str(tools_raw).strip()
+        if tools_str.startswith("{"):
+            try:
+                result["tools"] = json.loads(tools_str)
+            except json.JSONDecodeError:
+                result["tools"] = []
+        else:
+            result["tools"] = [t.strip() for t in tools_str.split(",") if t.strip()]
+    else:
+        result["tools"] = []
+
+    perm_raw = metadata.get("permission", None)
+    result["permission"] = perm_raw if isinstance(perm_raw, dict) else None
 
     return result
 
@@ -290,6 +326,7 @@ def _discover_agents(search_roots: list[Path]) -> dict[str, CustomAgent]:
                 tools=meta["tools"],
                 max_turns=meta["max_turns"],
                 mode=meta["mode"],
+                permission=meta.get("permission"),
             )
 
     return agents
@@ -372,6 +409,12 @@ def load_config(cwd: str | None = None) -> AgentConfig:
                         config.model_aliases = data["model_aliases"]
                     if "plan_reviewer" in data:
                         config.plan_reviewer = bool(data["plan_reviewer"])
+                    # Agent-level permission overrides from aru.json
+                    if "agent" in data and isinstance(data["agent"], dict):
+                        for agent_name, agent_data in data["agent"].items():
+                            if agent_name in config.custom_agents and isinstance(agent_data, dict):
+                                if "permission" in agent_data:
+                                    config.custom_agents[agent_name].permission = agent_data["permission"]
                 break
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                 pass

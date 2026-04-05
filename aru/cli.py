@@ -33,7 +33,7 @@ from rich.text import Text
 from aru.agents.executor import create_executor
 from aru.agents.planner import create_planner, review_plan
 from aru.config import AgentConfig, CustomAgent, load_config, render_command_template, render_skill_template
-from aru.tools.codebase import get_skip_permissions
+from aru.permissions import get_skip_permissions
 from aru.providers import (
     MODEL_ALIASES,
     create_model,
@@ -152,11 +152,13 @@ _MENTION_RE = re.compile(r'(?<!\S)@([a-zA-Z0-9_./\\-]+)')
 _MENTION_MAX_SIZE = 30_000  # bytes, same limit as read_file
 
 
-def _resolve_mentions(text: str, cwd: str) -> tuple[str, int]:
+def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) -> tuple[str, int]:
     """Resolve @file mentions by appending file contents to the message.
 
+    Skips @mentions that match known agent names.
     Returns (resolved_text, number_of_files_attached).
     """
+    agent_names = agent_names or set()
     matches = list(_MENTION_RE.finditer(text))
     if not matches:
         return text, 0
@@ -165,6 +167,8 @@ def _resolve_mentions(text: str, cwd: str) -> tuple[str, int]:
     seen = set()
     for m in matches:
         rel_path = m.group(1)
+        if rel_path.lower() in agent_names:
+            continue
         if rel_path in seen:
             continue
         seen.add(rel_path)
@@ -189,6 +193,22 @@ def _resolve_mentions(text: str, cwd: str) -> tuple[str, int]:
     if appendix_parts:
         return text + "".join(appendix_parts), len(appendix_parts)
     return text, 0
+
+
+def _extract_agent_mention(
+    text: str, custom_agents: dict[str, "CustomAgent"]
+) -> tuple[str, str] | None:
+    """Detect @agentname anywhere in the message.
+
+    Returns (agent_name, full_message_text) if found, None otherwise.
+    Only matches agents that exist in custom_agents (any mode).
+    Scans all @-mentions and returns the first one matching a known agent.
+    """
+    for m in re.finditer(r'(?<!\S)@([a-zA-Z0-9_-]+)', text):
+        name = m.group(1).lower()
+        if name in custom_agents:
+            return name, text
+    return None
 
 
 TIPS = [
@@ -316,7 +336,10 @@ class SlashCommandCompleter(Completer):
 
 
 class FileMentionCompleter(Completer):
-    """Show file/directory suggestions when '@' is typed."""
+    """Show file/directory and agent suggestions when '@' is typed."""
+
+    def __init__(self, custom_agents: dict | None = None):
+        self._custom_agents = custom_agents or {}
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -328,6 +351,18 @@ class FileMentionCompleter(Completer):
             return
 
         partial = text[idx + 1:]  # e.g. "arc/con" from "@arc/con"
+
+        # Suggest agent names (no path separators = could be an agent)
+        if "/" not in partial and "\\" not in partial:
+            for name, agent_def in self._custom_agents.items():
+                if name.lower().startswith(partial.lower()):
+                    yield Completion(
+                        name,
+                        start_position=-len(partial),
+                        display=HTML(f"<b>@{name}</b>"),
+                        display_meta=f"[agent] {agent_def.description}",
+                    )
+
         # Split into directory part and name prefix
         if "/" in partial or "\\" in partial:
             # Normalize to forward slashes
@@ -388,7 +423,7 @@ class AruCompleter(Completer):
     def __init__(self, custom_commands: dict | None = None, skills: dict | None = None,
                  custom_agents: dict | None = None):
         self._slash = SlashCommandCompleter(custom_commands, skills, custom_agents)
-        self._mention = FileMentionCompleter()
+        self._mention = FileMentionCompleter(custom_agents)
 
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
@@ -1335,6 +1370,7 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
     try:
         from aru.tools.codebase import set_display, set_live
+        from aru.permissions import set_live as perm_set_live, set_display as perm_set_display
         from aru.tools.tasklist import set_live as tasklist_set_live, set_display as tasklist_set_display
 
         status = StatusBar(interval=3.0)
@@ -1393,6 +1429,8 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
         with Live(display, console=console, refresh_per_second=10) as live:
             set_live(live)
             set_display(display)
+            perm_set_live(live)
+            perm_set_display(display)
             tasklist_set_live(live)
             tasklist_set_display(display)
             accumulated = ""
@@ -1492,6 +1530,8 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
 
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
 
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
@@ -1516,10 +1556,14 @@ async def run_agent_capture(agent, message: str, session: "Session | None" = Non
     except (KeyboardInterrupt, asyncio.CancelledError):
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
         console.print("\n[yellow]Interrupted.[/yellow]")
     except Exception as e:
         set_live(None)
         set_display(None)
+        perm_set_live(None)
+        perm_set_display(None)
         from rich.markup import escape
         console.print(f"[red]Error: {escape(str(e))}[/red]")
 
@@ -1752,8 +1796,17 @@ async def execute_plan_steps(session: Session, executor_factory) -> str | None:
 
 async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     """Main REPL loop."""
-    from aru.tools.codebase import set_console, set_model_id, set_small_model_ref, set_skip_permissions, reset_allowed_actions, set_permission_rules, set_on_file_mutation
+    from aru.tools.codebase import set_model_id, set_small_model_ref, set_on_file_mutation
+    from aru.permissions import (
+        set_config as set_perm_config,
+        set_skip_permissions,
+        set_console as perm_set_console,
+        reset_session as perm_reset_session,
+        parse_permission_config,
+    )
+    from aru.tools.codebase import set_console
     set_console(console)
+    perm_set_console(console)
     set_skip_permissions(skip_permissions)
 
     store = SessionStore()
@@ -1795,10 +1848,10 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         console.print(f"[dim]Loaded {len(config.custom_agents)} custom agent(s): {', '.join(parts)}[/dim]")
         from aru.tools.codebase import set_custom_agents
         set_custom_agents(config.custom_agents)
-    permission_allow = config.permissions.get("allow", [])
-    if permission_allow:
-        set_permission_rules(permission_allow)
-        console.print(f"[dim]Loaded {len(permission_allow)} permission rule(s)[/dim]")
+    if config.permissions:
+        perm_config = parse_permission_config(config.permissions)
+        set_perm_config(perm_config)
+        console.print("[dim]Loaded permission config[/dim]")
 
     extra_instructions = config.get_extra_instructions()
 
@@ -1874,8 +1927,9 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
         user_input = _sanitize_input(paste_state.build_message(user_text))
 
-        # Resolve @file mentions
-        resolved, injected = _resolve_mentions(user_input, os.getcwd())
+        # Resolve @file mentions (skip known agent names)
+        _agent_names = set(config.custom_agents.keys()) if config.custom_agents else set()
+        resolved, injected = _resolve_mentions(user_input, os.getcwd(), _agent_names)
         if resolved != user_input:
             console.print(f"[dim]Attached {injected} file(s) from @ mentions[/dim]")
             user_input = resolved
@@ -1893,7 +1947,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             continue
 
         # Reset "allow all" approvals for each new user message
-        reset_allowed_actions()
+        perm_reset_session()
 
         if user_input.lower() in ("/quit", "/exit", "quit", "exit"):
             store.save(session)
@@ -2104,10 +2158,12 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 if agent_def.mode == "subagent":
                     console.print(f"[yellow]Agent '{cmd_name}' is a subagent — invoke via delegate_task only[/yellow]")
                 else:
+                    from aru.permissions import permission_scope
                     console.print(f"[bold magenta]Running agent /{cmd_name}...[/bold magenta]")
                     agent = create_custom_agent_instance(agent_def, session, config)
                     session.add_message("user", user_input)
-                    run_result = await run_agent_capture(agent, cmd_args or user_input, session)
+                    with permission_scope(agent_def.permission):
+                        run_result = await run_agent_capture(agent, cmd_args or user_input, session)
                     if run_result.content:
                         session.add_message("assistant", run_result.with_tools_summary())
             else:
@@ -2125,11 +2181,25 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                         console.print(f"[dim]Agents: {', '.join(f'/{k}' for k in primary)}[/dim]")
 
         else:
-            agent = create_general_agent(session, config)
-            session.add_message("user", user_input)
-            run_result = await run_agent_capture(agent, user_input, session)
-            if run_result.content:
-                session.add_message("assistant", run_result.with_tools_summary())
+            # Check for @agent mention anywhere in message
+            agent_mention = _extract_agent_mention(user_input, config.custom_agents)
+            if agent_mention:
+                agent_name, message_text = agent_mention
+                agent_def = config.custom_agents[agent_name]
+                from aru.permissions import permission_scope
+                console.print(f"[bold magenta]Routing to @{agent_name}...[/bold magenta]")
+                agent = create_custom_agent_instance(agent_def, session, config)
+                session.add_message("user", user_input)
+                with permission_scope(agent_def.permission):
+                    run_result = await run_agent_capture(agent, message_text, session)
+                if run_result.content:
+                    session.add_message("assistant", run_result.with_tools_summary())
+            else:
+                agent = create_general_agent(session, config)
+                session.add_message("user", user_input)
+                run_result = await run_agent_capture(agent, user_input, session)
+                if run_result.content:
+                    session.add_message("assistant", run_result.with_tools_summary())
 
         # Show token usage and auto-save
         if session.token_summary:

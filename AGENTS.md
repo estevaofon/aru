@@ -17,16 +17,19 @@ All agents use Claude models (sonnet/opus/haiku) via Agno's `Agent` class with s
 
 ```
 aru/
-├── cli.py              # Interactive CLI, session management, command routing (1260 LOC)
+├── cli.py              # Interactive CLI, session management, command routing
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
+├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
+├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
 ├── agents/
+│   ├── base.py         # Shared instruction templates (BASE_INSTRUCTIONS, roles)
 │   ├── planner.py      # Planning agent — read-only tools, outputs structured plans
 │   └── executor.py     # Execution agent — all tools, implements plan steps
 └── tools/
     ├── codebase.py     # 16 core tools (read/write/edit/search/bash/web/delegate)
     ├── ast_tools.py    # Tree-sitter Python AST analysis (classes, functions, imports)
-    ├── ranker.py        # Multi-factor file relevance scoring
-    └── gitignore.py     # .gitignore-aware file filtering with caching
+    ├── ranker.py       # Multi-factor file relevance scoring
+    └── gitignore.py    # .gitignore-aware file filtering with caching
 ```
 
 ## Key Modules
@@ -43,7 +46,15 @@ aru/
 Loads project-level customization into an `AgentConfig` object:
 - `AGENTS.md` → extra instructions appended to all agent prompts
 - `.agents/commands/*.md` → custom slash commands (filename = command name)
-- `skills/<name>/SKILL.md` → custom skills (agentskills.io format, searched in `.agents/`, `.claude/`, and `~/`)
+- `skills/<name>/SKILL.md` → custom skills (agentskills.io format, searched in `.agents/`, `.claude/`, `~/.agents/`, `~/.claude/`)
+
+### `providers.py` — Multi-Provider LLM
+
+Abstracts model creation across Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek. Custom providers configurable via `aru.json`.
+
+### `permissions.py` — Permission System
+
+Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured in `aru.json` under `permission` with per-category patterns. Safe command prefixes whitelist ~40 read-only shell commands as defaults. Sensitive files (`*.env`) denied by default.
 
 ### `agents/planner.py` — Planner Agent
 
@@ -70,8 +81,6 @@ Loads project-level customization into an `AgentConfig` object:
 | Web | `web_search`, `web_fetch` |
 | Agent | `delegate_task` (spawns sub-agents) |
 
-Permission model: read-only tools auto-approve; write/bash tools prompt user (with "allow all" option). Safe command prefixes whitelist ~40 read-only shell commands.
-
 ### `tools/ranker.py` — File Relevance Ranking
 
 Score = `0.50 * name_match + 0.30 * structural + 0.20 * recency`
@@ -80,19 +89,24 @@ Score = `0.50 * name_match + 0.30 * structural + 0.20 * recency`
 
 Tree-sitter based Python parser. Extracts imports, classes, functions, decorators with line numbers.
 
-## Data & Config Files
+## Configuration
 
 - `.env` → `ANTHROPIC_API_KEY`
-- `.aru/sessions/` → Saved conversation sessions (JSON)
-- `.claude/settings.local.json` → Permission allowlists
+- `aru.json` → permissions, model defaults, custom providers
+- `.agents/commands/*.md` → custom slash commands
+- `skills/<name>/SKILL.md` → agentskills.io skills
+- `.aru/sessions/` → saved conversation sessions (JSON)
 
-## Development Workflow
+## Development
+
+- **Python:** 3.13+
+- **Entry point:** `aru = "aru.cli:main"` (pyproject.toml)
+- **Async throughout:** asyncio, `arun()` for agent execution
+- **Tests:** `tests/` directory, use `pytest-asyncio` with `asyncio_mode = "auto"`
 
 ### Running Tests
 
 The project uses a local `.venv` virtual environment. When using the `bash` tool, **DO NOT** use `source .venv/bin/activate` in subprocesses (it doesn't work and will hang).
-
-**For bash tool commands, use one of these patterns:**
 
 ```bash
 # Windows (correct form)
@@ -100,24 +114,13 @@ The project uses a local `.venv` virtual environment. When using the `bash` tool
 .\.venv\Scripts\python.exe -m pytest --cov=aru --cov-report=term-missing
 ```
 
-**Important:** Always prefer `--cov-report=term-missing` over `--cov-report=html` when running coverage tests. The HTML report consumes significantly more memory and can cause the process to be killed by the OOM killer, especially in memory-constrained environments like WSL2.
-
-**For manual interactive shell usage (not tool calls):**
-
-```bash
-# Linux/macOS
-source .venv/bin/activate
-pytest
-
-# PowerShell (Windows)
-.\.venv\Scripts\activate.ps1
-pytest
-```
+**Always use `--cov-report=term-missing`**, not `--cov-report=html` (HTML causes OOM in WSL2).
 
 ## Conventions
 
-- Async throughout (`asyncio`, `arun()` for agent execution)
-- Agent instructions are composed from: hardcoded base prompt + AGENTS.md extras + environment context (git status, project tree)
-- Output truncation at 10K chars for shell, 30KB for file reads
-- Windows-aware process management (taskkill for subprocess cleanup)
-- `.gitignore` respected in all file discovery operations
+- Agent instructions = hardcoded base prompt + AGENTS.md + environment context (git status, project tree)
+- Output truncation: shell 10K chars, file reads 30KB
+- Windows-aware (UTF-8, taskkill for subprocess cleanup)
+- `.gitignore` respected in all file discovery
+- Sessions persisted as JSON in `.aru/sessions/`
+- Project language: Portuguese comments in some places; code in English

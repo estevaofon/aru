@@ -160,23 +160,92 @@ You can configure custom providers with specific token limits:
 
 ### Permissions (`aru.json`)
 
-The `aru.json` file in the project root controls which shell commands aru can execute **without asking for confirmation**:
+Aru uses a granular permission system where each tool action resolves to one of three outcomes:
+
+- **`allow`** — executes without asking
+- **`ask`** — prompts for confirmation (once / always / no)
+- **`deny`** — blocks the action silently
+
+Configure permissions per tool category with glob patterns:
 
 ```json
 {
   "permission": {
-    "allow": [
-      "git *",
-      "npm *",
-      "pytest *",
-      "python *",
-      "uv run pytest *"
-    ]
+    "*": "ask",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "edit": {
+      "*": "allow",
+      "*.env": "deny"
+    },
+    "write": {
+      "*": "allow",
+      "*.env": "deny"
+    },
+    "bash": {
+      "*": "ask",
+      "git *": "allow",
+      "npm *": "allow",
+      "pytest *": "allow",
+      "rm -rf *": "deny"
+    },
+    "web_search": "allow",
+    "web_fetch": "allow",
+    "delegate_task": "allow"
   }
 }
 ```
 
-Each entry is a glob pattern. Any command that doesn't match a listed pattern will prompt for confirmation before executing.
+#### Available categories
+
+| Category | Matched against | Default |
+|----------|----------------|---------|
+| `read` | file path | `allow` |
+| `edit` | file path | `ask` |
+| `write` | file path | `ask` |
+| `bash` | command string | safe prefixes = `allow`, rest = `ask` |
+| `glob` | — | `allow` |
+| `grep` | — | `allow` |
+| `list` | — | `allow` |
+| `web_search` | — | `allow` |
+| `web_fetch` | URL | `allow` |
+| `delegate_task` | — | `allow` |
+
+#### Rule precedence
+
+Rules use **last-match-wins** ordering. Place catch-all `"*"` first, then specific patterns:
+
+```json
+{
+  "edit": {
+    "*": "allow",
+    "*.env": "deny",
+    "*.env.example": "allow"
+  }
+}
+```
+
+#### Shorthands
+
+```json
+"permission": "allow"
+```
+Allows everything (equivalent to `--dangerously-skip-permissions`).
+
+```json
+"permission": { "read": "allow", "edit": "ask" }
+```
+String value applies to all patterns in that category.
+
+#### Defaults
+
+Without any `aru.json` config, aru applies safe defaults:
+- Read-only tools (`read`, `glob`, `grep`, `list`) → `allow`
+- Mutating tools (`edit`, `write`) → `ask`
+- Bash → ~40 safe command prefixes auto-allowed (`ls`, `git status`, `grep`, etc.), rest → `ask`
+- Sensitive files (`*.env`, `*.env.*`) → `deny` for read/edit/write (except `*.env.example`)
 
 > `aru.json` can also be placed at `.aru/config.json`.
 >
@@ -229,6 +298,7 @@ performance, and readability. Do NOT modify files.
 | `tools` | No | Comma-separated tool names (allowlist) or JSON object for granular control (e.g., `{"bash": false}`). Defaults to all general tools |
 | `max_turns` | No | Max tool calls before the agent stops. Default: 20 |
 | `mode` | No | `primary` (invocable via `/name`) or `subagent` (only via `delegate_task`). Default: `primary` |
+| `permission` | No | Permission overrides (same format as `aru.json` permission section). Replaces global rules for specified categories while the agent runs |
 
 #### Invocation
 
@@ -245,6 +315,37 @@ Agents are discovered from multiple locations (later overrides earlier):
 2. `~/.claude/agents/` — global (Claude Code compatible path)
 3. `.agents/agents/` — project-local
 4. `.claude/agents/` — project-local
+
+#### Agent-level permissions
+
+Agents can override global permission rules. Overrides replace the entire category — unspecified categories inherit from global config.
+
+```markdown
+---
+name: Code Reviewer
+description: Read-only code reviewer
+permission:
+  edit: deny
+  write: deny
+  bash:
+    git diff *: allow
+    grep *: allow
+---
+```
+
+You can also set agent permissions in `aru.json` (overrides frontmatter):
+
+```json
+{
+  "agent": {
+    "reviewer": {
+      "permission": { "edit": "deny", "write": "deny" }
+    }
+  }
+}
+```
+
+Each agent gets its own isolated "always" memory — approvals during an agent's run don't carry over to the global scope.
 
 #### Subagent mode
 
@@ -307,6 +408,7 @@ aru-code/
 │   ├── cli.py              # Interactive CLI with streaming display
 │   ├── config.py           # Configuration loader (AGENTS.md, .agents/)
 │   ├── providers.py        # Multi-provider LLM abstraction
+│   ├── permissions.py      # Granular permission system (allow/ask/deny)
 │   ├── agents/
 │   │   ├── planner.py      # Planning agent
 │   │   └── executor.py     # Execution agent
