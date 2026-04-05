@@ -23,7 +23,7 @@ Create a GitHub pull request for the current branch using `gh pr create`.
    - **Why** it changed (purpose, motivation, problem being solved)
    - **How** it changed (approach, technique, patterns used)
 
-4. **Compose the PR body** mentally with this exact structure:
+4. **Write the PR body to a temp file**: Create a file at `.aru/tmp_pr_body.md` with this exact structure:
 
    ```markdown
    ## Summary
@@ -44,6 +44,7 @@ Create a GitHub pull request for the current branch using `gh pr create`.
    - Summary bullets must explain **why**, not just restate the commit message
    - Components must reference actual changed files with backtick formatting
    - Test Plan must have actionable verification steps as checkboxes
+   - Do NOT wrap lines in quotes or escape characters — write raw markdown
 
 5. **Generate a concise PR title**: Under 72 characters, in imperative mood (e.g., "Add retry logic to API client", "Fix token count in context pruning"). Do NOT just repeat a commit message — synthesize the overall change.
 
@@ -52,28 +53,22 @@ Create a GitHub pull request for the current branch using `gh pr create`.
    git push -u origin HEAD
    ```
 
-7. **Create the PR** by piping the body via stdin to avoid temp files:
+7. **Create the PR** using `--body-file` pointing to the temp file:
    ```
-   cat <<'EOF' | gh pr create --base <base-branch> --title "<title>" --body-file -
-   ## Summary
-   - ...
-
-   ## Components
-   - ...
-
-   ## Test Plan
-   - [ ] ...
-   EOF
+   gh pr create --base <base-branch> --title "<title>" --body-file .aru/tmp_pr_body.md
    ```
 
-   **CRITICAL**: Always pipe the body through stdin with `--body-file -`. This avoids temp files and handles multiline markdown correctly. NEVER use `--body` with inline text. NEVER create temp files.
+   **CRITICAL**: Always use `--body-file` with the temp file. NEVER use `--body` with inline text — it causes quoting/escaping issues that corrupt the PR description.
 
-8. **Return the PR URL** shown in the `gh` output.
+8. **Clean up**: Delete `.aru/tmp_pr_body.md` after the PR is created.
+
+9. **Return the PR URL** shown in the `gh` output.
 
 ## Rules
 
-- ALWAYS pipe the PR body via `cat <<'EOF' | gh pr create ... --body-file -`. NEVER create temp files.
-- NEVER use `--body` with inline text or heredoc substitution — it causes escaping issues.
+- ALWAYS use `--body-file` with a temp file. NEVER use `--body` with inline text or heredocs.
+- NEVER wrap markdown content in quotes when writing to the temp file — write raw markdown directly.
+- NEVER use `echo` with quotes to build the body — use `write_file` tool to create the temp file instead.
 - Title must be under 72 characters, imperative mood, and synthesize the overall change.
 - Summary must focus on **why** and **impact**, not just restate file names or commit subjects.
 - If the diff is large, focus the summary on the most important changes.
