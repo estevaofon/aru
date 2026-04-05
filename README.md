@@ -22,7 +22,7 @@ An intelligent coding assistant for the terminal, powered by LLMs and [Agno](htt
 pip install aru-code
 ```
 
-> **Requirements:** Python 3.13+
+> **Requirements:** Python 3.11+
 
 ### 2. Configure the API Key
 
