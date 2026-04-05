@@ -137,6 +137,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         console.print(f"[dim]Loaded {len(config.commands)} custom command(s): {', '.join(f'/{k}' for k in config.commands)}[/dim]")
     if config.skills:
         console.print(f"[dim]Loaded {len(config.skills)} skill(s): {', '.join(config.skills.keys())}[/dim]")
+    if config.rules_instructions:
+        console.print("[dim]Loaded custom instructions from aru.json[/dim]")
     if config.custom_agents:
         primary = [k for k, v in config.custom_agents.items() if v.mode == "primary"]
         subagents = [k for k, v in config.custom_agents.items() if v.mode == "subagent"]

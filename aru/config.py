@@ -10,11 +10,14 @@ Supports:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("aru.config")
 
 
 @dataclass
@@ -54,6 +57,92 @@ class CustomAgent:
 
 
 MAX_README_CHARS = 2000  # Reduced from 8000 to save ~1.7K tokens per request
+MAX_RULE_FILE_SIZE = 10_000  # 10KB per rule file
+URL_FETCH_TIMEOUT = 5  # seconds
+MAX_TOTAL_RULES_SIZE = 50_000  # 50KB combined cap
+
+# Module-level URL cache (session-scoped, persists for process lifetime)
+_url_cache: dict[str, str | None] = {}
+
+
+def _resolve_instructions(entries: list[str], root: Path) -> str:
+    """Resolve instruction entries (local files, glob patterns, URLs) into combined text.
+
+    Each entry is classified as:
+    - URL: starts with http:// or https://
+    - Glob: contains *, ?, or [
+    - File path: everything else (resolved relative to root)
+    """
+    from aru.tools.gitignore import is_ignored
+
+    parts: list[str] = []
+    total_size = 0
+
+    def _add_content(source: str, content: str) -> None:
+        nonlocal total_size
+        if not content.strip():
+            return
+        truncated = content[:MAX_RULE_FILE_SIZE]
+        if total_size + len(truncated) > MAX_TOTAL_RULES_SIZE:
+            remaining = MAX_TOTAL_RULES_SIZE - total_size
+            if remaining <= 0:
+                logger.warning("Total rules size cap reached, skipping: %s", source)
+                return
+            truncated = truncated[:remaining]
+            logger.warning("Total rules size cap reached, truncating: %s", source)
+        parts.append(f"## Rules: {source}\n\n{truncated}")
+        total_size += len(truncated)
+
+    def _read_file(filepath: Path, source_label: str) -> None:
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            _add_content(source_label, content)
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Failed to read instruction file %s: %s", filepath, exc)
+
+    for entry in entries:
+        if entry.startswith("http://") or entry.startswith("https://"):
+            # Remote URL
+            if entry in _url_cache:
+                cached = _url_cache[entry]
+                if cached is not None:
+                    _add_content(entry, cached)
+                continue
+            try:
+                import httpx
+                with httpx.Client(timeout=URL_FETCH_TIMEOUT, follow_redirects=True) as client:
+                    resp = client.get(entry)
+                    resp.raise_for_status()
+                    text = resp.text
+                _url_cache[entry] = text
+                _add_content(entry, text)
+            except Exception as exc:
+                _url_cache[entry] = None
+                logger.warning("Failed to fetch instruction URL %s: %s", entry, exc)
+
+        elif any(c in entry for c in ("*", "?", "[")):
+            # Glob pattern
+            matched = sorted(root.glob(entry))
+            for filepath in matched:
+                if not filepath.is_file():
+                    continue
+                try:
+                    rel = filepath.relative_to(root)
+                except ValueError:
+                    continue
+                if is_ignored(str(rel), str(root)):
+                    continue
+                _read_file(filepath, str(rel))
+
+        else:
+            # Local file path
+            filepath = root / entry
+            if filepath.is_file():
+                _read_file(filepath, entry)
+            else:
+                logger.warning("Instruction file not found: %s", filepath)
+
+    return "\n\n".join(parts)
 
 
 @dataclass
@@ -61,6 +150,7 @@ class AgentConfig:
     """Loaded configuration from AGENTS.md, README.md, and .agents/ directory."""
     readme_md: str = ""
     agents_md: str = ""
+    rules_instructions: str = ""
     commands: dict[str, CustomCommand] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
     permissions: dict[str, Any] = field(default_factory=dict)
@@ -71,7 +161,7 @@ class AgentConfig:
 
     @property
     def has_instructions(self) -> bool:
-        return bool(self.agents_md) or bool(self.skills)
+        return bool(self.agents_md) or bool(self.skills) or bool(self.rules_instructions)
 
     def get_extra_instructions(self, active_skills: list[str] | None = None, lightweight: bool = False) -> str:
         """Build extra instructions from README.md, AGENTS.md, and active skills.
@@ -85,6 +175,8 @@ class AgentConfig:
             parts.append(f"## Project Overview (README.md)\n\n{self.readme_md}")
         if self.agents_md:
             parts.append(f"## Project Instructions (AGENTS.md)\n\n{self.agents_md}")
+        if self.rules_instructions:
+            parts.append(self.rules_instructions)
         if active_skills:
             for name in active_skills:
                 if name in self.skills:
@@ -409,6 +501,10 @@ def load_config(cwd: str | None = None) -> AgentConfig:
                         config.model_aliases = data["model_aliases"]
                     if "plan_reviewer" in data:
                         config.plan_reviewer = bool(data["plan_reviewer"])
+                    # Resolve instructions (local files, globs, URLs)
+                    if "instructions" in data and isinstance(data["instructions"], list):
+                        entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
+                        config.rules_instructions = _resolve_instructions(entries, root)
                     # Agent-level permission overrides from aru.json
                     if "agent" in data and isinstance(data["agent"], dict):
                         for agent_name, agent_data in data["agent"].items():

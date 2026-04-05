@@ -1,16 +1,22 @@
 """Unit tests for aru.config module."""
 
+import json
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from aru.config import (
     AgentConfig,
     CustomAgent,
     CustomCommand,
+    MAX_RULE_FILE_SIZE,
+    MAX_TOTAL_RULES_SIZE,
     Skill,
     _discover_agents,
     _parse_agent_metadata,
     _parse_frontmatter,
     _parse_skill_metadata,
+    _resolve_instructions,
+    _url_cache,
     render_command_template,
     render_skill_template,
     load_config,
@@ -802,3 +808,149 @@ class TestAgentPermissions:
         config = load_config(str(tmp_path))
         # aru.json override should win
         assert config.custom_agents["worker"].permission == {"edit": "deny"}
+
+
+class TestInstructionsLoading:
+    """Test the instructions field in aru.json (rules system)."""
+
+    def setup_method(self):
+        """Clear URL cache before each test."""
+        _url_cache.clear()
+
+    def test_instructions_local_file(self, tmp_path):
+        (tmp_path / "CONTRIBUTING.md").write_text("Follow these contributing guidelines.")
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["CONTRIBUTING.md"]
+        }))
+        config = load_config(str(tmp_path))
+        assert "Follow these contributing guidelines." in config.rules_instructions
+        assert "## Rules: CONTRIBUTING.md" in config.rules_instructions
+
+    def test_instructions_glob_pattern(self, tmp_path):
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "style.md").write_text("Style guide content")
+        (docs / "api.md").write_text("API guidelines")
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["docs/*.md"]
+        }))
+        config = load_config(str(tmp_path))
+        assert "Style guide content" in config.rules_instructions
+        assert "API guidelines" in config.rules_instructions
+
+    def test_instructions_missing_file(self, tmp_path):
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["nonexistent.md"]
+        }))
+        config = load_config(str(tmp_path))
+        assert config.rules_instructions == ""
+
+    def test_instructions_file_size_cap(self, tmp_path):
+        large_content = "x" * (MAX_RULE_FILE_SIZE + 5000)
+        (tmp_path / "large.md").write_text(large_content)
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["large.md"]
+        }))
+        config = load_config(str(tmp_path))
+        # Header + content, content should be truncated
+        assert len(config.rules_instructions) < MAX_RULE_FILE_SIZE + 200  # header overhead
+
+    def test_instructions_url(self, tmp_path):
+        mock_response = MagicMock()
+        mock_response.text = "Remote rule content"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        with patch("httpx.Client", return_value=mock_client):
+            (tmp_path / "aru.json").write_text(json.dumps({
+                "instructions": ["https://example.com/rules.md"]
+            }))
+            config = load_config(str(tmp_path))
+            assert "Remote rule content" in config.rules_instructions
+
+    def test_instructions_url_timeout(self, tmp_path):
+        import httpx
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = httpx.ConnectTimeout("timeout")
+
+        with patch("httpx.Client", return_value=mock_client):
+            (tmp_path / "aru.json").write_text(json.dumps({
+                "instructions": ["https://example.com/timeout.md"]
+            }))
+            config = load_config(str(tmp_path))
+            assert config.rules_instructions == ""
+
+    def test_instructions_combined_in_extra(self, tmp_path):
+        (tmp_path / "rules.md").write_text("Custom rule")
+        (tmp_path / "AGENTS.md").write_text("Agent instructions")
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["rules.md"]
+        }))
+        config = load_config(str(tmp_path))
+        extra = config.get_extra_instructions()
+        # Both AGENTS.md and rules should be present
+        assert "Agent instructions" in extra
+        assert "Custom rule" in extra
+        # Rules should come after AGENTS.md
+        agents_pos = extra.find("Agent instructions")
+        rules_pos = extra.find("Custom rule")
+        assert agents_pos < rules_pos
+
+    def test_instructions_total_size_cap(self, tmp_path):
+        # Create files that together exceed MAX_TOTAL_RULES_SIZE
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        chunk = "y" * (MAX_RULE_FILE_SIZE - 100)
+        num_files = (MAX_TOTAL_RULES_SIZE // MAX_RULE_FILE_SIZE) + 3
+        for i in range(num_files):
+            (docs / f"rule{i:02d}.md").write_text(chunk)
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": ["docs/*.md"]
+        }))
+        config = load_config(str(tmp_path))
+        assert len(config.rules_instructions) <= MAX_TOTAL_RULES_SIZE + 5000  # headers overhead
+
+    def test_instructions_empty_list(self, tmp_path):
+        (tmp_path / "aru.json").write_text(json.dumps({
+            "instructions": []
+        }))
+        config = load_config(str(tmp_path))
+        assert config.rules_instructions == ""
+
+    def test_instructions_has_instructions_property(self):
+        config = AgentConfig(rules_instructions="some rules")
+        assert config.has_instructions is True
+
+    def test_resolve_instructions_directly(self, tmp_path):
+        (tmp_path / "a.md").write_text("Content A")
+        (tmp_path / "b.md").write_text("Content B")
+        result = _resolve_instructions(["a.md", "b.md"], tmp_path)
+        assert "Content A" in result
+        assert "Content B" in result
+
+    def test_instructions_url_caching(self, tmp_path):
+        """Second call should use cache, not fetch again."""
+        mock_response = MagicMock()
+        mock_response.text = "Cached content"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+
+        url = "https://example.com/cached.md"
+        with patch("httpx.Client", return_value=mock_client):
+            result1 = _resolve_instructions([url], tmp_path)
+            result2 = _resolve_instructions([url], tmp_path)
+        assert "Cached content" in result1
+        assert "Cached content" in result2
+        # httpx.Client should only be called once (second uses cache)
+        assert mock_client.get.call_count == 1

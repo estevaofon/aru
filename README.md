@@ -255,6 +255,31 @@ Without any `aru.json` config, aru applies safe defaults:
 
 Place an `AGENTS.md` file in your project root with custom instructions that will be appended to all agent system prompts.
 
+### Instructions (Rules)
+
+You can load additional instructions from local files, glob patterns, or remote URLs via the `instructions` field in `aru.json`:
+
+```json
+{
+  "instructions": [
+    "CONTRIBUTING.md",
+    "docs/coding-standards.md",
+    "packages/*/AGENTS.md",
+    "https://raw.githubusercontent.com/my-org/shared-rules/main/style.md"
+  ]
+}
+```
+
+Each entry is resolved as follows:
+
+| Format | Example | Behavior |
+|--------|---------|----------|
+| **Local file** | `"CONTRIBUTING.md"` | Reads the file relative to the project root |
+| **Glob pattern** | `"docs/**/*.md"` | Expands the pattern, respects `.gitignore` |
+| **Remote URL** | `"https://example.com/rules.md"` | Fetches via HTTP (5s timeout, cached per session) |
+
+All resolved content is combined and appended to the agent's system prompt alongside `AGENTS.md`. Individual files are capped at 10KB, and the total combined size is capped at 50KB to prevent context bloat. Missing files and failed URL fetches are skipped with a warning.
+
 ### `.agents/` Directory
 
 ```

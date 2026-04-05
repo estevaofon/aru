@@ -64,5 +64,8 @@
             "uv run pytest *": "allow",
             "uv run python *": "allow"
         }
-    }
+    },
+    "instructions": [
+        "additional.md"
+    ]
 }
