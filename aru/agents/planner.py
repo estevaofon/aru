@@ -79,7 +79,7 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=7,
+            compress_tool_results_limit=15,
         ),
         tool_call_limit=20,
     )
