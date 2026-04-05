@@ -13,7 +13,8 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
     from agno.agent import Agent
     from agno.compression.manager import CompressionManager
 
-    from aru.tools.codebase import GENERAL_TOOLS, _get_small_model_ref
+    from aru.tools.codebase import GENERAL_TOOLS
+    from aru.runtime import get_ctx
 
     extra = config.get_extra_instructions() if config else ""
 
@@ -25,7 +26,7 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         markdown=True,
         compress_tool_results=True,
         compression_manager=CompressionManager(
-            model=create_model(_get_small_model_ref(), max_tokens=1024),
+            model=create_model(get_ctx().small_model_ref, max_tokens=1024),
             compress_tool_results=True,
             compress_tool_results_limit=15,
         ),
@@ -39,7 +40,8 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
     from agno.agent import Agent
     from agno.compression.manager import CompressionManager
     from aru.agents.base import BASE_INSTRUCTIONS
-    from aru.tools.codebase import resolve_tools, _get_small_model_ref
+    from aru.tools.codebase import resolve_tools
+    from aru.runtime import get_ctx
 
     model_ref = agent_def.model or session.model_ref
     tools = resolve_tools(agent_def.tools)
@@ -58,7 +60,7 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
         markdown=True,
         compress_tool_results=True,
         compression_manager=CompressionManager(
-            model=create_model(_get_small_model_ref(), max_tokens=1024),
+            model=create_model(get_ctx().small_model_ref, max_tokens=1024),
             compress_tool_results=True,
             compress_tool_results_limit=15,
         ),

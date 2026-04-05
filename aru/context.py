@@ -204,7 +204,7 @@ async def compact_conversation(
     Uses a small/fast model for the summarization to minimize cost.
     Falls back to simple truncation if the agent call fails.
     """
-    from aru.tools.codebase import _get_small_model_ref
+    from aru.runtime import get_ctx
     from aru.providers import create_model
 
     prompt = build_compaction_prompt(history, plan_task)
@@ -212,7 +212,7 @@ async def compact_conversation(
     try:
         from agno.agent import Agent
 
-        small_ref = _get_small_model_ref()
+        small_ref = get_ctx().small_model_ref
         compactor = Agent(
             name="Compactor",
             model=create_model(small_ref, max_tokens=2048),

@@ -6,7 +6,8 @@ from agno.utils.log import log_warning
 
 from aru.agents.base import build_instructions
 from aru.providers import create_model
-from aru.tools.codebase import EXECUTOR_TOOLS, _get_small_model_ref
+from aru.tools.codebase import EXECUTOR_TOOLS
+from aru.runtime import get_ctx
 
 # Max chars for truncation fallback when compression fails
 _TRUNCATE_FALLBACK = 3000
@@ -50,7 +51,7 @@ def create_executor(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instru
         # Compress tool results after 5 uncompressed tool calls to save tokens
         compress_tool_results=True,
         compression_manager=_SafeCompressionManager(
-            model=create_model(_get_small_model_ref(), max_tokens=2048),
+            model=create_model(get_ctx().small_model_ref, max_tokens=2048),
             compress_tool_results=True,
             compress_tool_results_limit=15,
         ),

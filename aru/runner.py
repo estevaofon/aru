@@ -69,9 +69,7 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
     _stalled = False
 
     try:
-        from aru.tools.codebase import set_display, set_live
-        from aru.permissions import set_live as perm_set_live, set_display as perm_set_display
-        from aru.tools.tasklist import set_live as tasklist_set_live, set_display as tasklist_set_display
+        from aru.runtime import get_ctx
 
         status = StatusBar(interval=3.0)
         display = StreamingDisplay(status)
@@ -125,12 +123,9 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
 
         run_output = None
         with Live(display, console=console, refresh_per_second=10) as live:
-            set_live(live)
-            set_display(display)
-            perm_set_live(live)
-            perm_set_display(display)
-            tasklist_set_live(live)
-            tasklist_set_display(display)
+            ctx = get_ctx()
+            ctx.live = live
+            ctx.display = display
             accumulated = ""
             _stall_counter = 0
             _stalled = False
@@ -215,10 +210,8 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                         )
                         break
 
-        set_live(None)
-        set_display(None)
-        perm_set_live(None)
-        perm_set_display(None)
+        ctx.live = None
+        ctx.display = None
 
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
@@ -239,16 +232,14 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             console.print(Markdown(remaining))
 
     except (KeyboardInterrupt, asyncio.CancelledError):
-        set_live(None)
-        set_display(None)
-        perm_set_live(None)
-        perm_set_display(None)
+        ctx = get_ctx()
+        ctx.live = None
+        ctx.display = None
         console.print("\n[yellow]Interrupted.[/yellow]")
     except Exception as e:
-        set_live(None)
-        set_display(None)
-        perm_set_live(None)
-        perm_set_display(None)
+        ctx = get_ctx()
+        ctx.live = None
+        ctx.display = None
         from rich.markup import escape
         console.print(f"[red]Error: {escape(str(e))}[/red]")
 
