@@ -11,13 +11,19 @@
     "providers": {
         "deepseek": {
             "models": {
-                "deepseek-chat-v3-0324": { "max_tokens": 16384 }
+                "deepseek-chat-v3-0324": {
+                    "max_tokens": 16384
+                }
             }
         },
         "openrouter": {
             "models": {
-                "minimax/minimax-m2.5": { "max_tokens": 65536 },
-                "minimax/minimax-m2.7": { "max_tokens": 131072 }
+                "minimax/minimax-m2.5": {
+                    "max_tokens": 65536
+                },
+                "minimax/minimax-m2.7": {
+                    "max_tokens": 131072
+                }
             }
         }
     },
@@ -43,6 +49,7 @@
         "bash": {
             "*": "ask",
             "git *": "allow",
+            "gh *": "allow",
             "npm *": "allow",
             "pytest": "allow",
             "pytest *": "allow",
