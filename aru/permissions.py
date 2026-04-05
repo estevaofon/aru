@@ -20,8 +20,9 @@ from __future__ import annotations
 import fnmatch
 import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Generator, Literal
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -143,6 +144,53 @@ def set_console(console: Console):
 def reset_session():
     """Reset session-level permission state (call between conversations)."""
     _session_allowed.clear()
+
+
+# ---------------------------------------------------------------------------
+# Agent-level permission scoping
+# ---------------------------------------------------------------------------
+
+_config_stack: list[PermissionConfig] = []
+_session_stack: list[set[tuple[str, str]]] = []
+
+
+def merge_configs(base: PermissionConfig, overlay: PermissionConfig) -> PermissionConfig:
+    """Merge overlay onto base. Overlay categories fully replace base categories.
+
+    Categories not in overlay are inherited from base.
+    """
+    merged_categories = dict(base.categories)
+    for cat, rules in overlay.categories.items():
+        merged_categories[cat] = rules
+    return PermissionConfig(default=base.default, categories=merged_categories)
+
+
+@contextmanager
+def permission_scope(overlay_raw: dict[str, Any] | None) -> Generator[None, None, None]:
+    """Temporarily overlay agent permissions on the global config.
+
+    While inside the scope, the merged config is active. When the scope exits,
+    the previous config is restored. Supports nesting (agent -> subagent).
+
+    Each scope gets its own fresh "always" session memory, so agent approvals
+    don't leak to the global scope or other agents.
+    """
+    global _config, _session_allowed
+    if not overlay_raw:
+        yield
+        return
+
+    _config_stack.append(_config)
+    _session_stack.append(_session_allowed)
+    _session_allowed = set()
+
+    overlay = parse_permission_config(overlay_raw)
+    _config = merge_configs(_config, overlay)
+    try:
+        yield
+    finally:
+        _config = _config_stack.pop()
+        _session_allowed = _session_stack.pop()
 
 
 # ---------------------------------------------------------------------------
