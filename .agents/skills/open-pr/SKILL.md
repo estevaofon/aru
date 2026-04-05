@@ -10,7 +10,7 @@ Create a GitHub pull request for the current branch using `gh pr create`.
 
 ## Steps
 
-1. **Determine base branch**: Use `$ARGUMENTS` if provided, otherwise default to `develop`.
+1. **Determine base branch**: Use `$ARGUMENTS` for the base branch.
 
 2. **Gather context** — run these in parallel:
    - `git status` to check for uncommitted changes
