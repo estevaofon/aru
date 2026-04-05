@@ -27,7 +27,7 @@ def create_general_agent(session: Session, config: AgentConfig | None = None):
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=7,
+            compress_tool_results_limit=15,
         ),
         tool_call_limit=20,
     )
@@ -60,7 +60,7 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
         compression_manager=CompressionManager(
             model=create_model(_get_small_model_ref(), max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=7,
+            compress_tool_results_limit=15,
         ),
         tool_call_limit=agent_def.max_turns or 20,
     )
