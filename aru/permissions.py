@@ -281,23 +281,32 @@ def _match_rule(pattern: str, subject: str) -> bool:
     return False
 
 
+def _normalize_cmd(cmd: str) -> str:
+    """Normalize a command for matching: forward slashes, strip leading ./"""
+    cmd = cmd.replace("\\", "/")
+    if cmd.startswith("./"):
+        cmd = cmd[2:]
+    return cmd
+
+
 def _match_bash_rule(pattern: str, command: str) -> bool:
     """Match a bash command against a rule pattern.
 
     Supports both prefix matching (for SAFE_COMMAND_PREFIXES compatibility)
-    and fnmatch glob patterns.
+    and fnmatch glob patterns. Normalizes slashes and ./ prefix for Windows.
     """
     if pattern == "*":
         return True
-    cmd = command.strip()
+    cmd = _normalize_cmd(command.strip())
+    pat = _normalize_cmd(pattern)
     # Exact match
-    if cmd == pattern:
+    if cmd == pat:
         return True
     # Prefix match: "git status" matches "git status --short"
-    if cmd.startswith(pattern + " "):
+    if cmd.startswith(pat + " "):
         return True
     # fnmatch glob: "git *" matches "git status"
-    if fnmatch.fnmatch(cmd, pattern):
+    if fnmatch.fnmatch(cmd, pat):
         return True
     return False
 
