@@ -20,3 +20,4 @@ wheels/
 aru.bat
 coverage.json
 .pypirc
+publish.ps1
