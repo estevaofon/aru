@@ -1211,16 +1211,77 @@ def _update_delegate_task_docstring():
     delegate_task.__doc__ = base_doc
 
 
-async def load_mcp_tools():
-    """Initialize MCP servers and inject their tools into tool lists dynamically."""
+async def load_mcp_tools(eager: bool = False):
+    """Initialize MCP servers and expose their tools to agents.
+
+    Args:
+        eager: If True, inject each MCP tool as its own Agno Function (legacy mode).
+               If False (default), inject a single gateway tool + lightweight catalog
+               in the system prompt — saves thousands of tokens per turn.
+    """
     from aru.tools.mcp_client import init_mcp
     try:
-        mcp_tools = await init_mcp()
-        if mcp_tools:
-            get_ctx().console.print(f"[dim]Loaded {len(mcp_tools)} tools from MCP servers.[/dim]")
+        manager = await init_mcp()
+        if manager is None or not manager.catalog:
+            return
+
+        tool_count = len(manager.catalog)
+
+        if eager:
+            # Legacy: each MCP tool = one Agno Function (expensive)
+            mcp_tools = manager.get_eager_tools()
+            get_ctx().console.print(f"[dim]Loaded {tool_count} tools from MCP servers (eager mode).[/dim]")
             for t in mcp_tools:
                 ALL_TOOLS.append(t)
                 EXECUTOR_TOOLS.append(t)
                 GENERAL_TOOLS.append(t)
+        else:
+            # Lazy: single gateway tool + text catalog
+            gateway = _build_mcp_gateway(manager)
+            ALL_TOOLS.append(gateway)
+            EXECUTOR_TOOLS.append(gateway)
+            GENERAL_TOOLS.append(gateway)
+            # Store catalog text for injection into system prompt
+            get_ctx().mcp_catalog_text = manager.get_catalog_text()
+            get_ctx().console.print(f"[dim]Loaded {tool_count} tools from MCP servers.[/dim]")
+
     except Exception as e:
         get_ctx().console.print(f"[dim]Failed to load MCP tools: {e}[/dim]")
+
+
+def _build_mcp_gateway(manager):
+    """Build the single gateway Function that routes to any MCP tool."""
+    from agno.tools import Function
+
+    async def use_mcp_tool(tool_name: str, arguments: dict | None = None) -> str:
+        """Call an external MCP tool by name.
+
+        Use this to invoke any tool from the MCP Tools catalog listed in your instructions.
+        Pass the exact tool name and its arguments as a JSON object.
+
+        Args:
+            tool_name: The MCP tool name (e.g. "github__search_repositories").
+            arguments: The arguments to pass to the tool as key-value pairs.
+        """
+        return await manager.call_tool(tool_name, arguments)
+
+    return Function(
+        name="use_mcp_tool",
+        description="Call an external MCP tool by name. See the MCP Tools catalog in your instructions for available tools and their parameters.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "The MCP tool name from the catalog (e.g. 'github__search_repositories')"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments to pass to the tool as key-value pairs",
+                    "additionalProperties": True
+                }
+            },
+            "required": ["tool_name"]
+        },
+        entrypoint=use_mcp_tool,
+    )

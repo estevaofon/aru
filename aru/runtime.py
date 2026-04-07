@@ -115,6 +115,9 @@ class RuntimeContext:
     # -- Tasklist --
     task_store: TaskStore = field(default_factory=TaskStore)
 
+    # -- MCP --
+    mcp_catalog_text: str = ""
+
 
 # ── ContextVar plumbing ──────────────────────────────────────────────
 

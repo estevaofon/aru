@@ -6,9 +6,12 @@ Maps provider names to Agno model classes and handles provider-specific configur
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("aru.providers")
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +153,7 @@ def load_providers_from_config(config_data: dict[str, Any]):
         "ollama": {
           "base_url": "http://localhost:11434",
           "models": {
-            "deepseek-coder-v2": {"id": "deepseek-coder-v2:latest"}
+            "deepseek-coder-v2": {"id": "deepseek-coder-v2:latest", "context_limit": 128000}
           }
         },
         "my-custom": {
@@ -158,17 +161,27 @@ def load_providers_from_config(config_data: dict[str, Any]):
           "name": "My Custom Provider",
           "api_key_env": "MY_API_KEY",
           "base_url": "https://my-api.example.com/v1",
+          "context_limit": 128000,
           "models": {
-            "my-model": {"id": "my-model-v1"}
+            "my-model": {"id": "my-model-v1", "context_limit": 64000}
           }
         }
       }
     }
+
+    context_limit can be set per-model or per-provider (provider-level serves as
+    default for all its models). Values are merged into MODEL_CONTEXT_LIMITS so
+    compaction triggers at the correct threshold.
     """
+    from aru.context import MODEL_CONTEXT_LIMITS
+
     providers_data = config_data.get("providers", {})
     for key, pdata in providers_data.items():
         if not isinstance(pdata, dict):
             continue
+
+        # Provider-level context_limit (applies to all models as default)
+        provider_context_limit = pdata.get("context_limit")
 
         # If this extends a built-in, start from that base
         existing = _providers.get(key)
@@ -199,6 +212,23 @@ def load_providers_from_config(config_data: dict[str, Any]):
             # Store the type hint for model creation
             if "type" in pdata:
                 _providers[key].options["_provider_type"] = pdata["type"]
+
+        # Register context_limit values into MODEL_CONTEXT_LIMITS
+        models_data = pdata.get("models", {})
+        for model_name, model_cfg in models_data.items():
+            if not isinstance(model_cfg, dict):
+                continue
+            limit = model_cfg.get("context_limit") or provider_context_limit
+            if isinstance(limit, int) and limit > 0:
+                model_id = model_cfg.get("id", model_name)
+                MODEL_CONTEXT_LIMITS[model_id] = limit
+
+        # If provider has context_limit but no per-model overrides, register default model
+        if isinstance(provider_context_limit, int) and provider_context_limit > 0:
+            provider_obj = _providers.get(key)
+            if provider_obj and provider_obj.default_model:
+                default_id = _get_actual_model_id(provider_obj, provider_obj.default_model)
+                MODEL_CONTEXT_LIMITS.setdefault(default_id, provider_context_limit)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +330,38 @@ def create_model(
     )
 
 
+def _make_cached_openai_chat_class():
+    """Create a CachedOpenAIChat subclass (lazy import to avoid top-level dependency)."""
+    from agno.models.openai import OpenAIChat
+    from agno.models.message import Message
+
+    class CachedOpenAIChat(OpenAIChat):
+        """OpenAIChat subclass that injects cache_control into system messages.
+
+        DashScope (Qwen) and other OpenAI-compatible APIs support explicit prompt caching
+        via cache_control: {"type": "ephemeral"} on content blocks. This subclass
+        automatically adds that marker to system messages so the provider can cache
+        the system prompt between turns (up to 90% cost reduction on cached tokens).
+        """
+
+        def _format_message(self, message: Message, compress_tool_results: bool = False):
+            formatted = super()._format_message(message, compress_tool_results)
+
+            if message.role == "system" and isinstance(formatted.get("content"), str):
+                text = formatted["content"]
+                formatted["content"] = [
+                    {
+                        "type": "text",
+                        "text": text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+
+            return formatted
+
+    return CachedOpenAIChat
+
+
 def _create_provider_model(
     provider_type: str,
     provider: ProviderConfig,
@@ -322,7 +384,6 @@ def _create_provider_model(
         return Claude(**params)
 
     elif provider_type == "openai":
-        from agno.models.openai import OpenAIChat
         api_key = _resolve_api_key(provider)
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
@@ -338,6 +399,10 @@ def _create_provider_model(
                 "model": "assistant",
             }
         params.update(kwargs)
+        if cache_system_prompt:
+            CachedOpenAIChat = _make_cached_openai_chat_class()
+            return CachedOpenAIChat(**params)
+        from agno.models.openai import OpenAIChat
         return OpenAIChat(**params)
 
     elif provider_type == "ollama":
@@ -382,14 +447,25 @@ def _create_provider_model(
 
     else:
         # Fallback: try OpenAI-compatible (works for many providers)
-        from agno.models.openai import OpenAIChat
         api_key = _resolve_api_key(provider)
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
             params["api_key"] = api_key
         if provider.base_url:
             params["base_url"] = provider.base_url
+        if provider.options.get("use_system_role"):
+            params["role_map"] = {
+                "system": "system",
+                "user": "user",
+                "assistant": "assistant",
+                "tool": "tool",
+                "model": "assistant",
+            }
         params.update(kwargs)
+        if cache_system_prompt:
+            CachedOpenAIChat = _make_cached_openai_chat_class()
+            return CachedOpenAIChat(**params)
+        from agno.models.openai import OpenAIChat
         return OpenAIChat(**params)
 
 

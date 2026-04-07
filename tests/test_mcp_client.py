@@ -996,15 +996,14 @@ class TestGlobalFunctions:
         """Test init_mcp when no config file exists."""
         # Change to temp directory with no config files
         monkeypatch.chdir(tmp_path)
-        
+
         # Reset global manager
         import aru.tools.mcp_client as mcp_module
         mcp_module._manager = None
-        
-        tools = await init_mcp()
-        
-        assert tools == []
-        assert mcp_module._manager is not None
+
+        result = await init_mcp()
+
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_init_mcp_with_config(self, tmp_path, monkeypatch):
@@ -1021,12 +1020,12 @@ class TestGlobalFunctions:
         mcp_module._manager = None
         
         with patch.object(McpSessionManager, 'initialize', new_callable=AsyncMock) as mock_init, \
-             patch.object(McpSessionManager, 'get_tools', new_callable=AsyncMock, return_value=[]):
-            
-            tools = await init_mcp()
-            
+             patch.object(McpSessionManager, 'discover_tools', new_callable=AsyncMock, return_value=0):
+
+            result = await init_mcp()
+
             mock_init.assert_called_once()
-            assert isinstance(tools, list)
+            assert isinstance(result, McpSessionManager)
 
     @pytest.mark.asyncio
     async def test_init_mcp_config_priority(self, tmp_path, monkeypatch):
@@ -1043,10 +1042,10 @@ class TestGlobalFunctions:
         mcp_module._manager = None
         
         with patch.object(McpSessionManager, 'initialize', new_callable=AsyncMock), \
-             patch.object(McpSessionManager, 'get_tools', new_callable=AsyncMock, return_value=[]):
-            
+             patch.object(McpSessionManager, 'discover_tools', new_callable=AsyncMock, return_value=0):
+
             await init_mcp()
-            
+
             # Should use .aru/mcp_servers.json (first in priority)
             assert mcp_module._manager.config_path == ".aru/mcp_servers.json"
 
@@ -1060,16 +1059,16 @@ class TestGlobalFunctions:
         mcp_module._manager = None
         
         with patch.object(McpSessionManager, 'initialize', new_callable=AsyncMock), \
-             patch.object(McpSessionManager, 'get_tools', new_callable=AsyncMock, return_value=[]):
-            
+             patch.object(McpSessionManager, 'discover_tools', new_callable=AsyncMock, return_value=0):
+
             # First call
             await init_mcp()
             first_manager = mcp_module._manager
-            
+
             # Second call
             await init_mcp()
             second_manager = mcp_module._manager
-            
+
             # Should be the same instance
             assert first_manager is second_manager
 
@@ -1122,12 +1121,12 @@ class TestGlobalFunctions:
         mcp_module._manager = None
         
         with patch.object(McpSessionManager, '_start_server', new_callable=AsyncMock), \
-             patch.object(McpSessionManager, 'get_tools', new_callable=AsyncMock, return_value=[]):
-            
+             patch.object(McpSessionManager, 'discover_tools', new_callable=AsyncMock, return_value=0):
+
             # Initialize
-            tools = await init_mcp()
+            result = await init_mcp()
             assert mcp_module._manager is not None
-            
+
             # Cleanup
             await cleanup_mcp()
             assert mcp_module._manager is None

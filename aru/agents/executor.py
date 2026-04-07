@@ -53,7 +53,7 @@ def create_executor(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instru
         compression_manager=_SafeCompressionManager(
             model=create_model(get_ctx().small_model_ref, max_tokens=2048),
             compress_tool_results=True,
-            compress_tool_results_limit=15,
+            compress_tool_results_limit=25,
         ),
         tool_call_limit=None,
     )

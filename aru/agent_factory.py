@@ -33,7 +33,7 @@ def create_general_agent(
         compression_manager=CompressionManager(
             model=create_model(get_ctx().small_model_ref, max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=15,
+            compress_tool_results_limit=25,
         ),
         tool_call_limit=20,
     )
@@ -67,7 +67,7 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
         compression_manager=CompressionManager(
             model=create_model(get_ctx().small_model_ref, max_tokens=1024),
             compress_tool_results=True,
-            compress_tool_results_limit=15,
+            compress_tool_results_limit=25,
         ),
         tool_call_limit=agent_def.max_turns or 20,
     )

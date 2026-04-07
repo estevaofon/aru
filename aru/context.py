@@ -24,18 +24,45 @@ TRUNCATE_KEEP_START = 350  # lines to keep from the start
 TRUNCATE_KEEP_END = 100  # lines to keep from the end
 
 # Compaction: trigger when cumulative input tokens exceed this fraction of model limit
-COMPACTION_THRESHOLD_RATIO = 0.50
+COMPACTION_THRESHOLD_RATIO = 0.85
 # Default model context limits (input tokens)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    # Anthropic
     "claude-sonnet-4-5-20250929": 200_000,
     "claude-sonnet-4-20250514": 200_000,
     "claude-haiku-4-5-20251001": 200_000,
     "claude-opus-4-20250514": 200_000,
     "claude-opus-4-6": 1_000_000,
     "claude-sonnet-4-6": 1_000_000,
+    # OpenAI
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
-    "default": 200_000,
+    "gpt-4.1": 1_000_000,
+    "gpt-4.1-mini": 1_000_000,
+    "gpt-4.1-nano": 1_000_000,
+    "o3": 200_000,
+    "o3-mini": 200_000,
+    "o4-mini": 200_000,
+    # Qwen (AlibabaCloud)
+    "qwen3-plus": 128_000,
+    "qwen3.6-plus": 128_000,
+    "qwen-plus": 128_000,
+    "qwen-max": 128_000,
+    "qwen-turbo": 128_000,
+    "qwen3-coder-plus": 128_000,
+    # DeepSeek
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    # Meta Llama (common Ollama/Groq)
+    "llama3.1": 128_000,
+    "llama-3.1-70b-versatile": 128_000,
+    "llama-3.3-70b-versatile": 128_000,
+    "llama4-scout": 512_000,
+    # Google Gemini (OpenRouter)
+    "gemini-2.5-pro": 1_000_000,
+    "gemini-2.5-flash": 1_000_000,
+    # Fallback
+    "default": 128_000,
 }
 
 COMPACTION_TEMPLATE = """\

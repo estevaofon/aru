@@ -109,11 +109,11 @@ class TestDataClasses:
         result = config.get_extra_instructions()
         assert result == ""
 
-    def test_agent_config_get_extra_instructions_readme_only(self):
+    def test_agent_config_get_extra_instructions_readme_not_included(self):
+        """README.md is no longer included in the system prompt by default."""
         config = AgentConfig(readme_md="# My Project\n\nDescription")
         result = config.get_extra_instructions()
-        assert "## Project Overview (README.md)" in result
-        assert "# My Project" in result
+        assert "README" not in result
 
     def test_agent_config_get_extra_instructions_agents_md_only(self):
         config = AgentConfig(agents_md="Follow these rules")

@@ -173,8 +173,9 @@ class AgentConfig:
             lightweight: If True, skip README.md and skill catalog to save tokens.
         """
         parts = []
-        if self.readme_md and not lightweight:
-            parts.append(f"## Project Overview (README.md)\n\n{self.readme_md}")
+        # README.md is no longer included by default — it's written for humans
+        # (badges, install instructions, contributing guides) and wastes ~2K tokens
+        # per turn. AGENTS.md is the proper place for model-facing context.
         if self.agents_md:
             parts.append(f"## Project Instructions (AGENTS.md)\n\n{self.agents_md}")
         if self.rules_instructions:
@@ -194,6 +195,15 @@ class AgentConfig:
                 hint = f" {skill.argument_hint}" if skill.argument_hint else ""
                 lines.append(f"- `/{name}{hint}`: {skill.description}")
             parts.append("\n".join(lines))
+
+        # Include MCP tool catalog (lazy mode — lightweight text instead of full schemas)
+        try:
+            from aru.runtime import get_ctx
+            catalog_text = get_ctx().mcp_catalog_text
+            if catalog_text and not lightweight:
+                parts.append(catalog_text)
+        except LookupError:
+            pass
 
         return "\n\n".join(parts)
 
