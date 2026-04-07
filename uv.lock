@@ -78,7 +78,7 @@ wheels = [
 
 [[package]]
 name = "aru-code"
-version = "0.11.2"
+version = "0.12.1"
 source = { editable = "." }
 dependencies = [
     { name = "agno" },

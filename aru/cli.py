@@ -192,9 +192,12 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     paste_state = PasteState()
     prompt_session = _create_prompt_session(paste_state, config)
 
-    # Startup: load MCP tools
-    from aru.tools.codebase import load_mcp_tools
-    await load_mcp_tools()
+    # Startup: load MCP tools in background (don't block REPL)
+    async def _load_mcp_background():
+        from aru.tools.codebase import load_mcp_tools
+        await load_mcp_tools()
+
+    asyncio.create_task(_load_mcp_background())
 
     while True:
         try:
@@ -359,15 +362,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             continue
 
         if user_input.lower() == "/mcp":
-            from aru.tools.codebase import ALL_TOOLS
-            from agno.tools import Function
-            mcp_tools = [t for t in ALL_TOOLS if isinstance(t, Function) and getattr(t, "name", "").count("__") > 0]
-            if not mcp_tools:
+            from aru.tools.mcp_client import get_mcp_manager
+            manager = get_mcp_manager()
+            if not manager or not manager.catalog:
                 console.print("[dim]No MCP tools loaded. Check aru.mcp.json config.[/dim]")
             else:
-                console.print(f"[bold]Loaded MCP Tools ({len(mcp_tools)}):[/bold]\n")
-                for t in mcp_tools:
-                    console.print(f"  [bold cyan]{t.name}[/bold cyan]  [dim]{t.description}[/dim]")
+                console.print(f"[bold]MCP Tools ({len(manager.catalog)}):[/bold]\n")
+                for entry in manager.catalog.values():
+                    console.print(f"  [bold cyan]{entry.name}[/bold cyan]  [dim]{entry.description}[/dim]")
             continue
 
         if user_input.lower() == "/help":
