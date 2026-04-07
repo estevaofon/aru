@@ -1,12 +1,13 @@
 {
-    "default_model": "openrouter/minimax/minimax-m2.7",
+    "default_model": "alibabacloud/qwen3.6-plus",
     "model_aliases": {
         "nemotron": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "minimax": "openrouter/minimax/minimax-m2.5",
         "minimax-m2.7": "openrouter/minimax/minimax-m2.7",
         "deepseek-v3": "openrouter/deepseek/deepseek-chat-v3-0324",
         "sonnet-4-6": "anthropic/claude-sonnet-4-6",
-        "opus-4-6": "anthropic/claude-opus-4-6"
+        "opus-4-6": "anthropic/claude-opus-4-6",
+        "qwen-3-6": "alibabacloud/qwen3.6-plus"
     },
     "providers": {
         "deepseek": {
@@ -24,6 +25,22 @@
                 "minimax/minimax-m2.7": {
                     "max_tokens": 131072
                 }
+            }
+        },
+        "alibabacloud": {
+            "type": "openai",
+            "name": "AlibabaCloud",
+            "api_key_env": "DASHSCOPE_API_KEY",
+            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "default_model": "qwen3.6-plus",
+            "models": {
+                "qwen3.6-plus": {
+                    "id": "qwen3.6-plus",
+                    "max_tokens": 16384
+                }
+            },
+            "options": {
+                "use_system_role": true
             }
         }
     },
@@ -63,7 +80,7 @@
             ".venv/bin/python *": "allow",
             "uv run pytest *": "allow",
             "uv run python *": "allow",
-            "cd *": "allow",
+            "cd *": "ask",
             "find *": "allow"
         }
     },

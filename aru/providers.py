@@ -329,6 +329,14 @@ def _create_provider_model(
             params["api_key"] = api_key
         if provider.base_url:
             params["base_url"] = provider.base_url
+        if provider.options.get("use_system_role"):
+            params["role_map"] = {
+                "system": "system",
+                "user": "user",
+                "assistant": "assistant",
+                "tool": "tool",
+                "model": "assistant",
+            }
         params.update(kwargs)
         return OpenAIChat(**params)
 
