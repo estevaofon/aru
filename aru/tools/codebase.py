@@ -1256,26 +1256,32 @@ def _build_mcp_gateway(manager):
     from agno.tools import Function
 
     async def use_mcp_tool(tool_name: str, arguments: dict | None = None) -> str:
-        """Call an external MCP tool by name.
-
-        Use this to invoke any tool from the MCP Tools catalog listed in your instructions.
-        Pass the exact tool name and its arguments as a JSON object.
+        """Call an external MCP tool by name, or pass tool_name="list" to see all available tools.
 
         Args:
-            tool_name: The MCP tool name (e.g. "github__search_repositories").
+            tool_name: The MCP tool name (e.g. "github__search_repositories"), or "list" to see the catalog.
             arguments: The arguments to pass to the tool as key-value pairs.
         """
-        return await manager.call_tool(tool_name, arguments)
+        if tool_name == "list":
+            return manager.get_catalog_text() or "No MCP tools available."
+        result = await manager.call_tool(tool_name, arguments)
+        # If the tool was not found, append the catalog so the model can self-correct
+        if result.startswith("Error: Unknown MCP tool"):
+            result += "\n\n" + (manager.get_catalog_text() or "")
+        return result
 
+    # Include server names in description so the model knows what's available
+    servers = sorted(set(e.server_name for e in manager.catalog.values()))
+    server_list = ", ".join(servers) if servers else "none"
     return Function(
         name="use_mcp_tool",
-        description="Call an external MCP tool by name. See the MCP Tools catalog in your instructions for available tools and their parameters.",
+        description=f'Call an external MCP tool by name. Available servers: {server_list}. Pass tool_name="list" to discover all tools and their parameters.',
         parameters={
             "type": "object",
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "The MCP tool name from the catalog (e.g. 'github__search_repositories')"
+                    "description": 'MCP tool name (e.g. "github__search_repositories") or "list" to see all available tools'
                 },
                 "arguments": {
                     "type": "object",

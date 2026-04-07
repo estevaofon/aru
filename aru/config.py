@@ -197,14 +197,9 @@ class AgentConfig:
                 lines.append(f"- `/{name}{hint}`: {skill.description}")
             parts.append("\n".join(lines))
 
-        # Include MCP tool catalog (lazy mode — lightweight text instead of full schemas)
-        try:
-            from aru.runtime import get_ctx
-            catalog_text = get_ctx().mcp_catalog_text
-            if catalog_text and not lightweight:
-                parts.append(catalog_text)
-        except LookupError:
-            pass
+        # MCP tool catalog is NOT included in the system prompt to save ~1-1.5K
+        # tokens per turn. The model discovers available tools on-demand when it
+        # calls use_mcp_tool — the gateway returns the catalog on first use.
 
         return "\n\n".join(parts)
 
