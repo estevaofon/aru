@@ -50,6 +50,7 @@ from aru.display import (  # noqa: F401
 from aru.completers import (  # noqa: F401
     AruCompleter,
     FileMentionCompleter,
+    MentionResult,
     PasteState,
     SlashCommandCompleter,
     TIPS,
@@ -109,6 +110,11 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     from aru.runtime import init_ctx, get_ctx
     from aru.permissions import parse_permission_config, reset_session as perm_reset_session
     from aru.tools.codebase import cleanup_processes
+
+    # Inject cache breakpoints into Agno's Claude API calls — reduces token
+    # consumption by ~40% on multi-tool-call interactions via prompt caching.
+    from aru.cache_patch import apply_cache_patch
+    apply_cache_patch()
 
     ctx = init_ctx(console=console, skip_permissions=skip_permissions)
 
@@ -253,16 +259,19 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
         # Resolve @file mentions (skip known agent names)
         _agent_names = set(config.custom_agents.keys()) if config.custom_agents else set()
-        resolved, injected, attached_images = _resolve_mentions(user_input, os.getcwd(), _agent_names)
-        if injected > 0:
+        mention_result = _resolve_mentions(user_input, os.getcwd(), _agent_names)
+        attached_images = mention_result.images
+        # File contents go into history as separate prunable messages (not inline)
+        mention_file_msgs = mention_result.file_messages
+        if mention_result.count > 0:
             parts = []
-            text_count = injected - len(attached_images)
+            text_count = mention_result.count - len(attached_images)
             if text_count > 0:
                 parts.append(f"{text_count} file(s)")
             if attached_images:
                 parts.append(f"{len(attached_images)} image(s)")
             console.print(f"[dim]Attached {', '.join(parts)} from @ mentions[/dim]")
-            user_input = resolved
+            user_input = mention_result.text
 
         if paste_state.pasted_content and user_text:
             console.print(
@@ -275,6 +284,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
         if not user_input:
             continue
+
+        # Inject @file contents as prunable history entries BEFORE the user message.
+        # These look like simulated read_file tool calls and can be pruned/compacted
+        # normally, unlike inline content which bloats the user message permanently.
+        if mention_file_msgs:
+            for msg in mention_file_msgs:
+                session.add_message(msg["role"], msg["content"])
+            mention_file_msgs = []  # consumed
 
         # Reset "allow all" approvals for each new user message
         perm_reset_session()

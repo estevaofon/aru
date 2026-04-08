@@ -145,6 +145,8 @@ class Session:
         self._cached_tree: str | None = None
         self._cached_git_status: str | None = None
         self._context_dirty: bool = True
+        # Track whether AGENTS.md/extra instructions were already sent (skip on subsequent turns)
+        self.extra_instructions_sent: bool = False
         # Tree depth for env context (configurable via aru.json "tree_depth")
         self._tree_max_depth: int = 2
         # Token budget (0 = unlimited)

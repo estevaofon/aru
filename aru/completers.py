@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -18,24 +19,36 @@ from aru.commands import SLASH_COMMANDS
 from aru.config import AgentConfig
 
 _MENTION_RE = re.compile(r'(?<!\S)@([a-zA-Z0-9_./\\:-]+)')
-_MENTION_MAX_SIZE = 30_000  # bytes, same limit as read_file
+_MENTION_MAX_SIZE = 10_000  # bytes — smaller to protect context (model uses read_file for large files)
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _IMAGE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
 
 
-def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) -> tuple[str, int, list[Image]]:
-    """Resolve @file mentions by appending file contents to the message.
+@dataclass
+class MentionResult:
+    """Result of resolving @file mentions."""
+    text: str                          # User text (without file contents)
+    file_messages: list[dict[str, str]]  # Simulated tool-call pairs for history
+    images: list[Image]
+    count: int                         # Total attached (files + images)
 
-    Image files (png, jpg, etc.) are returned as Image objects instead of text.
+
+def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) -> MentionResult:
+    """Resolve @file mentions as simulated read_file tool calls.
+
+    Instead of inlining file contents into the user message (which bloats
+    history and can't be pruned), we return separate assistant+tool_result
+    message pairs that the session can prune/compact like normal tool outputs.
+
+    Image files are returned as Image objects.
     Skips @mentions that match known agent names.
-    Returns (resolved_text, number_of_files_attached, images).
     """
     agent_names = agent_names or set()
     matches = list(_MENTION_RE.finditer(text))
     if not matches:
-        return text, 0, []
+        return MentionResult(text=text, file_messages=[], images=[], count=0)
 
-    appendix_parts = []
+    file_messages: list[dict[str, str]] = []
     images: list[Image] = []
     seen = set()
     for m in matches:
@@ -64,21 +77,18 @@ def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) 
             size = os.path.getsize(abs_path)
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read(_MENTION_MAX_SIZE)
-            if size > _MENTION_MAX_SIZE:
-                appendix_parts.append(
-                    f"\n\n---\nContents of {rel_path} (truncated to {_MENTION_MAX_SIZE // 1000}KB):\n```\n{content}\n```"
-                )
-            else:
-                appendix_parts.append(
-                    f"\n\n---\nContents of {rel_path}:\n```\n{content}\n```"
-                )
+            truncated = size > _MENTION_MAX_SIZE
+            label = f"[read_file: {rel_path}]"
+            if truncated:
+                label += f" (truncated to {_MENTION_MAX_SIZE // 1000}KB of {size // 1000}KB — use read_file for the rest)"
+            # Simulated tool call pair — can be pruned like normal tool outputs
+            file_messages.append({"role": "assistant", "content": label})
+            file_messages.append({"role": "user", "content": content})
         except OSError:
             continue
 
-    attached = len(appendix_parts) + len(images)
-    if appendix_parts:
-        return text + "".join(appendix_parts), attached, images
-    return text, attached, images
+    count = len(file_messages) // 2 + len(images)
+    return MentionResult(text=text, file_messages=file_messages, images=images, count=count)
 
 
 def _extract_agent_mention(

@@ -11,15 +11,15 @@ from __future__ import annotations
 # ── Constants ──────────────────────────────────────────────────────
 
 # Pruning: minimum chars that must be freeable to justify a prune pass
-PRUNE_MINIMUM_CHARS = 12_000  # ~3K tokens (lower = prune sooner)
+PRUNE_MINIMUM_CHARS = 8_000  # ~2K tokens (was 12K — prune sooner)
 # Placeholder that replaces evicted content
-PRUNED_PLACEHOLDER = "[previous output cleared to save context]"
+PRUNED_PLACEHOLDER = "[cleared]"
 # User messages larger than this threshold are truncated when outside protection window
-PRUNE_USER_MSG_THRESHOLD = 2_000  # ~570 tokens — catches @file mentions
+PRUNE_USER_MSG_THRESHOLD = 1_200  # ~340 tokens (was 2K — catch file contents earlier)
 # How many chars to keep from the start of a pruned user message
-PRUNE_USER_MSG_KEEP = 500  # ~140 tokens — enough to understand the request
+PRUNE_USER_MSG_KEEP = 300  # ~85 tokens (was 500 — enough for the request intent)
 # Minimum number of recent user turns always protected (regardless of char budget)
-PRUNE_PROTECT_TURNS = 2
+PRUNE_PROTECT_TURNS = 1  # was 2 — only protect the very last turn
 # Tool result markers that should never be pruned (critical context)
 PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 # Tool names whose outputs should never be pruned (like OpenCode's PRUNE_PROTECTED_TOOLS)
@@ -27,16 +27,20 @@ PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 PRUNE_PROTECTED_TOOLS = {"delegate_task"}
 
 # Truncation: universal limits for any tool output
-TRUNCATE_MAX_LINES = 300
-TRUNCATE_MAX_BYTES = 15 * 1024  # 15 KB (was 20KB — tighter to prevent context bloat)
-TRUNCATE_KEEP_START = 200  # lines to keep from the start
-TRUNCATE_KEEP_END = 60  # lines to keep from the end
-TRUNCATE_MAX_LINE_LENGTH = 2000  # chars per individual line (prevents minified files)
+TRUNCATE_MAX_LINES = 200  # was 300 — tighter to save context
+TRUNCATE_MAX_BYTES = 10 * 1024  # 10 KB (was 15KB — save full to disk instead)
+TRUNCATE_KEEP_START = 150  # lines to keep from the start
+TRUNCATE_KEEP_END = 30  # lines to keep from the end (was 60)
+TRUNCATE_MAX_LINE_LENGTH = 1500  # chars per individual line (prevents minified files)
+# Directory for saving full truncated outputs (like OpenCode pattern)
+TRUNCATE_SAVE_DIR = ".aru/truncated"
 
 # Compaction: trigger when per-run input tokens exceed this fraction of model limit
-COMPACTION_THRESHOLD_RATIO = 0.70  # was 0.85 — compact earlier to avoid hitting limits
+COMPACTION_THRESHOLD_RATIO = 0.50  # was 0.70 — compact much earlier to stay lean
 # Compaction: target post-compaction size as fraction of model context limit
-COMPACTION_TARGET_RATIO = 0.15
+COMPACTION_TARGET_RATIO = 0.10  # was 0.15 — more aggressive compaction target
+# Compaction: also trigger after this many user turns (regardless of token count)
+COMPACTION_MAX_TURNS = 8
 # Compaction: reserve buffer for the compaction process itself (like OpenCode's 20K)
 COMPACTION_BUFFER_TOKENS = 20_000
 # Default model context limits (input tokens)
@@ -111,10 +115,10 @@ def _get_prune_protect_chars(model_id: str = "default") -> int:
     to prevent context overflow. Returns ~7% of the model's context in chars.
     """
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    # ~4 chars per token, protect ~7% of context (was 10% — tighter budget)
-    protect = int(limit * 0.07 * 4)
-    # Clamp between 15K (minimum usable) and 60K (diminishing returns)
-    return max(15_000, min(protect, 60_000))
+    # ~4 chars per token, protect ~5% of context (was 7% — tighter budget)
+    protect = int(limit * 0.05 * 4)
+    # Clamp between 10K (minimum usable) and 40K (diminishing returns)
+    return max(10_000, min(protect, 40_000))
 
 
 def prune_history(
@@ -214,42 +218,50 @@ def _truncate_long_lines(lines: list[str]) -> list[str]:
     return result
 
 
+def _save_truncated_output(text: str) -> str | None:
+    """Save full truncated output to disk and return the file path.
+
+    Returns None if saving fails (non-fatal — hint will omit path).
+    """
+    import os
+    import time
+
+    save_dir = os.path.join(os.getcwd(), TRUNCATE_SAVE_DIR)
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        filename = f"output_{int(time.time() * 1000)}.txt"
+        filepath = os.path.join(save_dir, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(text)
+        return filepath
+    except OSError:
+        return None
+
+
 def _build_truncation_hint(
     source_file: str = "",
     source_tool: str = "",
     lines_shown: int = 0,
+    saved_path: str | None = None,
 ) -> str:
-    """Build a context-aware truncation hint that guides the LLM to save tokens.
+    """Build a context-aware truncation hint.
 
-    When the source file is known, provides a direct read_file reference with
-    the next offset. Otherwise falls back to generic tool suggestions.
-    Always suggests delegate_task for large exploration work.
+    When output was saved to disk, points to the saved file.
+    When the source file is known, provides a direct read_file reference.
     """
-    parts = ["\n[Hint: Output was truncated."]
+    parts = ["[Truncated."]
 
-    if source_file:
-        # File-specific: tell the LLM exactly how to access the rest
+    if saved_path:
+        parts.append(f" Full output saved to: {saved_path}")
+        parts.append(" Use grep_search or read_file with start_line/end_line to inspect.")
+    elif source_file:
         next_line = lines_shown + 1 if lines_shown else 1
-        parts.append(
-            f' To see more: read_file("{source_file}", start_line={next_line}).'
-            f" Use grep_search to find specific content instead of reading everything."
-        )
-    elif source_tool == "bash":
-        parts.append(
-            " Use grep_search to find specific content in project files."
-            " Do NOT re-run the command to get full output."
-        )
+        parts.append(f' read_file("{source_file}", start_line={next_line}) for more.')
     else:
-        parts.append(
-            " Use grep_search to find specific content, or read_file with"
-            " start_line/end_line for incremental reading."
-        )
+        parts.append(" Use grep_search to find specific content.")
 
-    # Always suggest delegation for large outputs
-    parts.append(
-        " For large exploration tasks, use delegate_task to keep your context clean.]"
-    )
-    return "".join(parts)
+    parts.append("]")
+    return " ".join(parts)
 
 
 def truncate_output(
@@ -282,17 +294,18 @@ def truncate_output(
     if byte_len <= TRUNCATE_MAX_BYTES and line_count <= TRUNCATE_MAX_LINES:
         return "".join(lines)
 
+    # Save full output to disk before truncating (like OpenCode)
+    saved_path = _save_truncated_output(text)
+
     # Truncate by lines
     if line_count > TRUNCATE_MAX_LINES:
         head = lines[:TRUNCATE_KEEP_START]
-        tail = lines[-TRUNCATE_KEEP_END:]
-        omitted = line_count - TRUNCATE_KEEP_START - TRUNCATE_KEEP_END
-        hint = _build_truncation_hint(source_file, source_tool, TRUNCATE_KEEP_START)
+        omitted = line_count - TRUNCATE_KEEP_START
+        hint = _build_truncation_hint(source_file, source_tool, TRUNCATE_KEEP_START, saved_path)
         return (
             "".join(head)
-            + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total)]"
-            + hint + "\n\n"
-            + "".join(tail)
+            + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total)]\n"
+            + hint + "\n"
         )
 
     # Truncate by bytes (lines fit but total bytes too large)
@@ -306,11 +319,11 @@ def truncate_output(
         total += line_bytes
 
     remaining = line_count - len(kept_lines)
-    hint = _build_truncation_hint(source_file, source_tool, len(kept_lines))
+    hint = _build_truncation_hint(source_file, source_tool, len(kept_lines), saved_path)
     return (
         "".join(kept_lines)
         + f"\n\n[... truncated at ~{TRUNCATE_MAX_BYTES // 1024}KB — "
-        f"{remaining:,} more lines]"
+        f"{remaining:,} more lines]\n"
         + hint + "\n"
     )
 
@@ -329,16 +342,22 @@ def should_compact(
 ) -> bool:
     """Check if the conversation should be compacted.
 
-    Uses OpenCode's approach: usable = model_limit - buffer, then
-    trigger when tokens >= usable * threshold_ratio.
+    Triggers on EITHER condition:
+    1. Token-based: tokens >= usable_context * threshold_ratio
+    2. Turn-based: user turns >= COMPACTION_MAX_TURNS (prevents slow token creep)
 
-    Accepts either an estimated token count (int) or the history list
-    (from which tokens are estimated via char count).
+    Accepts either an estimated token count (int) or the history list.
     """
     if isinstance(history_or_tokens, list):
-        tokens = estimate_history_tokens(history_or_tokens)
+        history = history_or_tokens
+        tokens = estimate_history_tokens(history)
+        # Turn-based trigger: count user messages
+        user_turns = sum(1 for m in history if m["role"] == "user")
+        if user_turns >= COMPACTION_MAX_TURNS:
+            return True
     else:
         tokens = history_or_tokens
+
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
     usable = limit - COMPACTION_BUFFER_TOKENS
     threshold = int(usable * COMPACTION_THRESHOLD_RATIO)

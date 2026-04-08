@@ -606,61 +606,53 @@ class TestExtractAgentMention:
 class TestImageMentions:
     """Tests for image file detection in @mentions."""
 
-    def test_resolve_mentions_returns_three_tuple(self, tmp_path):
-        result = _resolve_mentions("hello", str(tmp_path))
-        assert len(result) == 3
-        text, count, images = result
-        assert text == "hello"
-        assert count == 0
-        assert images == []
+    def test_resolve_mentions_returns_mention_result(self, tmp_path):
+        mr = _resolve_mentions("hello", str(tmp_path))
+        assert mr.text == "hello"
+        assert mr.count == 0
+        assert mr.images == []
+        assert mr.file_messages == []
 
     def test_resolve_mentions_image_file(self, tmp_path):
         img = tmp_path / "screenshot.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
 
-        text, count, images = _resolve_mentions(
-            "analyze @screenshot.png", str(tmp_path)
-        )
-        assert count == 1
-        assert len(images) == 1
-        assert isinstance(images[0], Image)
-        assert images[0].id == "screenshot.png"
-        # Image content should NOT be appended as text
-        assert "```" not in text
+        mr = _resolve_mentions("analyze @screenshot.png", str(tmp_path))
+        assert mr.count == 1
+        assert len(mr.images) == 1
+        assert isinstance(mr.images[0], Image)
+        assert mr.images[0].id == "screenshot.png"
+        # Image content should NOT be in file_messages
+        assert len(mr.file_messages) == 0
 
     def test_resolve_mentions_mixed_files_and_images(self, tmp_path):
         (tmp_path / "code.py").write_text("print('hello')", encoding="utf-8")
         (tmp_path / "diagram.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
 
-        text, count, images = _resolve_mentions(
-            "review @code.py and @diagram.jpg", str(tmp_path)
-        )
-        assert count == 2
-        assert len(images) == 1
-        assert images[0].id == "diagram.jpg"
-        # Text file content should be appended
-        assert "print('hello')" in text
+        mr = _resolve_mentions("review @code.py and @diagram.jpg", str(tmp_path))
+        assert mr.count == 2
+        assert len(mr.images) == 1
+        assert mr.images[0].id == "diagram.jpg"
+        # Text file content goes into file_messages
+        all_content = " ".join(m["content"] for m in mr.file_messages)
+        assert "print('hello')" in all_content
 
     def test_resolve_mentions_multiple_images(self, tmp_path):
         (tmp_path / "a.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
         (tmp_path / "b.webp").write_bytes(b"RIFF" + b"\x00" * 100)
 
-        text, count, images = _resolve_mentions(
-            "compare @a.png @b.webp", str(tmp_path)
-        )
-        assert count == 2
-        assert len(images) == 2
+        mr = _resolve_mentions("compare @a.png @b.webp", str(tmp_path))
+        assert mr.count == 2
+        assert len(mr.images) == 2
 
     def test_resolve_mentions_image_too_large(self, tmp_path):
         img = tmp_path / "huge.png"
         # Write just over the 20MB limit header
         img.write_bytes(b"\x89PNG" + b"\x00" * (20 * 1024 * 1024 + 1))
 
-        text, count, images = _resolve_mentions(
-            "analyze @huge.png", str(tmp_path)
-        )
-        assert count == 0
-        assert len(images) == 0
+        mr = _resolve_mentions("analyze @huge.png", str(tmp_path))
+        assert mr.count == 0
+        assert len(mr.images) == 0
 
     def test_resolve_mentions_all_image_extensions(self, tmp_path):
         for ext in _IMAGE_EXTENSIONS:
@@ -668,8 +660,8 @@ class TestImageMentions:
             (tmp_path / fname).write_bytes(b"\x00" * 100)
 
         mentions = " ".join(f"@test{ext}" for ext in _IMAGE_EXTENSIONS)
-        text, count, images = _resolve_mentions(mentions, str(tmp_path))
-        assert len(images) == len(_IMAGE_EXTENSIONS)
+        mr = _resolve_mentions(mentions, str(tmp_path))
+        assert len(mr.images) == len(_IMAGE_EXTENSIONS)
 
     def test_image_completer_shows_image_metadata(self, tmp_path):
         (tmp_path / "photo.png").touch()

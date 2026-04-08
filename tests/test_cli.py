@@ -46,35 +46,40 @@ class TestSanitizeInput:
 
 class TestResolveMentions:
     def test_no_mentions(self, tmp_path):
-        result, count, _imgs = _resolve_mentions("hello world", str(tmp_path))
-        assert result == "hello world"
-        assert count == 0
+        mr = _resolve_mentions("hello world", str(tmp_path))
+        assert mr.text == "hello world"
+        assert mr.count == 0
+        assert mr.file_messages == []
 
     def test_resolves_file_mention(self, tmp_path):
         (tmp_path / "config.py").write_text("DEBUG = True")
-        result, count, _imgs = _resolve_mentions("check @config.py", str(tmp_path))
-        assert "DEBUG = True" in result
-        assert "Contents of config.py" in result
-        assert count == 1
+        mr = _resolve_mentions("check @config.py", str(tmp_path))
+        # File content now goes into file_messages, not inline text
+        assert mr.count == 1
+        assert len(mr.file_messages) == 2  # assistant label + user content
+        assert "read_file: config.py" in mr.file_messages[0]["content"]
+        assert "DEBUG = True" in mr.file_messages[1]["content"]
 
     def test_nonexistent_file_ignored(self, tmp_path):
-        result, count, _imgs = _resolve_mentions("check @missing.py", str(tmp_path))
-        assert result == "check @missing.py"
-        assert count == 0
+        mr = _resolve_mentions("check @missing.py", str(tmp_path))
+        assert mr.text == "check @missing.py"
+        assert mr.count == 0
 
     def test_deduplicates_mentions(self, tmp_path):
         (tmp_path / "file.py").write_text("code")
-        result, count, _imgs = _resolve_mentions("@file.py and @file.py", str(tmp_path))
-        assert result.count("Contents of file.py") == 1
-        assert count == 1
+        mr = _resolve_mentions("@file.py and @file.py", str(tmp_path))
+        assert mr.count == 1
+        assert len(mr.file_messages) == 2  # one pair
 
     def test_multiple_files(self, tmp_path):
         (tmp_path / "a.py").write_text("aaa")
         (tmp_path / "b.py").write_text("bbb")
-        result, count, _imgs = _resolve_mentions("@a.py and @b.py", str(tmp_path))
-        assert "Contents of a.py" in result
-        assert "Contents of b.py" in result
-        assert count == 2
+        mr = _resolve_mentions("@a.py and @b.py", str(tmp_path))
+        assert mr.count == 2
+        assert len(mr.file_messages) == 4  # two pairs
+        all_content = " ".join(m["content"] for m in mr.file_messages)
+        assert "aaa" in all_content
+        assert "bbb" in all_content
 
     def test_mention_regex_pattern(self):
         matches = _MENTION_RE.findall("check @file.py now")
