@@ -54,23 +54,23 @@ def _format_diff(old_string: str, new_string: str) -> Group:
 
 
 
-# Hard ceiling per tool result (~15K tokens). Even max_size=0 respects this per chunk.
-_READ_HARD_CAP = 60_000  # bytes
+# Hard ceiling per tool result (~10K tokens). Even max_size=0 respects this per chunk.
+_READ_HARD_CAP = 40_000  # bytes (was 60K — tighter to protect context)
 
 def clear_read_cache():
     """Clear the read cache. Call after file mutations to avoid stale data."""
     get_ctx().read_cache.clear()
 
 
-def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 15_000) -> str:
+def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 12_000) -> str:
     """Read file contents. Returns chunked output for large files.
 
     Args:
         file_path: Path to the file (absolute or relative).
         start_line: First line (1-indexed, inclusive). 0 = beginning.
         end_line: Last line (1-indexed, inclusive). 0 = end.
-        max_size: Max bytes before truncation. Default 15KB.
-            Set to 0 to read the full file in chunks — each chunk up to ~60KB.
+        max_size: Max bytes before truncation. Default 12KB.
+            Set to 0 to read the full file in chunks — each chunk up to ~40KB.
             The first chunk includes a continuation hint so you can call again
             with start_line to get the next chunk.
     """
@@ -204,7 +204,7 @@ async def read_file_smart(file_path: str, query: str) -> str:
         query: The specific question you want answered about this file.
     """
     # Read raw content first (reuse existing read_file logic)
-    raw = read_file(file_path, max_size=20_000)
+    raw = read_file(file_path, max_size=15_000)
 
     if raw.startswith("Error:"):
         return raw

@@ -11,7 +11,7 @@ from __future__ import annotations
 # ── Constants ──────────────────────────────────────────────────────
 
 # Pruning: minimum chars that must be freeable to justify a prune pass
-PRUNE_MINIMUM_CHARS = 20_000  # ~5.7K tokens
+PRUNE_MINIMUM_CHARS = 12_000  # ~3K tokens (lower = prune sooner)
 # Placeholder that replaces evicted content
 PRUNED_PLACEHOLDER = "[previous output cleared to save context]"
 # User messages larger than this threshold are truncated when outside protection window
@@ -24,16 +24,18 @@ PRUNE_PROTECT_TURNS = 2
 PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 
 # Truncation: universal limits for any tool output
-TRUNCATE_MAX_LINES = 500
-TRUNCATE_MAX_BYTES = 20 * 1024  # 20 KB
-TRUNCATE_KEEP_START = 350  # lines to keep from the start
-TRUNCATE_KEEP_END = 100  # lines to keep from the end
+TRUNCATE_MAX_LINES = 300
+TRUNCATE_MAX_BYTES = 15 * 1024  # 15 KB (was 20KB — tighter to prevent context bloat)
+TRUNCATE_KEEP_START = 200  # lines to keep from the start
+TRUNCATE_KEEP_END = 60  # lines to keep from the end
 TRUNCATE_MAX_LINE_LENGTH = 2000  # chars per individual line (prevents minified files)
 
 # Compaction: trigger when per-run input tokens exceed this fraction of model limit
-COMPACTION_THRESHOLD_RATIO = 0.85
+COMPACTION_THRESHOLD_RATIO = 0.70  # was 0.85 — compact earlier to avoid hitting limits
 # Compaction: target post-compaction size as fraction of model context limit
 COMPACTION_TARGET_RATIO = 0.15
+# Compaction: reserve buffer for the compaction process itself (like OpenCode's 20K)
+COMPACTION_BUFFER_TOKENS = 20_000
 # Default model context limits (input tokens)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # Anthropic
@@ -103,13 +105,13 @@ def _get_prune_protect_chars(model_id: str = "default") -> int:
     """Scale protection window based on model context size.
 
     Larger models get more protection; smaller models prune more aggressively
-    to delay compaction. Returns ~10% of the model's context in chars (~3.5 chars/token).
+    to prevent context overflow. Returns ~7% of the model's context in chars.
     """
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    # ~3.5 chars per token, protect ~10% of context
-    protect = int(limit * 0.10 * 3.5)
-    # Clamp between 20K (minimum usable) and 80K (diminishing returns)
-    return max(20_000, min(protect, 80_000))
+    # ~4 chars per token, protect ~7% of context (was 10% — tighter budget)
+    protect = int(limit * 0.07 * 4)
+    # Clamp between 15K (minimum usable) and 60K (diminishing returns)
+    return max(15_000, min(protect, 60_000))
 
 
 def prune_history(
@@ -278,7 +280,10 @@ def should_compact(
     history_or_tokens: int | list[dict[str, str]],
     model_id: str = "default",
 ) -> bool:
-    """Check if the conversation should be compacted (reactive, post-run).
+    """Check if the conversation should be compacted.
+
+    Uses OpenCode's approach: usable = model_limit - buffer, then
+    trigger when tokens >= usable * threshold_ratio.
 
     Accepts either an estimated token count (int) or the history list
     (from which tokens are estimated via char count).
@@ -288,7 +293,8 @@ def should_compact(
     else:
         tokens = history_or_tokens
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    threshold = int(limit * COMPACTION_THRESHOLD_RATIO)
+    usable = limit - COMPACTION_BUFFER_TOKENS
+    threshold = int(usable * COMPACTION_THRESHOLD_RATIO)
     return tokens >= threshold
 
 

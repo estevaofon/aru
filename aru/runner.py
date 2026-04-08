@@ -249,12 +249,15 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             run_input_tokens = getattr(run_output.metrics, "input_tokens", 0) or 0
             if should_compact(run_input_tokens, session.model_id):
                 try:
+                    # Always prune first to shrink history before compaction
+                    session.history = prune_history(session.history, model_id=session.model_id)
                     session.history = await compact_conversation(
                         session.history, session.model_ref, session.plan_task,
                         model_id=session.model_id,
                     )
                     console.print("[dim]Context compacted to save tokens.[/dim]")
                 except Exception:
+                    # Even if compaction fails, keep the pruned history
                     pass
 
         final_content = accumulated or final_content
