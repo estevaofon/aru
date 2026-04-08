@@ -9,7 +9,7 @@ An intelligent coding assistant for the terminal, powered by LLMs and [Agno](htt
 - **Multi-Agent Architecture** — Specialized agents for planning, execution, and conversation
 - **Interactive CLI** — Streaming responses, multi-line paste, session management
 - **Image Support** — Attach images via `@` mentions for multimodal analysis (Claude, GPT-4o, Gemini)
-- **16 Integrated Tools** — File operations, code search, shell, web search, task delegation
+- **11 Integrated Tools** — File operations, code search, shell, web search, task delegation
 - **Task Planning** — Break down complex tasks into steps with automatic execution
 - **Multi-Provider** — Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek, and others via custom configuration
 - **Custom Commands, Skills, and Agents** — Extend aru via the `.agents/` directory
@@ -432,15 +432,14 @@ Aru can load tools from MCP servers. Configure in `.aru/mcp_config.json`:
 
 ### File Operations
 - `read_file` — Reads files with line range support and binary detection
-- `read_file_smart` — Smart file reading focused on relevant snippets for the query
-- `write_file` — Writes files
-- `edit_file` — Find-replace edits
+- `read_file_smart` — Answers specific questions about a file without returning raw content
+- `write_file` — Writes content to files, creating directories as needed
+- `edit_file` — Find-and-replace edits on files
 
 ### Search & Discovery
 - `glob_search` — Find files by pattern (respects .gitignore)
 - `grep_search` — Content search with regex and file filtering
 - `list_directory` — Directory listing with gitignore filtering
-- `rank_files` — Multi-factor file relevance ranking (name, structure, recency)
 
 ### Shell & Web
 - `bash` — Executes shell commands with permission gates
@@ -470,7 +469,7 @@ aru-code/
 │   │   ├── planner.py      # Planning agent
 │   │   └── executor.py     # Execution agent
 │   └── tools/
-│       ├── codebase.py     # 16 core tools
+│       ├── codebase.py     # 11 core tools
 │       ├── ast_tools.py    # Tree-sitter code analysis
 │       ├── ranker.py       # File relevance ranking
 │       ├── mcp_client.py   # MCP client
