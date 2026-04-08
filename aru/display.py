@@ -198,15 +198,11 @@ TOOL_DISPLAY_NAMES = {
     "read_file": "Read",
     "read_file_smart": "ReadSmart",
     "write_file": "Write",
-    "write_files": "Write",
     "edit_file": "Edit",
-    "edit_files": "Edit",
     "glob_search": "Glob",
     "grep_search": "Grep",
     "list_directory": "List",
     "bash": "Bash",
-    "code_structure": "Structure",
-    "find_dependencies": "Deps",
     "rank_files": "Rank",
 }
 
@@ -219,8 +215,6 @@ TOOL_PRIMARY_ARG = {
     "grep_search": "pattern",
     "list_directory": "directory",
     "bash": "command",
-    "code_structure": "file_path",
-    "find_dependencies": "file_path",
     "rank_files": "task",
 }
 
@@ -230,13 +224,6 @@ def _format_tool_label(tool_name: str, tool_args: dict | None) -> str:
     display = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
     if not tool_args:
         return display
-
-    if tool_name == "write_files":
-        files = tool_args.get("files", [])
-        return f"{display}({len(files)} files)"
-    if tool_name == "edit_files":
-        edits = tool_args.get("edits", [])
-        return f"{display}({len(edits)} edits)"
 
     primary_key = TOOL_PRIMARY_ARG.get(tool_name)
     if primary_key and primary_key in tool_args:

@@ -1,7 +1,7 @@
 ---
 name: Code Reviewer
 description: Review code for quality, bugs, security, and best practices
-tools: read_file, read_file_smart, glob_search, grep_search, list_directory, code_structure
+tools: read_file, read_file_smart, glob_search, grep_search, list_directory
 max_turns: 15
 mode: subagent
 ---

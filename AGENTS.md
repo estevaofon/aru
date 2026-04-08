@@ -70,7 +70,7 @@ Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured 
 ### `agents/planner.py` — Planner Agent
 
 - Model: Sonnet (4K max tokens)
-- Tools: Read-only subset (read, search, glob, grep, code_structure, web)
+- Tools: Read-only subset (read, search, glob, grep, web)
 - Output: Markdown with `## Summary` and `## Steps` sections
 
 ### `agents/executor.py` — Executor Agent
@@ -85,10 +85,9 @@ Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured 
 
 | Category | Tools |
 |----------|-------|
-| File I/O | `read_file`, `write_file`, `write_files`, `edit_file`, `edit_files` |
+| File I/O | `read_file`, `write_file`, `edit_file` |
 | Search | `glob_search`, `grep_search`, `rank_files`, `list_directory` |
-| Analysis | `code_structure`, `find_dependencies` |
-| Shell | `bash`, `run_command` |
+| Shell | `bash` |
 | Web | `web_search`, `web_fetch` |
 | Agent | `delegate_task` (spawns sub-agents) |
 

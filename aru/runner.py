@@ -23,7 +23,7 @@ from aru.permissions import get_skip_permissions
 
 
 # Categories of tools that modify files (for highlighting in history)
-_MUTATION_TOOLS = {"write_file", "write_files", "edit_file", "edit_files", "bash", "run_command"}
+_MUTATION_TOOLS = {"write_file", "edit_file", "bash"}
 
 
 def build_env_context(session, cwd: str | None = None) -> str:

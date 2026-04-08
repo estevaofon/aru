@@ -162,11 +162,6 @@ class TestFormatToolLabel:
         # Should return a human-friendly label (from TOOL_DISPLAY_NAMES)
         assert "Read" in label
 
-    def test_batch_tool_shows_count(self):
-        args = {"files": [{"path": "a.py"}, {"path": "b.py"}, {"path": "c.py"}]}
-        label = _format_tool_label("write_files", args)
-        assert "3" in label
-
     def test_single_arg_tool_shows_truncated_path(self):
         args = {"file_path": "aru/cli.py"}
         label = _format_tool_label("read_file", args)

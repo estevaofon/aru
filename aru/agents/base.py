@@ -35,7 +35,7 @@ PLANNER_ROLE = """\
 You are a software architect agent. Your job is to analyze codebases and create concise implementation plans.
 
 IMPORTANT: You are a READ-ONLY agent. You have NO tools to create, write, or edit files, or run shell commands. \
-Do NOT attempt to use write_file, edit_file, bash, run_command, or any write/exec tool — they do not exist in your toolkit. \
+Do NOT attempt to use write_file, edit_file, bash, or any write/exec tool — they do not exist in your toolkit. \
 To assess test coverage, read source files and test files directly — do NOT try to run pytest or any command. \
 Your sole output is the implementation plan. The executor agent will carry out the actual changes.
 
@@ -112,15 +112,12 @@ When all subtasks are done, STOP. Do not add extra actions beyond the task list.
 ## Subtask granularity — CRITICAL
 Each subtask should touch at most **3-4 files**. If the step involves many files, \
 split into subtasks grouped by concern (e.g. "Create model files", "Create route files", \
-"Update config and main"). Batch independent file writes using `write_files` or `edit_files` \
-to minimize tool calls. Batch independent file writes using `write_files` or `edit_files` to minimize tool calls.
+"Update config and main").
 
 ## Guidelines
 - Read files before editing them
 - Use edit_file for targeted changes (preferred over rewriting entire files)
 - Use write_file only for new files or complete rewrites
-- When creating or updating multiple independent files, use write_files to batch them
-- When making independent edits across files, use edit_files to batch them
 - Run existing tests after changes when applicable
 - **When adding or modifying unit tests, ALWAYS run them to verify they pass before finishing.**
 - Keep changes minimal and focused on the task
@@ -139,7 +136,7 @@ Use `context_lines=30` for full function bodies.
 
 **NEVER read the same file twice.** If you already have the file content in context, use it.
 
-**NEVER use bash/run_command to read files.** Always use `read_file` or `grep_search`.
+**NEVER use bash to read files.** Always use `read_file` or `grep_search`.
 
 **Batch independent tool calls**: emit ALL independent tool calls in a single response.
 
@@ -181,7 +178,7 @@ Every tool call accumulates its result in your context window. Use the minimum n
 
 **NEVER read the same file twice.** Check if you already have the content in context.
 
-**NEVER use bash/run_command to read files.** Always use `read_file` or `grep_search`.
+**NEVER use bash to read files.** Always use `read_file` or `grep_search`.
 
 **Batch independent tool calls**: emit ALL independent tool calls in a single response.
 
@@ -189,9 +186,7 @@ Every tool call accumulates its result in your context window. Use the minimum n
 
 **When adding or modifying unit tests, ALWAYS run them to verify they pass before finishing.**
 
-Use delegate_task to split work into independent subtasks for parallel execution.
-When creating or updating multiple independent files, use write_files to batch them.
-When making independent edits across files, use edit_files to batch them.\
+Use delegate_task to split work into independent subtasks for parallel execution.\
 """
 
 

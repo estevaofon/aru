@@ -98,7 +98,7 @@ def _score_recency(file_path: str, root_dir: str, max_age_days: float = 30.0) ->
 def _get_structural_scores(top_files: list[str], root_dir: str) -> dict[str, float]:
     """Boost files that are dependencies of already-relevant files."""
     try:
-        from aru.tools.ast_tools import find_dependencies, _resolve_import_to_file, _find_project_root
+        from aru.tools.ast_tools import _resolve_import_to_file, _find_project_root
     except ImportError:
         return {}
 

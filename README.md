@@ -322,7 +322,7 @@ Custom agents are Markdown files with YAML frontmatter stored in `.agents/agents
 name: Code Reviewer
 description: Review code for quality, bugs, and best practices
 model: anthropic/claude-sonnet-4-5
-tools: read_file, grep_search, glob_search, code_structure
+tools: read_file, grep_search, glob_search
 max_turns: 15
 mode: primary
 ---
@@ -433,18 +433,14 @@ Aru can load tools from MCP servers. Configure in `.aru/mcp_config.json`:
 ### File Operations
 - `read_file` — Reads files with line range support and binary detection
 - `read_file_smart` — Smart file reading focused on relevant snippets for the query
-- `write_file` / `write_files` — Writes single or batch files
-- `edit_file` / `edit_files` — Find-replace edits across multiple files
+- `write_file` — Writes files
+- `edit_file` — Find-replace edits
 
 ### Search & Discovery
 - `glob_search` — Find files by pattern (respects .gitignore)
 - `grep_search` — Content search with regex and file filtering
 - `list_directory` — Directory listing with gitignore filtering
 - `rank_files` — Multi-factor file relevance ranking (name, structure, recency)
-
-### Code Analysis
-- `code_structure` — Extracts classes, functions, imports via tree-sitter AST
-- `find_dependencies` — Analyzes import relationships between files
 
 ### Shell & Web
 - `bash` — Executes shell commands with permission gates

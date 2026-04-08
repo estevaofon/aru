@@ -22,6 +22,9 @@ PRUNE_USER_MSG_KEEP = 500  # ~140 tokens — enough to understand the request
 PRUNE_PROTECT_TURNS = 2
 # Tool result markers that should never be pruned (critical context)
 PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
+# Tool names whose outputs should never be pruned (like OpenCode's PRUNE_PROTECTED_TOOLS)
+# These are checked as substrings in message content (tool results include the tool name)
+PRUNE_PROTECTED_TOOLS = {"delegate_task"}
 
 # Truncation: universal limits for any tool output
 TRUNCATE_MAX_LINES = 300
@@ -173,8 +176,10 @@ def prune_history(
             # Still within protection window
             protected += msg_len
         else:
-            # Check protected markers before pruning
-            if any(marker in msg["content"] for marker in PRUNE_PROTECTED_MARKERS):
+            # Check protected markers and tool names before pruning
+            content = msg["content"]
+            if (any(marker in content for marker in PRUNE_PROTECTED_MARKERS)
+                    or any(tool in content for tool in PRUNE_PROTECTED_TOOLS)):
                 protected += msg_len
                 continue
 
@@ -209,19 +214,59 @@ def _truncate_long_lines(lines: list[str]) -> list[str]:
     return result
 
 
-_TRUNCATION_HINT = (
-    "\n[Hint: Use grep_search to find specific content, or read_file with "
-    "start_line/end_line for incremental reading. "
-    "For large exploration tasks, use delegate_task to keep your context clean.]"
-)
+def _build_truncation_hint(
+    source_file: str = "",
+    source_tool: str = "",
+    lines_shown: int = 0,
+) -> str:
+    """Build a context-aware truncation hint that guides the LLM to save tokens.
+
+    When the source file is known, provides a direct read_file reference with
+    the next offset. Otherwise falls back to generic tool suggestions.
+    Always suggests delegate_task for large exploration work.
+    """
+    parts = ["\n[Hint: Output was truncated."]
+
+    if source_file:
+        # File-specific: tell the LLM exactly how to access the rest
+        next_line = lines_shown + 1 if lines_shown else 1
+        parts.append(
+            f' To see more: read_file("{source_file}", start_line={next_line}).'
+            f" Use grep_search to find specific content instead of reading everything."
+        )
+    elif source_tool == "bash":
+        parts.append(
+            " Use grep_search to find specific content in project files."
+            " Do NOT re-run the command to get full output."
+        )
+    else:
+        parts.append(
+            " Use grep_search to find specific content, or read_file with"
+            " start_line/end_line for incremental reading."
+        )
+
+    # Always suggest delegation for large outputs
+    parts.append(
+        " For large exploration tasks, use delegate_task to keep your context clean.]"
+    )
+    return "".join(parts)
 
 
-def truncate_output(text: str) -> str:
+def truncate_output(
+    text: str,
+    source_file: str = "",
+    source_tool: str = "",
+) -> str:
     """Universal truncation for tool outputs.
 
     Caps output at TRUNCATE_MAX_BYTES / TRUNCATE_MAX_LINES, keeping the
     start and end with a middle marker showing what was cut.
     Also truncates individual lines exceeding TRUNCATE_MAX_LINE_LENGTH.
+
+    Args:
+        text: The output text to truncate.
+        source_file: Optional file path that produced this output (for targeted hints).
+        source_tool: Optional tool name (e.g. "bash", "grep") for hint context.
     """
     if not text:
         return text
@@ -242,10 +287,11 @@ def truncate_output(text: str) -> str:
         head = lines[:TRUNCATE_KEEP_START]
         tail = lines[-TRUNCATE_KEEP_END:]
         omitted = line_count - TRUNCATE_KEEP_START - TRUNCATE_KEEP_END
+        hint = _build_truncation_hint(source_file, source_tool, TRUNCATE_KEEP_START)
         return (
             "".join(head)
             + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total)]"
-            + _TRUNCATION_HINT + "\n\n"
+            + hint + "\n\n"
             + "".join(tail)
         )
 
@@ -260,11 +306,12 @@ def truncate_output(text: str) -> str:
         total += line_bytes
 
     remaining = line_count - len(kept_lines)
+    hint = _build_truncation_hint(source_file, source_tool, len(kept_lines))
     return (
         "".join(kept_lines)
         + f"\n\n[... truncated at ~{TRUNCATE_MAX_BYTES // 1024}KB — "
         f"{remaining:,} more lines]"
-        + _TRUNCATION_HINT + "\n"
+        + hint + "\n"
     )
 
 
@@ -346,9 +393,14 @@ def build_compaction_prompt(
     if plan_task:
         parts.append(f"**Active task:** {plan_task}\n\n")
 
+    import re as _re
+    _code_block_re = _re.compile(r"```[\s\S]*?```")
+
     for msg in old_msgs:
         role = msg["role"].upper()
         content = msg["content"]
+        # Strip large code blocks — compactor only needs to know what was done, not raw code
+        content = _code_block_re.sub("[code block removed]", content)
         # Cap individual messages in the compaction input to avoid blowing up
         if len(content) > 2000:
             content = content[:2000] + f"... [{len(content) - 2000} chars truncated]"
@@ -415,7 +467,12 @@ async def compact_conversation(
         compactor = Agent(
             name="Compactor",
             model=create_model(small_ref, max_tokens=2048),
-            instructions="You summarize conversations concisely. Output ONLY the summary, no preamble.",
+            instructions=(
+                "You summarize coding conversations concisely. Output ONLY the requested sections, no preamble. "
+                "Preserve: user goals, explicit instructions/preferences, file paths with line numbers, "
+                "function/class names that were modified, and what remains to be done. "
+                "Drop: raw code blocks, tool output details, greetings, reasoning."
+            ),
             markdown=True,
         )
 

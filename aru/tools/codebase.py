@@ -141,7 +141,7 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
         if file_size <= effective_limit:
             numbered = [f"{i + 1:4d} | {line}" for i, line in enumerate(lines)]
             output = "".join(numbered)
-            result = output if full_read else _truncate_output(output)
+            result = output if full_read else _truncate_output(output, source_file=file_path)
             _read_cache[cache_key] = f"{total_lines} lines"
             return result
 
@@ -609,7 +609,7 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
             summary_lines.append(f"  ... search stopped at {match_count} matches. Use file_glob or a more specific pattern.")
         output += "\n".join(summary_lines)
 
-    return _truncate_output(output)
+    return _truncate_output(output, source_tool="grep")
 
 
 def list_directory(directory: str = ".") -> str:
@@ -747,10 +747,10 @@ _MAX_OUTPUT_CHARS = 10_000
 _TRUNCATE_KEEP = 3_000  # chars to keep from start and end
 
 
-def _truncate_output(text: str) -> str:
+def _truncate_output(text: str, source_file: str = "", source_tool: str = "") -> str:
     """Truncate long tool output to save tokens. Keeps start + end with a marker in the middle."""
     from aru.context import truncate_output
-    return truncate_output(text)
+    return truncate_output(text, source_file=source_file, source_tool=source_tool)
 
 
 def _is_long_running(command: str) -> bool:
@@ -854,9 +854,9 @@ async def run_command(command: str, timeout: int = 60, working_directory: str = 
 
         parts = []
         if stdout:
-            parts.append(_truncate_output(stdout))
+            parts.append(_truncate_output(stdout, source_tool="bash"))
         if stderr:
-            parts.append(f"STDERR:\n{_truncate_output(stderr)}")
+            parts.append(f"STDERR:\n{_truncate_output(stderr, source_tool='bash')}")
         if process.returncode != 0:
             parts.append(f"Exit code: {process.returncode}")
 
@@ -1010,7 +1010,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
 
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
-    return _truncate_output(text)
+    return _truncate_output(text, source_tool="web_fetch")
 
 
 def _next_subagent_id() -> int:
@@ -1021,24 +1021,19 @@ def _next_subagent_id() -> int:
 
 
 # Import new tools
-from aru.tools.ast_tools import code_structure, find_dependencies
 from aru.tools.ranker import rank_files
 
 # Tools available to sub-agents (no delegate_task to prevent infinite nesting)
 _SUBAGENT_TOOLS = [
     read_file,
     write_file,
-    write_files,
     edit_file,
-    edit_files,
     glob_search,
     grep_search,
     list_directory,
     bash,
     web_search,
     web_fetch,
-    code_structure,
-    find_dependencies,
     rank_files,
 ]
 
@@ -1133,9 +1128,7 @@ ALL_TOOLS = [
     read_file,
     read_file_smart,
     write_file,
-    write_files,
     edit_file,
-    edit_files,
     glob_search,
     grep_search,
     list_directory,
@@ -1155,9 +1148,7 @@ EXECUTOR_TOOLS = [
     read_file,
     read_file_smart,
     write_file,
-    write_files,
     edit_file,
-    edit_files,
     glob_search,
     grep_search,
     list_directory,
@@ -1172,9 +1163,7 @@ GENERAL_TOOLS = [
     read_file,
     read_file_smart,
     write_file,
-    write_files,
     edit_file,
-    edit_files,
     glob_search,
     grep_search,
     list_directory,
@@ -1188,9 +1177,6 @@ GENERAL_TOOLS = [
 TOOL_REGISTRY: dict[str, object] = {f.__name__: f for f in ALL_TOOLS}
 TOOL_REGISTRY["create_task_list"] = create_task_list
 TOOL_REGISTRY["update_task"] = update_task
-# Kept in registry for custom agents that may reference them via resolve_tools
-TOOL_REGISTRY["code_structure"] = code_structure
-TOOL_REGISTRY["find_dependencies"] = find_dependencies
 TOOL_REGISTRY["rank_files"] = rank_files
 
 

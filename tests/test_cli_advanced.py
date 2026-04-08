@@ -228,16 +228,6 @@ class TestFormatToolLabel:
         label = _format_tool_label("read_file", {})
         assert label == "Read"
 
-    def test_write_files_batch(self):
-        args = {"files": [{"path": "a.py"}, {"path": "b.py"}]}
-        label = _format_tool_label("write_files", args)
-        assert label == "Write(2 files)"
-
-    def test_edit_files_batch(self):
-        args = {"edits": [{"path": "a.py"}, {"path": "b.py"}, {"path": "c.py"}]}
-        label = _format_tool_label("edit_files", args)
-        assert label == "Edit(3 edits)"
-
     def test_single_arg_tool(self):
         args = {"file_path": "src/main.py"}
         label = _format_tool_label("read_file", args)

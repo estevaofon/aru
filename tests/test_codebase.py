@@ -1,8 +1,8 @@
 import pytest
 from pathlib import Path
 from aru.tools.codebase import (
-    write_file, write_files, glob_search, read_file, grep_search,
-    edit_file, edit_files, list_directory,
+    write_file, glob_search, read_file, grep_search,
+    edit_file, list_directory,
     get_project_tree, _is_long_running,
     _html_to_text, clear_read_cache,
     read_file_smart, _format_diff,
@@ -29,34 +29,6 @@ def test_write_file_creates_file(tmp_path):
     assert target.exists()
     assert target.read_text() == "hello world"
     assert "successfully" in result.lower() or "wrote" in result.lower()
-
-
-def test_write_files(tmp_path):
-    '''Test writing multiple files with write_files'''
-    file1 = tmp_path / "test1.txt"
-    file2 = tmp_path / "subdir/test2.py"
-
-    files = [
-        {
-            "path": str(file1),
-            "content": "Hello from file1"
-        },
-        {
-            "path": str(file2),
-            "content": "print('Hello from file2')"
-        }
-    ]
-
-    set_skip_permissions(True)
-    try:
-        write_files(files)
-    finally:
-        set_skip_permissions(False)
-
-    assert file1.exists()
-    assert file2.exists()
-    assert file1.read_text() == "Hello from file1"
-    assert file2.read_text() == "print('Hello from file2')"
 
 
 def test_glob_search(temp_dir):
@@ -409,124 +381,6 @@ class TestEditFileErrors:
         assert "not found" in result.lower()
 
 
-class TestEditFiles:
-    def test_basic_two_files(self, tmp_path):
-        f1 = tmp_path / "a.py"
-        f2 = tmp_path / "b.py"
-        f1.write_text("alpha = 1")
-        f2.write_text("beta = 2")
-
-        edits = [
-            {"path": str(f1), "old_string": "alpha = 1", "new_string": "alpha = 10"},
-            {"path": str(f2), "old_string": "beta = 2", "new_string": "beta = 20"},
-        ]
-
-        set_skip_permissions(True)
-        try:
-            result = edit_files(edits)
-        finally:
-            set_skip_permissions(False)
-
-        assert "Applied" in result or "Edited" in result
-        assert f1.read_text() == "alpha = 10"
-        assert f2.read_text() == "beta = 20"
-
-    def test_same_file_multiple_edits(self, tmp_path):
-        f = tmp_path / "config.py"
-        f.write_text("HOST = 'localhost'\nPORT = 3000\n")
-
-        edits = [
-            {"path": str(f), "old_string": "HOST = 'localhost'", "new_string": "HOST = 'prod.example.com'"},
-            {"path": str(f), "old_string": "PORT = 3000", "new_string": "PORT = 8080"},
-        ]
-
-        set_skip_permissions(True)
-        try:
-            result = edit_files(edits)
-        finally:
-            set_skip_permissions(False)
-
-        assert "Applied" in result or "Edited" in result
-        content = f.read_text()
-        assert "HOST = 'prod.example.com'" in content
-        assert "PORT = 8080" in content
-
-    def test_missing_old_string_partial_success(self, tmp_path):
-        f1 = tmp_path / "a.py"
-        f2 = tmp_path / "b.py"
-        f1.write_text("alpha = 1")
-        f2.write_text("beta = 2")
-
-        edits = [
-            {"path": str(f1), "old_string": "alpha = 1", "new_string": "alpha = 10"},
-            {"path": str(f2), "old_string": "NONEXISTENT", "new_string": "whatever"},
-        ]
-
-        set_skip_permissions(True)
-        try:
-            result = edit_files(edits)
-        finally:
-            set_skip_permissions(False)
-
-        assert "not found" in result.lower()
-        assert f1.read_text() == "alpha = 10"
-
-    def test_edit_files_multiple_edits(self, tmp_path):
-        """Test edit_files applying multiple search/replace edits across two temp files."""
-        f1 = tmp_path / "module_a.py"
-        f2 = tmp_path / "module_b.py"
-        f1.write_text(
-            "import os\n"
-            "import sys\n"
-            "\n"
-            "def greet(name):\n"
-            "    return f'Hello, {name}!'\n"
-        )
-        f2.write_text(
-            "DATABASE_URL = 'sqlite:///dev.db'\n"
-            "TIMEOUT = 30\n"
-            "RETRIES = 3\n"
-        )
-
-        edits = [
-            {"path": str(f1), "old_string": "import os\nimport sys", "new_string": "import os\nimport sys\nimport logging"},
-            {"path": str(f1), "old_string": "return f'Hello, {name}!'", "new_string": "return f'Hi, {name}!'"},
-            {"path": str(f2), "old_string": "DATABASE_URL = 'sqlite:///dev.db'", "new_string": "DATABASE_URL = 'postgresql:///prod.db'"},
-            {"path": str(f2), "old_string": "TIMEOUT = 30", "new_string": "TIMEOUT = 60"},
-        ]
-
-        set_skip_permissions(True)
-        try:
-            result = edit_files(edits)
-        finally:
-            set_skip_permissions(False)
-
-        assert "Applied" in result or "Edited" in result
-
-        content_a = f1.read_text()
-        assert "import logging" in content_a
-        assert "return f'Hi, {name}!'" in content_a
-        assert "return f'Hello, {name}!'" not in content_a
-
-        content_b = f2.read_text()
-        assert "DATABASE_URL = 'postgresql:///prod.db'" in content_b
-        assert "TIMEOUT = 60" in content_b
-        assert "RETRIES = 3" in content_b
-        assert "sqlite" not in content_b
-        assert "TIMEOUT = 30" not in content_b
-
-    def test_missing_path_key(self):
-        edits = [{"old_string": "foo", "new_string": "bar"}]
-
-        set_skip_permissions(True)
-        try:
-            result = edit_files(edits)
-        finally:
-            set_skip_permissions(False)
-
-        assert "missing" in result.lower() or "error" in result.lower()
-
-
 # ── Group 4: Cache and Callbacks ───────────────────────────────────
 
 
@@ -737,9 +591,9 @@ class TestResolveTools:
         assert "read_file" in names  # other tools still present
 
     def test_dict_enable_extra(self):
-        result = resolve_tools({"find_dependencies": True})
+        result = resolve_tools({"rank_files": True})
         names = [f.__name__ for f in result]
-        assert "find_dependencies" in names
+        assert "rank_files" in names
 
     def test_unknown_tool_ignored(self):
         result = resolve_tools(["read_file", "nonexistent_tool"])
