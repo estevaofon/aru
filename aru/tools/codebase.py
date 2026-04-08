@@ -321,6 +321,35 @@ def write_files(file_list: list[dict]) -> str:
     return "\n".join(parts) or "No files to write."
 
 
+def _compact_diff(old_string: str, new_string: str, file_path: str = "") -> str:
+    """Generate a compact unified diff string for the LLM context.
+
+    Returns only the changed lines (not the full file), saving tokens while
+    giving the LLM enough context to continue working.
+    """
+    old_lines = old_string.splitlines(keepends=True)
+    new_lines = new_string.splitlines(keepends=True)
+    # Ensure trailing newlines for clean diff
+    if old_lines and not old_lines[-1].endswith("\n"):
+        old_lines[-1] += "\n"
+    if new_lines and not new_lines[-1].endswith("\n"):
+        new_lines[-1] += "\n"
+
+    import difflib
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=file_path, tofile=file_path,
+        lineterm="",
+    ))
+    if not diff_lines:
+        return ""
+    # Cap diff output to avoid huge diffs bloating context
+    MAX_DIFF_LINES = 40
+    if len(diff_lines) > MAX_DIFF_LINES:
+        return "\n".join(diff_lines[:MAX_DIFF_LINES]) + f"\n... ({len(diff_lines) - MAX_DIFF_LINES} more diff lines)"
+    return "\n".join(diff_lines)
+
+
 def edit_file(file_path: str, old_string: str, new_string: str) -> str:
     """Replace an exact string in a file. The old_string must appear exactly once.
 
@@ -347,7 +376,12 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
         _notify_file_mutation()
-        return f"Successfully edited {file_path}"
+
+        # Return compact diff instead of just success message
+        diff_text = _compact_diff(old_string, new_string, file_path)
+        if diff_text:
+            return f"Edited {file_path}\n{diff_text}"
+        return f"Edited {file_path}"
     except FileNotFoundError:
         return f"Error: File not found: {file_path}"
     except Exception as e:
@@ -423,7 +457,16 @@ def edit_files(edits: list[dict]) -> str:
     if results:
         _notify_file_mutation()
         unique = list(dict.fromkeys(results))  # preserve order, dedupe
-        parts.append(f"Successfully applied {len(results)} edits across {len(unique)} files: {', '.join(unique)}")
+        parts.append(f"Applied {len(results)} edits across {len(unique)} files: {', '.join(unique)}")
+        # Append compact diffs for each edit
+        for entry in edits:
+            old = entry.get("old_string", "")
+            new = entry.get("new_string", "")
+            path = entry.get("path", "")
+            if old and path in written:
+                diff_text = _compact_diff(old, new, path)
+                if diff_text:
+                    parts.append(diff_text)
     if errors:
         parts.append("\n".join(errors))
     return "\n".join(parts) or "No edits to apply."

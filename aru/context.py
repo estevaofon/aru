@@ -18,12 +18,17 @@ PRUNED_PLACEHOLDER = "[previous output cleared to save context]"
 PRUNE_USER_MSG_THRESHOLD = 2_000  # ~570 tokens — catches @file mentions
 # How many chars to keep from the start of a pruned user message
 PRUNE_USER_MSG_KEEP = 500  # ~140 tokens — enough to understand the request
+# Minimum number of recent user turns always protected (regardless of char budget)
+PRUNE_PROTECT_TURNS = 2
+# Tool result markers that should never be pruned (critical context)
+PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 
 # Truncation: universal limits for any tool output
 TRUNCATE_MAX_LINES = 500
 TRUNCATE_MAX_BYTES = 20 * 1024  # 20 KB
 TRUNCATE_KEEP_START = 350  # lines to keep from the start
 TRUNCATE_KEEP_END = 100  # lines to keep from the end
+TRUNCATE_MAX_LINE_LENGTH = 2000  # chars per individual line (prevents minified files)
 
 # Compaction: trigger when per-run input tokens exceed this fraction of model limit
 COMPACTION_THRESHOLD_RATIO = 0.85
@@ -70,15 +75,26 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 }
 
 COMPACTION_TEMPLATE = """\
-Summarize this conversation concisely. Preserve:
-1. **Goal**: What the user wants to accomplish
-2. **Key decisions**: Important choices made during the conversation
-3. **Discoveries**: What was learned about the codebase or problem
-4. **Accomplished**: What has been done so far (be specific about files changed)
-5. **Relevant files**: File paths that are important for continuing the work
-6. **Next steps**: What remains to be done
+Summarize this conversation into the EXACT sections below. Be concise but complete — \
+this summary replaces the full conversation history. Output ONLY these sections:
 
-Be concise but complete. This summary replaces the full conversation history."""
+## Goal
+What the user is trying to accomplish (1-2 sentences).
+
+## Instructions
+Important instructions or preferences the user stated (bullet list). \
+If none, write "None stated."
+
+## Discoveries
+Notable things learned about the codebase, bugs, or architecture (bullet list). \
+If none, write "None."
+
+## Accomplished
+What was done so far — be specific about files created/changed and functions added/modified. \
+List what is in progress and what remains (bullet list).
+
+## Relevant files / directories
+Structured list of file paths relevant to continuing the work (one per line)."""
 
 
 # ── Layer 1: Pruning ──────────────────────────────────────────────
@@ -104,8 +120,13 @@ def prune_history(
     Walks backward through history, protecting the most recent content
     (scaled to the model's context size). Older messages beyond that
     budget are pruned:
-    - Assistant messages: replaced entirely with placeholder
+    - Assistant messages: replaced entirely with placeholder (unless protected)
     - User messages over PRUNE_USER_MSG_THRESHOLD: truncated to first N chars
+
+    Protection layers:
+    1. Turn-based: last PRUNE_PROTECT_TURNS user turns always kept
+    2. Char-based: recent content within the protection window
+    3. Content-based: messages containing PRUNE_PROTECTED_MARKERS never pruned
 
     Returns a new list (does not mutate the input).
     """
@@ -121,6 +142,18 @@ def prune_history(
     if total_chars < protect_chars + PRUNE_MINIMUM_CHARS:
         return list(history)
 
+    # Identify indices of last N user turns (always protected)
+    turn_protected: set[int] = set()
+    user_turns_seen = 0
+    for i in range(len(history) - 1, -1, -1):
+        if history[i]["role"] == "user":
+            user_turns_seen += 1
+            if user_turns_seen <= PRUNE_PROTECT_TURNS:
+                turn_protected.add(i)
+                # Also protect the assistant response right after this user turn
+                if i + 1 < len(history):
+                    turn_protected.add(i + 1)
+
     # Walk backward, protecting recent content
     result = list(history)
     protected = 0
@@ -129,10 +162,20 @@ def prune_history(
         msg = result[i]
         msg_len = len(msg["content"])
 
+        # Turn-based protection: never prune last N user turns
+        if i in turn_protected:
+            protected += msg_len
+            continue
+
         if protected + msg_len <= protect_chars:
             # Still within protection window
             protected += msg_len
         else:
+            # Check protected markers before pruning
+            if any(marker in msg["content"] for marker in PRUNE_PROTECTED_MARKERS):
+                protected += msg_len
+                continue
+
             # Beyond protection window — prune
             if msg["role"] == "assistant":
                 if msg["content"] != PRUNED_PLACEHOLDER:
@@ -147,11 +190,36 @@ def prune_history(
 
 # ── Layer 2: Truncation ───────────────────────────────────────────
 
+def _truncate_long_lines(lines: list[str]) -> list[str]:
+    """Truncate individual lines that exceed MAX_LINE_LENGTH.
+
+    Prevents minified JS/CSS or log lines from consuming massive tokens.
+    """
+    result = []
+    for line in lines:
+        if len(line) > TRUNCATE_MAX_LINE_LENGTH:
+            result.append(
+                line[:TRUNCATE_MAX_LINE_LENGTH]
+                + f"... (line truncated to {TRUNCATE_MAX_LINE_LENGTH} chars)\n"
+            )
+        else:
+            result.append(line)
+    return result
+
+
+_TRUNCATION_HINT = (
+    "\n[Hint: Use grep_search to find specific content, or read_file with "
+    "start_line/end_line for incremental reading. "
+    "For large exploration tasks, use delegate_task to keep your context clean.]"
+)
+
+
 def truncate_output(text: str) -> str:
     """Universal truncation for tool outputs.
 
     Caps output at TRUNCATE_MAX_BYTES / TRUNCATE_MAX_LINES, keeping the
     start and end with a middle marker showing what was cut.
+    Also truncates individual lines exceeding TRUNCATE_MAX_LINE_LENGTH.
     """
     if not text:
         return text
@@ -161,8 +229,11 @@ def truncate_output(text: str) -> str:
     lines = text.splitlines(keepends=True)
     line_count = len(lines)
 
+    # Truncate individual long lines first
+    lines = _truncate_long_lines(lines)
+
     if byte_len <= TRUNCATE_MAX_BYTES and line_count <= TRUNCATE_MAX_LINES:
-        return text
+        return "".join(lines)
 
     # Truncate by lines
     if line_count > TRUNCATE_MAX_LINES:
@@ -171,8 +242,8 @@ def truncate_output(text: str) -> str:
         omitted = line_count - TRUNCATE_KEEP_START - TRUNCATE_KEEP_END
         return (
             "".join(head)
-            + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total) — "
-            f"use offset/limit or a more specific query ...]\n\n"
+            + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total)]"
+            + _TRUNCATION_HINT + "\n\n"
             + "".join(tail)
         )
 
@@ -190,7 +261,8 @@ def truncate_output(text: str) -> str:
     return (
         "".join(kept_lines)
         + f"\n\n[... truncated at ~{TRUNCATE_MAX_BYTES // 1024}KB — "
-        f"{remaining:,} more lines — use offset/limit to read further ...]\n"
+        f"{remaining:,} more lines]"
+        + _TRUNCATION_HINT + "\n"
     )
 
 
@@ -287,7 +359,7 @@ def apply_compaction(
 
     Uses the same protection window as pruning: recent messages within
     the window are preserved as-is, older messages are replaced by a
-    compaction summary. This preserves the natural conversation flow.
+    compaction summary. Replays the last user message to maintain continuity.
     """
     _, recent = _split_history(history, model_id)
 
@@ -295,6 +367,21 @@ def apply_compaction(
         {"role": "user", "content": f"[Conversation compacted]\n\n{summary}"}
     ]
     compacted.extend(recent)
+
+    # Replay: ensure the last message is from the user so the LLM continues naturally
+    if not compacted or compacted[-1]["role"] != "user":
+        # Find last user message in original history for replay
+        last_user = None
+        for msg in reversed(history):
+            if msg["role"] == "user":
+                last_user = msg["content"]
+                break
+        if last_user:
+            # Truncate replayed message to avoid re-bloating context
+            replay = last_user[:1000] if len(last_user) > 1000 else last_user
+            compacted.append({"role": "user", "content": replay})
+        else:
+            compacted.append({"role": "user", "content": "Continue if you have next steps, or stop and ask for clarification."})
 
     return compacted
 

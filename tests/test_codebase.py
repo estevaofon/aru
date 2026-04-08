@@ -209,7 +209,7 @@ def test_edit_file_basic(tmp_path):
     finally:
         set_skip_permissions(False)
 
-    assert "Successfully edited" in result
+    assert "Edited" in result
     assert f.read_text() == "def hello():\n    return 'earth'\n"
 
 
@@ -234,7 +234,7 @@ def test_edit_file_search_replace(tmp_path):
     finally:
         set_skip_permissions(False)
 
-    assert "Successfully edited" in result
+    assert "Edited" in result
     updated = f.read_text()
     assert "DB_HOST = 'production.example.com'" in updated
     assert "DB_PORT = 5433" in updated
@@ -427,7 +427,7 @@ class TestEditFiles:
         finally:
             set_skip_permissions(False)
 
-        assert "Successfully" in result
+        assert "Applied" in result or "Edited" in result
         assert f1.read_text() == "alpha = 10"
         assert f2.read_text() == "beta = 20"
 
@@ -446,7 +446,7 @@ class TestEditFiles:
         finally:
             set_skip_permissions(False)
 
-        assert "Successfully" in result
+        assert "Applied" in result or "Edited" in result
         content = f.read_text()
         assert "HOST = 'prod.example.com'" in content
         assert "PORT = 8080" in content
@@ -501,7 +501,7 @@ class TestEditFiles:
         finally:
             set_skip_permissions(False)
 
-        assert "Successfully" in result
+        assert "Applied" in result or "Edited" in result
 
         content_a = f1.read_text()
         assert "import logging" in content_a
