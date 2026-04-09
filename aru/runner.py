@@ -140,7 +140,10 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         from aru.context import prune_history, should_compact, compact_conversation, would_prune
         if session and session.history and not lightweight:
             if would_prune(session.history, model_id=session.model_id):
-                session.history = prune_history(session.history, model_id=session.model_id)
+                from rich.status import Status
+                with Status("[dim]Pruning context...[/dim]", console=console, spinner="dots"):
+                    session.history = prune_history(session.history, model_id=session.model_id)
+                console.print("[dim]Context pruned.[/dim]")
 
         history_messages: list[Message] = []
         if session and session.history and not lightweight:

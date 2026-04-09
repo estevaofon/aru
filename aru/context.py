@@ -117,14 +117,25 @@ Structured list of file paths relevant to continuing the work (one per line)."""
 def _get_prune_protect_chars(model_id: str = "default") -> int:
     """Scale protection window based on model context size.
 
-    Larger models get more protection; smaller models prune more aggressively
-    to prevent context overflow. Returns ~7% of the model's context in chars.
+    Returns the number of chars worth of recent history that should NEVER
+    be pruned. The remaining history beyond this window is eligible for
+    reversible pruning.
+
+    Sizing rationale: the target is a steady-state per-call context
+    window of ~20K tokens (what the user sees in the status bar), which
+    means protected history should be ~17K tokens = ~60K chars. This
+    floor is applied to every model; larger models get more protection
+    scaled at ~7% of their context, capped at 200K chars (~57K tokens)
+    to avoid protecting too much in 1M-context models where the extra
+    history hurts prompt caching.
     """
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    # ~4 chars per token, protect ~7% of context
-    protect = int(limit * 0.07 * 4)
-    # Clamp between 10K (minimum usable) and 200K (~57K tokens, fits 1M-context models)
-    return max(10_000, min(protect, 200_000))
+    # ~4 chars per token, protect ~7% of context as the ratio ceiling
+    ratio_based = int(limit * 0.07 * 4)
+    # Floor of 60K chars (~17K tokens) keeps the user-visible context
+    # window around 20K tokens steady-state after system + cache + output
+    # overheads. Applies to any model where 7% would be smaller.
+    return max(60_000, min(ratio_based, 200_000))
 
 
 def prune_history(
