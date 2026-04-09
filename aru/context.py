@@ -11,15 +11,15 @@ from __future__ import annotations
 # ── Constants ──────────────────────────────────────────────────────
 
 # Pruning: minimum chars that must be freeable to justify a prune pass
-PRUNE_MINIMUM_CHARS = 8_000  # ~2K tokens (was 12K — prune sooner)
+PRUNE_MINIMUM_CHARS = 12_000  # ~3.5K tokens
 # Placeholder that replaces evicted content
 PRUNED_PLACEHOLDER = "[cleared]"
 # User messages larger than this threshold are truncated when outside protection window
-PRUNE_USER_MSG_THRESHOLD = 1_200  # ~340 tokens (was 2K — catch file contents earlier)
+PRUNE_USER_MSG_THRESHOLD = 2_000  # ~570 tokens
 # How many chars to keep from the start of a pruned user message
-PRUNE_USER_MSG_KEEP = 300  # ~85 tokens (was 500 — enough for the request intent)
+PRUNE_USER_MSG_KEEP = 500  # ~140 tokens
 # Minimum number of recent user turns always protected (regardless of char budget)
-PRUNE_PROTECT_TURNS = 1  # was 2 — only protect the very last turn
+PRUNE_PROTECT_TURNS = 2
 # Tool result markers that should never be pruned (critical context)
 PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 # Tool names whose outputs should never be pruned (like OpenCode's PRUNE_PROTECTED_TOOLS)
@@ -27,20 +27,20 @@ PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
 PRUNE_PROTECTED_TOOLS = {"delegate_task"}
 
 # Truncation: universal limits for any tool output
-TRUNCATE_MAX_LINES = 200  # was 300 — tighter to save context
-TRUNCATE_MAX_BYTES = 10 * 1024  # 10 KB (was 15KB — save full to disk instead)
+TRUNCATE_MAX_LINES = 300
+TRUNCATE_MAX_BYTES = 15 * 1024  # 15 KB
 TRUNCATE_KEEP_START = 150  # lines to keep from the start
-TRUNCATE_KEEP_END = 30  # lines to keep from the end (was 60)
+TRUNCATE_KEEP_END = 60  # lines to keep from the end
 TRUNCATE_MAX_LINE_LENGTH = 1500  # chars per individual line (prevents minified files)
 # Directory for saving full truncated outputs (like OpenCode pattern)
 TRUNCATE_SAVE_DIR = ".aru/truncated"
 
 # Compaction: trigger when per-run input tokens exceed this fraction of model limit
-COMPACTION_THRESHOLD_RATIO = 0.50  # was 0.70 — compact much earlier to stay lean
+COMPACTION_THRESHOLD_RATIO = 0.70
 # Compaction: target post-compaction size as fraction of model context limit
-COMPACTION_TARGET_RATIO = 0.10  # was 0.15 — more aggressive compaction target
+COMPACTION_TARGET_RATIO = 0.15
 # Compaction: also trigger after this many user turns (regardless of token count)
-COMPACTION_MAX_TURNS = 8
+COMPACTION_MAX_TURNS = 15
 # Compaction: reserve buffer for the compaction process itself (like OpenCode's 20K)
 COMPACTION_BUFFER_TOKENS = 20_000
 # Default model context limits (input tokens)
@@ -115,8 +115,8 @@ def _get_prune_protect_chars(model_id: str = "default") -> int:
     to prevent context overflow. Returns ~7% of the model's context in chars.
     """
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    # ~4 chars per token, protect ~5% of context (was 7% — tighter budget)
-    protect = int(limit * 0.05 * 4)
+    # ~4 chars per token, protect ~7% of context
+    protect = int(limit * 0.07 * 4)
     # Clamp between 10K (minimum usable) and 40K (diminishing returns)
     return max(10_000, min(protect, 40_000))
 

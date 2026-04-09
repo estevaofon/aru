@@ -16,6 +16,46 @@ from aru.providers import MODEL_ALIASES, get_model_display, resolve_model_ref
 # Default model reference (provider/model format)
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
 
+# Pricing per million tokens (USD). Cache read/write have separate rates.
+# Format: {model_id_prefix: (input, output, cache_read, cache_write)}
+# Prices as of 2025-05. Models not listed fall back to "default".
+MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
+    # Anthropic  (input, output, cache_read=10%, cache_write=125%)
+    "claude-sonnet-4-5":    (3.00,  15.00,  0.30,   3.75),
+    "claude-sonnet-4-6":    (3.00,  15.00,  0.30,   3.75),
+    "claude-opus-4":        (15.00, 75.00,  1.50,  18.75),
+    "claude-opus-4-6":      (15.00, 75.00,  1.50,  18.75),
+    "claude-haiku-3-5":     (0.80,   4.00,  0.08,   1.00),
+    "claude-haiku-4-5":     (1.00,   5.00,  0.10,   1.25),
+    # OpenAI
+    "gpt-4o":               (2.50,  10.00,  1.25,   2.50),
+    "gpt-4o-mini":          (0.15,   0.60,  0.075,  0.15),
+    "gpt-4.1":              (2.00,   8.00,  0.50,   2.00),
+    "gpt-4.1-mini":         (0.40,   1.60,  0.10,   0.40),
+    "gpt-4.1-nano":         (0.10,   0.40,  0.025,  0.10),
+    "o3":                   (2.00,   8.00,  0.50,   2.00),
+    "o3-mini":              (1.10,   4.40,  0.275,  1.10),
+    "o4-mini":              (1.10,   4.40,  0.275,  1.10),
+    # Qwen / DashScope (<=256K tier, explicit cache: creation=125%, hit=10%)
+    "qwen3-plus":           (0.50,   3.00,  0.05,   0.625),
+    "qwen3.6-plus":         (0.50,   3.00,  0.05,   0.625),
+    "qwen-plus":            (0.50,   3.00,  0.05,   0.625),
+    "qwen-max":             (2.00,   6.00,  0.20,   2.50),
+    "qwen-turbo":           (0.30,   0.60,  0.03,   0.375),
+    "qwen3-coder-plus":     (0.50,   3.00,  0.05,   0.625),
+    # DeepSeek
+    "deepseek-chat":        (0.27,   1.10,  0.07,   0.27),
+    "deepseek-reasoner":    (0.55,   2.19,  0.14,   0.55),
+    # Google Gemini (via OpenRouter)
+    "gemini-2.5-pro":       (1.25,  10.00,  0.315,  1.25),
+    "gemini-2.5-flash":     (0.15,   0.60,  0.0375, 0.15),
+    # Groq (free tier / very cheap)
+    "llama-3.3-70b":        (0.59,   0.79,  0.0,    0.0),
+    "llama-3.1":            (0.05,   0.08,  0.0,    0.0),
+    # Fallback
+    "default":              (3.00,  15.00,  0.30,   3.75),
+}
+
 SESSIONS_DIR = os.path.join(".aru", "sessions")
 
 
@@ -141,12 +181,15 @@ class Session:
         self.total_cache_read_tokens: int = 0
         self.total_cache_write_tokens: int = 0
         self.api_calls: int = 0
+        # Per-call metrics: last API call's context window (set by cache_patch)
+        self.last_input_tokens: int = 0
+        self.last_output_tokens: int = 0
+        self.last_cache_read: int = 0
+        self.last_cache_write: int = 0
         # Context cache — invalidated on file mutations
         self._cached_tree: str | None = None
         self._cached_git_status: str | None = None
         self._context_dirty: bool = True
-        # Track whether AGENTS.md/extra instructions were already sent (skip on subsequent turns)
-        self.extra_instructions_sent: bool = False
         # Tree depth for env context (configurable via aru.json "tree_depth")
         self._tree_max_depth: int = 2
         # Token budget (0 = unlimited)
@@ -198,20 +241,72 @@ class Session:
         self.total_cache_read_tokens += getattr(metrics, "cache_read_tokens", 0) or 0
         self.total_cache_write_tokens += getattr(metrics, "cache_write_tokens", 0) or 0
         self.api_calls += 1
+        # Capture last API call's context window (set by cache_patch)
+        try:
+            from aru.cache_patch import get_last_call_metrics
+            self.last_input_tokens, self.last_output_tokens, self.last_cache_read, self.last_cache_write = get_last_call_metrics()
+        except ImportError:
+            self.last_input_tokens = getattr(metrics, "input_tokens", 0) or 0
+            self.last_output_tokens = getattr(metrics, "output_tokens", 0) or 0
+            self.last_cache_read = 0
+            self.last_cache_write = 0
+
+    def _get_pricing(self) -> tuple[float, float, float, float]:
+        """Get per-million-token pricing for the current model."""
+        model_id = self.model_id
+        # Try exact match, then prefix match, then fallback
+        for prefix, pricing in MODEL_PRICING.items():
+            if prefix == "default":
+                continue
+            if model_id.startswith(prefix):
+                return pricing
+        return MODEL_PRICING["default"]
+
+    @property
+    def estimated_cost(self) -> float:
+        """Estimate cumulative cost in USD based on token usage and model pricing.
+
+        For input tokens, subtracts cache_read (charged at cache rate) and
+        cache_write (charged at write rate) from the base input count.
+        """
+        price_in, price_out, price_cache_read, price_cache_write = self._get_pricing()
+        # Non-cached input = total input - cache_read - cache_write
+        base_input = max(0, self.total_input_tokens - self.total_cache_read_tokens - self.total_cache_write_tokens)
+        cost = (
+            base_input * price_in / 1_000_000
+            + self.total_output_tokens * price_out / 1_000_000
+            + self.total_cache_read_tokens * price_cache_read / 1_000_000
+            + self.total_cache_write_tokens * price_cache_write / 1_000_000
+        )
+        return cost
 
     @property
     def token_summary(self) -> str:
         total = self.total_input_tokens + self.total_output_tokens
         if total == 0:
             return ""
+        # Line 1: cumulative totals
         metrics_str = f"in: {self.total_input_tokens:,} / out: {self.total_output_tokens:,}"
         if self.total_cache_read_tokens > 0:
             metrics_str += f" / cached: {self.total_cache_read_tokens:,}"
-        summary = f"tokens: {total:,} ({metrics_str}) | calls: {self.api_calls}"
+        cost = self.estimated_cost
+        cost_str = f"${cost:.4f}" if cost < 0.01 else f"${cost:.2f}"
+        line1 = f"tokens: {total:,} ({metrics_str}) | cost: {cost_str} | calls: {self.api_calls}"
         if self.token_budget > 0:
             pct = int(total / self.token_budget * 100)
-            summary += f" | budget: {pct}%"
-        return summary
+            line1 += f" | budget: {pct}%"
+        # Line 2: last API call context window (comparable to OpenCode metrics)
+        # OpenCode sums: input + output + cache_read + cache_write
+        if self.last_input_tokens > 0:
+            ctx_total = self.last_input_tokens + self.last_output_tokens + self.last_cache_read + self.last_cache_write
+            parts = [f"in: {self.last_input_tokens:,}", f"out: {self.last_output_tokens:,}"]
+            if self.last_cache_read > 0:
+                parts.append(f"cache_read: {self.last_cache_read:,}")
+            if self.last_cache_write > 0:
+                parts.append(f"cache_write: {self.last_cache_write:,}")
+            line2 = f"context: {ctx_total:,} ({' / '.join(parts)})"
+            return f"{line1}\n{line2}"
+        return line1
 
     def invalidate_context_cache(self):
         """Mark cached tree/git status as stale. Call after file mutations."""

@@ -1,6 +1,6 @@
 """Monkey-patch Agno's model layer to reduce token consumption.
 
-Two optimizations:
+Three optimizations:
 
 1. **Tool result pruning** (ALL providers): After each tool execution, old tool
    results in the message list are truncated to a short summary. This prevents
@@ -9,48 +9,83 @@ Two optimizations:
 2. **Cache breakpoints** (Anthropic only): Marks the last 2 messages with
    cache_control for Anthropic's prompt caching.
 
+3. **Per-call metrics** (ALL providers): Captures input/output tokens of the
+   last API call (context window size), exposed via get_last_call_metrics().
+
 These patches intercept Agno's internal loop so they work transparently
 regardless of which provider is used.
 """
 
 from __future__ import annotations
 
-# Max chars to keep from old tool results
-_TOOL_RESULT_KEEP_CHARS = 200
-# Number of recent tool results to keep in full
-_KEEP_RECENT_RESULTS = 1
+# Token-budget pruning (aligned with OpenCode's strategy):
+# - Protect recent tool results within a token budget
+# - Only prune if there's enough to free (avoid churn)
+# - Walk backwards, protecting recent content first
+# OpenCode uses 40K protect / 20K minimum; we use chars (~4 chars/token)
+_PRUNE_PROTECT_CHARS = 160_000   # ~40K tokens — recent content always kept
+_PRUNE_MINIMUM_CHARS = 80_000    # ~20K tokens — only prune if this much is freeable
+_PRUNED_PLACEHOLDER = "[Old tool result cleared]"
+
+# Last API call metrics (updated on every internal API call)
+_last_call_input_tokens: int = 0
+_last_call_output_tokens: int = 0
+_last_call_cache_read: int = 0
+_last_call_cache_write: int = 0
+
+
+def get_last_call_metrics() -> tuple[int, int, int, int]:
+    """Return (input, output, cache_read, cache_write) from the most recent API call."""
+    return _last_call_input_tokens, _last_call_output_tokens, _last_call_cache_read, _last_call_cache_write
 
 
 def _prune_tool_messages(messages):
-    """Truncate old tool result content in the message list.
+    """Clear old tool result content using a token-budget approach.
 
-    Keeps only the last N tool results in full. Older ones are truncated
-    to a short preview. This runs BEFORE each API call, so accumulated
-    tool results don't bloat the context on every re-send.
+    Walks backwards through messages, protecting recent content up to
+    PRUNE_PROTECT_CHARS. Older tool results beyond that budget are replaced
+    with a short placeholder. Only prunes if total freeable chars exceed
+    PRUNE_MINIMUM_CHARS (avoids unnecessary churn on small conversations).
+
+    Aligned with OpenCode's strategy: budget-based, not fixed-N.
     """
-    # Find all tool message indices
-    tool_indices = [
-        i for i, msg in enumerate(messages)
-        if getattr(msg, "role", None) == "tool"
-    ]
+    # Collect tool message indices and their content sizes
+    tool_indices = []
+    for i, msg in enumerate(messages):
+        if getattr(msg, "role", None) == "tool":
+            content = getattr(msg, "content", None)
+            content_len = len(str(content)) if content is not None else 0
+            tool_indices.append((i, content_len))
 
-    if len(tool_indices) <= _KEEP_RECENT_RESULTS:
+    if not tool_indices:
         return
 
-    # Prune all except the last N
-    for idx in tool_indices[:-_KEEP_RECENT_RESULTS]:
+    # Walk backwards, accumulating protected chars
+    protected_chars = 0
+    prune_candidates = []  # (index, content_len) of messages outside protection
+
+    for idx, content_len in reversed(tool_indices):
+        if protected_chars + content_len <= _PRUNE_PROTECT_CHARS:
+            protected_chars += content_len
+        else:
+            prune_candidates.append((idx, content_len))
+
+    # Only prune if there's enough to free
+    freeable = sum(cl for _, cl in prune_candidates)
+    if freeable < _PRUNE_MINIMUM_CHARS:
+        return
+
+    # Replace old tool results with placeholder
+    for idx, _ in prune_candidates:
         msg = messages[idx]
         content = getattr(msg, "content", None)
         if content is None:
             continue
-
-        content_str = str(content)
-        if len(content_str) <= _TOOL_RESULT_KEEP_CHARS:
+        # Skip if already pruned
+        if str(content) == _PRUNED_PLACEHOLDER:
             continue
-
-        truncated = content_str[:_TOOL_RESULT_KEEP_CHARS] + "\n[...truncated]"
         try:
-            msg.content = truncated
+            msg.content = _PRUNED_PLACEHOLDER
             if hasattr(msg, "compressed_content"):
                 msg.compressed_content = None
         except (AttributeError, TypeError):
@@ -61,6 +96,7 @@ def apply_cache_patch():
     """Apply all patches to reduce Agno's token consumption."""
     _patch_tool_result_pruning()
     _patch_claude_cache_breakpoints()
+    _patch_per_call_metrics()
 
 
 def _patch_tool_result_pruning():
@@ -131,3 +167,35 @@ def _patch_claude_cache_breakpoints():
         return chat_messages, system_message
 
     claude_utils.format_messages = _patched_format_messages
+
+
+def _patch_per_call_metrics():
+    """Patch accumulate_model_metrics to capture per-API-call token counts.
+
+    After each internal API call, Agno calls this function to sum tokens
+    into RunMetrics. We intercept it to snapshot the last call's tokens,
+    giving us the actual context window size (comparable to OpenCode/Claude Code).
+    """
+    from agno.metrics import accumulate_model_metrics as _original_accumulate
+
+    import agno.metrics as _metrics_module
+
+    def _patched_accumulate(model_response, model, model_type, run_metrics=None):
+        global _last_call_input_tokens, _last_call_output_tokens
+        global _last_call_cache_read, _last_call_cache_write
+        usage = getattr(model_response, "response_usage", None)
+        if usage is not None:
+            _last_call_input_tokens = getattr(usage, "input_tokens", 0) or 0
+            _last_call_output_tokens = getattr(usage, "output_tokens", 0) or 0
+            _last_call_cache_read = getattr(usage, "cache_read_tokens", 0) or 0
+            _last_call_cache_write = getattr(usage, "cache_write_tokens", 0) or 0
+        return _original_accumulate(model_response, model, model_type, run_metrics)
+
+    _metrics_module.accumulate_model_metrics = _patched_accumulate
+
+    # Also patch the reference in base.py since it may have imported directly
+    try:
+        import agno.models.base as _base_module
+        _base_module.accumulate_model_metrics = _patched_accumulate
+    except (ImportError, AttributeError):
+        pass

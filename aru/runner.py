@@ -115,9 +115,6 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             run_message = message
 
         # Build conversation history as real messages for the LLM
-        # Compact BEFORE pruning: if the history is large enough that pruning
-        # would discard content, compact first to preserve context via summary
-        # instead of losing it to placeholders.
         from aru.context import prune_history, should_compact, compact_conversation, would_prune
         if session and session.history and not lightweight:
             if would_prune(session.history, model_id=session.model_id):
@@ -242,23 +239,21 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
 
-            # Reactive compaction: use per-run input_tokens (sum of all API
-            # calls within this arun) as a conservative proxy for context pressure.
-            # session.history doesn't include tool results, so char-based estimates
-            # would miss the bulk of the context sent to the model.
+            # Reactive compaction: runs with a visible spinner so the user
+            # sees progress instead of a frozen screen.
             run_input_tokens = getattr(run_output.metrics, "input_tokens", 0) or 0
             if should_compact(run_input_tokens, session.model_id):
-                try:
-                    # Always prune first to shrink history before compaction
-                    session.history = prune_history(session.history, model_id=session.model_id)
-                    session.history = await compact_conversation(
-                        session.history, session.model_ref, session.plan_task,
-                        model_id=session.model_id,
-                    )
-                    console.print("[dim]Context compacted to save tokens.[/dim]")
-                except Exception:
-                    # Even if compaction fails, keep the pruned history
-                    pass
+                from rich.status import Status
+                with Status("[dim]Compacting context...[/dim]", console=console, spinner="dots"):
+                    try:
+                        session.history = prune_history(session.history, model_id=session.model_id)
+                        session.history = await compact_conversation(
+                            session.history, session.model_ref, session.plan_task,
+                            model_id=session.model_id,
+                        )
+                        console.print("[dim]Context compacted to save tokens.[/dim]")
+                    except Exception:
+                        pass
 
         final_content = accumulated or final_content
         remaining = (final_content or "")[display._flushed_len:]

@@ -55,7 +55,7 @@ def _format_diff(old_string: str, new_string: str) -> Group:
 
 
 # Hard ceiling per tool result (~7K tokens). Even max_size=0 respects this per chunk.
-_READ_HARD_CAP = 25_000  # bytes (was 40K — each tool result re-sent on next API call)
+_READ_HARD_CAP = 40_000  # bytes (~11K tokens)
 
 def clear_read_cache():
     """Clear the read cache. Call after file mutations to avoid stale data."""

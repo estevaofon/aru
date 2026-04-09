@@ -25,12 +25,7 @@ def create_general_agent(
     from aru.tools.codebase import GENERAL_TOOLS
     tools = GENERAL_TOOLS
 
-    # Only include AGENTS.md/project instructions on first turn to save ~1.6K tokens/turn
-    if config and not session.extra_instructions_sent:
-        extra = config.get_extra_instructions()
-        session.extra_instructions_sent = True
-    else:
-        extra = ""
+    extra = config.get_extra_instructions() if config else ""
     if env_context:
         extra = f"{extra}\n\n{env_context}" if extra else env_context
     model_ref = model_override or session.model_ref

@@ -48,11 +48,11 @@ Default shows 10 lines of context — use `context_lines=30` for full function b
 2. **Understand a file** → `read_file_smart(path, query)` — returns a concise answer, not raw content
 3. **Need raw content** → `read_file(path)` — returns first chunk + outline for large files
 
-**Stop early**: Once you have enough information to write the plan, STOP making tool calls \
-immediately. Do not exhaustively explore.
-
 **Batch independent tool calls**: When you need answers from multiple independent sources, \
 emit ALL those tool calls in a single response.
+
+**Stop early**: Once you have enough information to write the plan, stop exploring and write it. \
+Do not exhaustively read every file — batch what you need, then produce the plan.
 
 ## Output format — STRICT
 
@@ -182,7 +182,8 @@ Every tool call accumulates its result in your context window. Use the minimum n
 
 **Batch independent tool calls**: emit ALL independent tool calls in a single response.
 
-**Stop early**: Once you have enough information to do the work, STOP exploring and start working.
+**Stop early**: Once you have enough information to act, stop exploring and start working. \
+Batch what you need upfront, then execute.
 
 **When adding or modifying unit tests, ALWAYS run them to verify they pass before finishing.**
 
