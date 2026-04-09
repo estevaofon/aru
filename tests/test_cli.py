@@ -314,11 +314,12 @@ class TestSession:
 
     def test_add_message_caps_history(self):
         session = Session()
-        for i in range(75):
+        for i in range(350):
             session.add_message("user", f"msg {i}")
-        # History is bounded by a hard cap (structured compaction in
-        # aru.context handles the normal-path token management).
-        assert len(session.history) <= 60
+        # History is bounded by a hard safety cap (structured pruning/
+        # compaction in aru.context handles the normal-path token
+        # management; this cap only fires on pathological growth).
+        assert len(session.history) <= 300
 
     def test_set_plan(self):
         session = Session()

@@ -1,28 +1,40 @@
 """Context management for token optimization.
 
-Implements three layers of token reduction:
-1. Pruning — evict old tool/assistant outputs from history
-2. Truncation — universal cap on tool output size
-3. Compaction — summarize entire conversation when approaching context limits
+Mirrors opencode's two-layer approach:
+
+1. **Prune** (routine, lossy only on tool outputs): walks old tool_result
+   blocks and replaces their content with a placeholder. User/assistant
+   text is NEVER touched — it survives verbatim until real overflow.
+   This is the steady-state memory mechanism. Matches cache_patch.py's
+   strategy at the Agno message layer.
+
+2. **Compact** (rare, lossy full summary): triggers only when the per-call
+   context window actually approaches the model's limit. Runs a
+   compaction agent that produces a structured summary (Goal / Instructions
+   / Discoveries / Accomplished / File contents / Relevant files) and
+   marks the resulting assistant message with `summary: True` so
+   subsequent prunes stop at that checkpoint.
+
+There is also a `truncate_output` layer used by individual tools to cap
+their own output size before it ever reaches history.
 """
 
 from __future__ import annotations
 
 # ── Constants ──────────────────────────────────────────────────────
 
-# Pruning: minimum chars that must be freeable to justify a prune pass
-PRUNE_MINIMUM_CHARS = 12_000  # ~3.5K tokens
-# Placeholder that replaces evicted content
-PRUNED_PLACEHOLDER = "[cleared]"
-# User messages larger than this threshold are truncated when outside protection window
-PRUNE_USER_MSG_THRESHOLD = 2_000  # ~570 tokens
-# How many chars to keep from the start of a pruned user message
-PRUNE_USER_MSG_KEEP = 500  # ~140 tokens
+# Pruning: minimum chars that must be freeable to justify a prune pass.
+# Matches opencode's PRUNE_MINIMUM = 20_000 tokens (~80K chars @ 4 chars/token).
+PRUNE_MINIMUM_CHARS = 80_000  # ~20K tokens
+# Placeholder that replaces cleared tool_result content. Matches
+# cache_patch.py's _PRUNED_PLACEHOLDER so both layers produce identical
+# text when a tool output is cleared.
+CLEARED_TOOL_RESULT = "[Old tool result cleared]"
 # Minimum number of recent user turns always protected (regardless of char budget)
 PRUNE_PROTECT_TURNS = 2
 # Tool result markers that should never be pruned (critical context)
 PRUNE_PROTECTED_MARKERS = {"[SubAgent-", "delegate_task"}
-# Tool names whose outputs should never be pruned (like OpenCode's PRUNE_PROTECTED_TOOLS)
+# Tool names whose outputs should never be pruned (like opencode's PRUNE_PROTECTED_TOOLS)
 # These are checked as substrings in message content (tool results include the tool name)
 PRUNE_PROTECTED_TOOLS = {"delegate_task"}
 
@@ -32,17 +44,22 @@ TRUNCATE_MAX_BYTES = 15 * 1024  # 15 KB
 TRUNCATE_KEEP_START = 150  # lines to keep from the start
 TRUNCATE_KEEP_END = 60  # lines to keep from the end
 TRUNCATE_MAX_LINE_LENGTH = 1500  # chars per individual line (prevents minified files)
-# Directory for saving full truncated outputs (like OpenCode pattern)
+# Directory for saving full truncated outputs (like opencode pattern)
 TRUNCATE_SAVE_DIR = ".aru/truncated"
 
-# Compaction: trigger when per-run input tokens exceed this fraction of model limit
-COMPACTION_THRESHOLD_RATIO = 0.70
-# Compaction: target post-compaction size as fraction of model context limit
-COMPACTION_TARGET_RATIO = 0.15
-# Compaction: also trigger after this many user turns (regardless of token count)
-COMPACTION_MAX_TURNS = 15
-# Compaction: reserve buffer for the compaction process itself (like OpenCode's 20K)
-COMPACTION_BUFFER_TOKENS = 20_000
+# Compaction: trigger when per-call input tokens approach real overflow.
+# Matches opencode's philosophy: only fire near the model's actual context
+# limit, not routinely. Routine context reduction is handled by prune_history
+# (lossy only on tool outputs), so compaction is reserved for genuine
+# overflow — where the next API call would otherwise exceed the model's
+# input limit minus the reserved buffer.
+#
+# Opencode fires at `count >= limit.input - reserved` (overflow.ts:22) —
+# no extra ratio. We mirror that here. The sole safety margin is
+# COMPACTION_BUFFER_TOKENS, which is 30K (vs opencode's 20K) to give a bit
+# more headroom for output + tool definitions + estimation noise, since
+# we don't yet have a reactive overflow handler to catch the edge case.
+COMPACTION_BUFFER_TOKENS = 30_000
 # Default model context limits (input tokens)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # Anthropic
@@ -114,61 +131,97 @@ Structured list of file paths relevant to continuing the work (one per line)."""
 
 # ── Layer 1: Pruning ──────────────────────────────────────────────
 
-def _get_prune_protect_chars(model_id: str = "default") -> int:
-    """Scale protection window based on model context size.
+def _tool_result_content_len(msg: dict) -> int:
+    """Sum of content length of all non-cleared tool_result blocks in a message.
 
-    Returns the number of chars worth of recent history that should NEVER
-    be pruned. The remaining history beyond this window is eligible for
-    reversible pruning.
+    Mirrors opencode's prune walk, which accumulates only
+    `Token.estimate(part.state.output)` for `ToolPart`s (compaction.ts:119).
+    Text blocks and tool_use args are ignored — they are not the thing
+    being freed. This means pruning only "consumes budget" for real tool
+    output, so text-heavy conversations with few tool calls never trip
+    the prune path.
 
-    Sizing rationale: the target is a steady-state per-call context
-    window of ~20K tokens (what the user sees in the status bar), which
-    means protected history should be ~17K tokens = ~60K chars. This
-    floor is applied to every model; larger models get more protection
-    scaled at ~7% of their context, capped at 200K chars (~57K tokens)
-    to avoid protecting too much in 1M-context models where the extra
-    history hurts prompt caching.
+    Already-cleared tool_results (content == CLEARED_TOOL_RESULT) are
+    skipped so a second pass doesn't double-count them.
     """
-    limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
-    # ~4 chars per token, protect ~7% of context as the ratio ceiling
-    ratio_based = int(limit * 0.07 * 4)
-    # Floor of 60K chars (~17K tokens) keeps the user-visible context
-    # window around 20K tokens steady-state after system + cache + output
-    # overheads. Applies to any model where 7% would be smaller.
-    return max(60_000, min(ratio_based, 200_000))
+    from aru.history_blocks import is_tool_result
+    total = 0
+    for block in msg.get("content", []):
+        if is_tool_result(block):
+            content = block.get("content")
+            if content == CLEARED_TOOL_RESULT:
+                continue
+            if content is None:
+                continue
+            # tool_result content can be a string or a list of blocks —
+            # stringify to get a char count that roughly tracks tokens.
+            total += len(str(content))
+    return total
+
+
+def _get_prune_protect_chars(model_id: str = "default") -> int:
+    """Chars of recent history that must NEVER be pruned.
+
+    Flat value across all models, mirroring opencode's fixed
+    `PRUNE_PROTECT = 40_000` tokens (compaction.ts:36). At ~4 chars/token
+    that's 160K chars of tool-result content kept intact in the recent
+    window. Older tool_result blocks beyond this budget are eligible for
+    the lossy clear pass in `prune_history`.
+
+    Why flat (not scaled by model): opencode validated this in production
+    on contexts from 128K to 1M — scaling by ratio adds complexity without
+    improving behavior, and protecting too much in 1M-context models can
+    actually hurt prompt caching by keeping rarely-touched tail content warm.
+
+    The `model_id` parameter is retained for signature compatibility with
+    older call sites; it has no effect on the returned value.
+    """
+    del model_id  # unused — kept for signature compatibility
+    return 160_000
 
 
 def prune_history(
     history: list[dict], model_id: str = "default"
 ) -> list[dict]:
-    """Reduce history token footprint by dropping old content blocks.
+    """Reduce history token footprint by clearing old tool result content.
 
-    Operates on block-shaped history (see `aru.history_blocks`). The
-    algorithm walks backward accumulating a char budget, and for any
-    message that falls outside the protection window:
+    Operates on block-shaped history (see `aru.history_blocks`). Matches
+    opencode's approach: the ONLY lossy operation is replacing the
+    content of old `tool_result` blocks with a short placeholder. Text
+    blocks (user and assistant), `tool_use` blocks, and block structure
+    are always preserved — so the original ask survives verbatim until
+    real overflow forces a full compaction.
 
-    - `text` blocks on assistant messages → replaced with `[cleared]`
-      text block.
-    - Large `text` blocks on user messages → truncated to first N chars.
-    - `tool_use` blocks → dropped **together with** their matching
-      `tool_result` block in the subsequent tool/user message. Dropping
-      them atomically is required: Anthropic's API rejects orphans with
-      `400: tool_use_id not found`.
-    - `tool_result` blocks → dropped only when their paired `tool_use`
-      is also dropped.
+    **Budget semantics** (opencode parity): the walk backward accumulates
+    **only tool_result content chars**, not whole-message chars. Text
+    blocks and tool_use args don't consume the protection budget, because
+    they aren't what prune can free. Consequences:
+      - Text-heavy conversations with few tool calls never trigger prune.
+      - Prune only fires when there is >= `protect_chars + PRUNE_MINIMUM_CHARS`
+        of tool_result content total — mirroring opencode's
+        `total > PRUNE_PROTECT + PRUNE_MINIMUM`.
+      - The "is it worth pruning?" dry-run check from opencode
+        (`pruned > PRUNE_MINIMUM`) is implicit: we cannot enter the loop
+        without enough prunable content, and once in the loop any walk
+        past `protect_chars` is guaranteed to be freeing real bytes.
 
-    Protection layers:
+    Protection layers (applied on top of the budget walk):
     1. Turn-based: last `PRUNE_PROTECT_TURNS` user turns always kept
-       intact, along with the assistant response right after each.
-    2. Char-based: recent content within the protection window is kept.
+       intact, plus the assistant response right after each. Index 0
+       (the original user ask) is also always protected.
+    2. Budget-based: tool_result content within the 160K protect window
+       (~40K tokens, matching opencode) is kept.
     3. Content-based: messages whose stringified content contains any
        `PRUNE_PROTECTED_MARKERS` or `PRUNE_PROTECTED_TOOLS` never prune.
+    4. Summary checkpoint: walking backward stops at any message marked
+       `summary: True` (a previous compaction's assistant output).
+       Everything before a summary was already consolidated and must
+       not be re-processed.
 
     Returns a new list (does not mutate the input).
     """
     from aru.history_blocks import (
-        coerce_history_item, item_char_len, item_text,
-        is_text, is_tool_use, is_tool_result, text_block,
+        coerce_history_item, item_text, is_tool_result,
     )
 
     if len(history) <= 2:
@@ -177,11 +230,15 @@ def prune_history(
     protect_chars = _get_prune_protect_chars(model_id)
     result = [coerce_history_item(m) for m in history]
 
-    total_chars = sum(item_char_len(msg) for msg in result)
-    if total_chars < protect_chars + PRUNE_MINIMUM_CHARS:
+    # Entry gate mirrors opencode: only proceed if total tool output
+    # exceeds protect + minimum. Text length is irrelevant.
+    total_tool_chars = sum(_tool_result_content_len(msg) for msg in result)
+    if total_tool_chars < protect_chars + PRUNE_MINIMUM_CHARS:
         return result
 
-    # Identify indices of last N user turns (always protected)
+    # Identify indices of last N user turns (always protected) and index 0
+    # (the original user ask, protected defensively so the anchor never
+    # evaporates even if future edits change the budget calculus).
     turn_protected: set[int] = set()
     user_turns_seen = 0
     for i in range(len(result) - 1, -1, -1):
@@ -191,107 +248,59 @@ def prune_history(
                 turn_protected.add(i)
                 if i + 1 < len(result):
                     turn_protected.add(i + 1)
+    if result and result[0]["role"] == "user":
+        turn_protected.add(0)
+        if len(result) > 1:
+            turn_protected.add(1)
 
-    # Build a map of tool_use_id → (assistant_idx, user_idx) so we can
-    # drop both halves of a pair atomically. The user_idx points to the
-    # next message(s) after the assistant carrying the matching tool_result.
-    tool_pair_loc: dict[str, tuple[int, int]] = {}
-    for i, msg in enumerate(result):
-        if msg["role"] != "assistant":
-            continue
-        for block in msg["content"]:
-            if not is_tool_use(block):
-                continue
-            tu_id = block.get("id")
-            if not tu_id:
-                continue
-            # Look forward for the matching tool_result (usually i+1)
-            for j in range(i + 1, min(i + 3, len(result))):
-                for rb in result[j]["content"]:
-                    if is_tool_result(rb) and rb.get("tool_use_id") == tu_id:
-                        tool_pair_loc[tu_id] = (i, j)
-                        break
-                if tu_id in tool_pair_loc:
-                    break
-
-    # Walk backward, protecting recent content
+    # Walk backward accumulating ONLY tool_result content chars into the
+    # protection budget. Messages with no tool_result (pure text, or just
+    # tool_use) consume zero budget and are skipped without pruning.
     protected = 0
-    dropped_tool_use_ids: set[str] = set()
 
     for i in range(len(result) - 1, -1, -1):
         msg = result[i]
-        msg_len = item_char_len(msg)
 
-        if i in turn_protected:
-            protected += msg_len
+        # Stop at the previous compaction summary marker — everything
+        # before it was already consolidated into the summary.
+        if msg.get("summary"):
+            break
+
+        tool_chars = _tool_result_content_len(msg)
+
+        # No prunable content here — nothing to clear, nothing to count.
+        if tool_chars == 0:
             continue
 
-        if protected + msg_len <= protect_chars:
-            protected += msg_len
+        if i in turn_protected:
+            protected += tool_chars
+            continue
+
+        if protected + tool_chars <= protect_chars:
+            protected += tool_chars
             continue
 
         # Outside protection window — check content-based protection
         text_view = item_text(msg)
         if (any(marker in text_view for marker in PRUNE_PROTECTED_MARKERS)
                 or any(tool in text_view for tool in PRUNE_PROTECTED_TOOLS)):
-            protected += msg_len
+            protected += tool_chars
             continue
 
-        # Prune this message's blocks
+        # Clear any tool_result payloads in this message. Leave every
+        # other block (text, tool_use, thinking, etc.) untouched.
         new_blocks: list[dict] = []
         for block in msg["content"]:
-            if is_text(block):
-                if msg["role"] == "assistant":
-                    # Replace with a single placeholder (only if not already)
-                    if not new_blocks or new_blocks[-1].get("text") != PRUNED_PLACEHOLDER:
-                        new_blocks.append(text_block(PRUNED_PLACEHOLDER))
-                elif msg["role"] == "user":
-                    text = block.get("text", "")
-                    if len(text) > PRUNE_USER_MSG_THRESHOLD:
-                        truncated = (
-                            text[:PRUNE_USER_MSG_KEEP]
-                            + f"\n\n[... {len(text) - PRUNE_USER_MSG_KEEP:,} "
-                              "chars pruned to save context ...]"
-                        )
-                        new_blocks.append(text_block(truncated))
-                    else:
-                        new_blocks.append(block)
-                else:
-                    new_blocks.append(block)
-            elif is_tool_use(block):
-                # Drop the tool_use entirely and mark its id for paired removal
-                tu_id = block.get("id")
-                if tu_id:
-                    dropped_tool_use_ids.add(tu_id)
-                # Do NOT add to new_blocks
-            elif is_tool_result(block):
-                # Drop only if its paired tool_use is also being dropped
-                tu_id = block.get("tool_use_id")
-                if tu_id in dropped_tool_use_ids:
-                    pass  # drop
-                else:
-                    new_blocks.append(block)
+            if is_tool_result(block) and block.get("content") != CLEARED_TOOL_RESULT:
+                new_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.get("tool_use_id"),
+                    "content": CLEARED_TOOL_RESULT,
+                })
             else:
                 new_blocks.append(block)
 
         result[i] = {"role": msg["role"], "content": new_blocks}
-
-    # Second pass: any tool_result blocks in user messages whose tool_use
-    # was dropped on a previous pass (covers case where user msg was
-    # inside protection but its paired assistant was outside).
-    if dropped_tool_use_ids:
-        for idx, msg in enumerate(result):
-            if not msg["content"]:
-                continue
-            filtered = [
-                b for b in msg["content"]
-                if not (is_tool_result(b) and b.get("tool_use_id") in dropped_tool_use_ids)
-            ]
-            if len(filtered) != len(msg["content"]):
-                result[idx] = {"role": msg["role"], "content": filtered}
-
-    # Drop any messages that ended up with zero blocks (valid but useless)
-    result = [m for m in result if m["content"]]
 
     return result
 
@@ -443,46 +452,50 @@ def should_compact(
 ) -> bool:
     """Check if the conversation should be compacted.
 
-    Triggers on EITHER condition:
-    1. Token-based: tokens >= usable_context * threshold_ratio
-    2. Turn-based: user turns >= COMPACTION_MAX_TURNS (prevents slow token creep)
+    Fires when the per-call context window reaches real overflow:
+    `tokens >= limit - COMPACTION_BUFFER_TOKENS`.
+
+    Matches opencode's `isOverflow` in overflow.ts:22 — `count >= usable`,
+    no extra ratio. Routine context reduction is handled by `prune_history`
+    (lossy only on tool outputs), so compaction is reserved for genuine
+    overflow where the next API call would otherwise exceed the model's
+    input limit minus the reserved buffer.
 
     Accepts either an estimated token count (int) or the history list.
     """
     if isinstance(history_or_tokens, list):
-        history = history_or_tokens
-        tokens = estimate_history_tokens(history)
-        # Turn-based trigger: count user messages
-        user_turns = sum(1 for m in history if m["role"] == "user")
-        if user_turns >= COMPACTION_MAX_TURNS:
-            return True
+        tokens = estimate_history_tokens(history_or_tokens)
     else:
         tokens = history_or_tokens
 
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
     usable = limit - COMPACTION_BUFFER_TOKENS
-    threshold = int(usable * COMPACTION_THRESHOLD_RATIO)
-    return tokens >= threshold
+    return tokens >= usable
 
 
 def would_prune(history: list[dict], model_id: str = "default") -> bool:
     """Check if prune_history would discard content from this history.
 
-    Uses the exact same criteria as prune_history: total chars exceed
-    the protection window + minimum prunable threshold.
+    Uses the same entry gate as `prune_history`: total tool_result
+    content must exceed the protection window + minimum prunable
+    threshold. Text and tool_use args are not counted — only real
+    prunable output. Mirrors opencode's logic.
     """
-    from aru.history_blocks import item_char_len
     if len(history) <= 2:
         return False
-    total_chars = sum(item_char_len(msg) for msg in history)
+    total_tool_chars = sum(_tool_result_content_len(msg) for msg in history)
     protect_chars = _get_prune_protect_chars(model_id)
-    return total_chars >= protect_chars + PRUNE_MINIMUM_CHARS
+    return total_tool_chars >= protect_chars + PRUNE_MINIMUM_CHARS
 
 
 def _split_history(history: list[dict], model_id: str = "default") -> tuple[list[dict], list[dict]]:
     """Split history into old (to summarize) and recent (to keep intact).
 
-    Uses the same protection window as pruning.
+    Uses the same protection window as pruning. Defensively, the first
+    user turn (index 0) is always pulled into `recent` so the original
+    ask survives literal even through a full compaction — the compactor
+    extracts it into the `## Goal` section of the summary, but keeping
+    it in recent too means the agent can quote it verbatim afterward.
     """
     from aru.history_blocks import item_char_len
     protect_chars = _get_prune_protect_chars(model_id)
@@ -495,6 +508,12 @@ def _split_history(history: list[dict], model_id: str = "default") -> tuple[list
             split_idx = i
         else:
             break
+
+    # Defensive: force the first user turn into `recent` even if the
+    # protect budget would have sent it to `old`. The original ask is
+    # the session anchor and must stay literal.
+    if split_idx > 0 and history and history[0].get("role") == "user":
+        return history[1:split_idx], [history[0]] + history[split_idx:]
     return history[:split_idx], history[split_idx:]
 
 
@@ -563,12 +582,13 @@ def apply_compaction(
     The summary is emitted as a synthetic user→assistant exchange so that
     role alternation stays natural:
         [user: "Please summarize..."]
-        [assistant: "<summary>"]
+        [assistant: "<summary>", summary=True]
         + recent messages as-is
 
-    This shape avoids the `[user, user, ...]` sequence that previously
-    biased the model toward describing actions rather than emitting
-    structured tool calls.
+    The assistant summary is marked with `summary: True` as a checkpoint.
+    `prune_history` walks backward and stops at this marker, so content
+    already consolidated into the summary is never re-processed. Mirrors
+    opencode's `msg.info.summary` flag (see message-v2.ts:914).
     """
     from aru.history_blocks import text_block, coerce_history_item
     _, recent = _split_history(history, model_id)
@@ -581,6 +601,7 @@ def apply_compaction(
         {
             "role": "assistant",
             "content": [text_block(f"Prior conversation summary:\n\n{summary}")],
+            "summary": True,
         },
     ]
     compacted.extend(coerce_history_item(m) for m in recent)

@@ -176,17 +176,26 @@ class TestPrunePreservesPairs:
     """Fix 6: pruning must never orphan tool_use / tool_result blocks."""
 
     def test_prune_drops_tool_pair_atomically(self):
-        """An old assistant with tool_use must have its tool_result dropped too."""
-        # Build a history large enough to force pruning
-        filler = "x" * 50_000
+        """An old tool_result whose content gets cleared must still keep
+        its block (matching tool_use_id), so the tool_use/tool_result
+        pair is never orphaned.
+
+        Opencode-aligned budget: prune only counts tool_result content
+        chars, so the history needs multiple large tool_result payloads
+        to clear the 240K entry gate.
+        """
+        big_output = "old file line\n" * 8_000  # ~100K chars per result
         history = [
             {"role": "user", "content": "request 1"},
-            _assistant_tool_turn("old_tu", "read_file", {"path": "old.py"}, filler),
-            _tool_result_turn("old_tu", "old contents " * 1000),
+            _assistant_tool_turn("old_tu", "read_file", {"path": "old.py"}),
+            _tool_result_turn("old_tu", big_output),
             {"role": "user", "content": "request 2"},
-            {"role": "assistant", "content": "response 2"},
-            {"role": "user", "content": "recent request " * 5000},
-            {"role": "assistant", "content": "recent response"},
+            _assistant_tool_turn("mid_tu", "read_file", {"path": "mid.py"}),
+            _tool_result_turn("mid_tu", big_output),
+            {"role": "user", "content": "request 3"},
+            _assistant_tool_turn("recent_tu", "read_file", {"path": "new.py"}),
+            _tool_result_turn("recent_tu", big_output),
+            {"role": "user", "content": "summarize"},
         ]
 
         pruned = prune_history(history, model_id="default")
@@ -208,10 +217,20 @@ class TestPrunePreservesPairs:
         )
 
     def test_prune_keeps_recent_tool_pair(self):
-        """A tool_use/tool_result pair inside the protection window must be kept."""
+        """A tool_use/tool_result pair inside the protection window must be
+        kept with its content intact, even when older tool_results get cleared.
+
+        Builds a history with two big old tool_results (enough to trigger
+        prune) and one small recent pair that must survive verbatim.
+        """
+        big_old = "old file content\n" * 10_000  # ~170K chars each
         history = [
-            {"role": "user", "content": "old stuff " * 50_000},
-            {"role": "assistant", "content": "old response " * 10_000},
+            {"role": "user", "content": "req 1"},
+            _assistant_tool_turn("tu_old1", "read_file", {"path": "a.py"}, "reading"),
+            _tool_result_turn("tu_old1", big_old),
+            {"role": "user", "content": "req 2"},
+            _assistant_tool_turn("tu_old2", "read_file", {"path": "b.py"}, "reading"),
+            _tool_result_turn("tu_old2", big_old),
             {"role": "user", "content": "read foo"},
             _assistant_tool_turn("tu_recent", "read_file", {"path": "foo.py"}, "reading"),
             _tool_result_turn("tu_recent", "def foo(): pass"),
@@ -227,6 +246,10 @@ class TestPrunePreservesPairs:
 
         assert len(tool_uses) == 1, "Recent tool_use was incorrectly pruned"
         assert len(tool_results) == 1, "Recent tool_result was incorrectly pruned"
+        # Recent content must be intact (not cleared)
+        assert tool_results[0].get("content") == "def foo(): pass", (
+            "Recent tool_result content was cleared — should be inside protection window"
+        )
 
     def test_prune_with_no_pairs_still_works(self):
         """Pure text history should prune without errors."""

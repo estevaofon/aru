@@ -402,9 +402,12 @@ class Session:
         self.history.append({"role": role, "content": blocks})
         # Hard cap as safety net — structured pruning/compaction in
         # aru/context.py handles the normal case; this only fires if
-        # something bypasses them.
-        if len(self.history) > 60:
-            self.history = self.history[-60:]
+        # something bypasses them. Set high enough that long sessions
+        # (which now accumulate more messages because prune is
+        # non-destructive for text and compact rarely fires) don't hit
+        # this destructive path routinely.
+        if len(self.history) > 300:
+            self.history = self.history[-300:]
 
     def add_structured_message(self, role: str, blocks: list[dict]):
         """Explicitly add a message with pre-built content blocks.

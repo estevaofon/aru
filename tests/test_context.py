@@ -10,8 +10,16 @@ from aru.context import (
     apply_compaction,
     build_compaction_prompt,
     format_context_block,
+    CLEARED_TOOL_RESULT,
 )
-from aru.history_blocks import coerce_history, item_text
+from aru.history_blocks import (
+    coerce_history,
+    item_text,
+    tool_use_block,
+    tool_result_block,
+    text_block,
+    is_tool_result,
+)
 
 
 class TestPruneHistory:
@@ -27,37 +35,103 @@ class TestPruneHistory:
         # Input is auto-coerced to block form on return
         assert result == coerce_history(messages)
 
-    def test_prunes_old_assistant_messages(self):
-        """Should prune old assistant messages when over threshold."""
-        old_content = "x" * 30000
-        recent_content = "y" * 10000
+    def test_prunes_old_tool_results_when_over_threshold(self):
+        """Should clear old tool_result content when total tool output
+        exceeds protect + minimum (opencode-aligned budget semantics).
+
+        The budget walks backward over tool_result content chars only.
+        Text and tool_use args don't count, so this test uses large
+        tool_result payloads to actually trip the prune path.
+        """
+        # Three rounds of read_file-sized outputs. Total ~300K chars
+        # of tool_result content — clears the 240K entry gate, and
+        # the 160K protect budget will cover only the most recent one.
+        big_output = "line of code\n" * 8_000  # ~100K chars
         messages = [
-            {"role": "user", "content": "First request"},
-            {"role": "assistant", "content": old_content},
-            {"role": "user", "content": "Second request"},
-            {"role": "assistant", "content": recent_content},
+            {"role": "user", "content": "round 1"},
+            {
+                "role": "assistant",
+                "content": [
+                    text_block("reading"),
+                    tool_use_block("tu_old", "read_file", {"path": "a.py"}),
+                ],
+            },
+            {"role": "tool", "content": [tool_result_block("tu_old", big_output)]},
+            {"role": "user", "content": "round 2"},
+            {
+                "role": "assistant",
+                "content": [
+                    text_block("reading"),
+                    tool_use_block("tu_mid", "read_file", {"path": "b.py"}),
+                ],
+            },
+            {"role": "tool", "content": [tool_result_block("tu_mid", big_output)]},
+            {"role": "user", "content": "round 3"},
+            {
+                "role": "assistant",
+                "content": [
+                    text_block("reading"),
+                    tool_use_block("tu_recent", "read_file", {"path": "c.py"}),
+                ],
+            },
+            {"role": "tool", "content": [tool_result_block("tu_recent", big_output)]},
+            {"role": "user", "content": "what did you find?"},
         ]
         result = prune_history(messages)
-        # Should have placeholder for pruned content
-        assert len(result) <= len(messages)
-        # Recent messages should be preserved
-        assert any("Second request" in str(m) for m in result)
 
-    def test_preserves_user_messages(self):
-        """Should always preserve user messages."""
-        old_user = {"role": "user", "content": "Old user message"}
-        old_assistant = {"role": "assistant", "content": "Old assistant " * 10000}
-        recent = {"role": "user", "content": "Recent request"}
+        # Same number of messages (prune never drops structure)
+        assert len(result) == len(messages)
 
-        messages = [old_user, old_assistant, recent]
+        # Collect tool_result blocks by tool_use_id
+        by_id: dict[str, dict] = {}
+        for msg in result:
+            for block in msg.get("content", []):
+                if is_tool_result(block):
+                    by_id[block.get("tool_use_id")] = block
+
+        # All three pairs preserved at the block level
+        assert set(by_id.keys()) == {"tu_old", "tu_mid", "tu_recent"}
+
+        # Recent tool_result kept verbatim
+        assert by_id["tu_recent"]["content"] == big_output
+
+        # The older tool_result must have been cleared — at least one
+        # of tu_old/tu_mid should now hold the placeholder, since only
+        # 160K chars worth fits inside the protect window.
+        cleared_count = sum(
+            1 for tu_id in ("tu_old", "tu_mid")
+            if by_id[tu_id]["content"] == CLEARED_TOOL_RESULT
+        )
+        assert cleared_count >= 1, (
+            "Expected at least one old tool_result to be cleared once "
+            "total output exceeded protect + minimum"
+        )
+
+    def test_text_heavy_history_is_not_pruned(self):
+        """Conversations dominated by text (not tool output) must NOT
+        trigger prune even if total chars are huge.
+
+        This is the opencode-aligned semantics: text blocks don't enter
+        the prune budget. A 500K-char text history with no tool_results
+        is a no-op for prune_history.
+        """
+        messages = [
+            {"role": "user", "content": "long planning discussion " * 10_000},
+            {"role": "assistant", "content": "detailed reasoning " * 10_000},
+            {"role": "user", "content": "what's next?"},
+            {"role": "assistant", "content": "here's the plan " * 10_000},
+        ]
         result = prune_history(messages)
 
-        # User messages should be preserved (as placeholders or original)
-        recent_preserved = any(
-            m.get("role") == "user" and "Recent" in item_text(m)
-            for m in result
-        )
-        assert recent_preserved
+        # No tool_results exist anywhere in result
+        tool_results = [
+            b for m in result for b in m.get("content", []) if is_tool_result(b)
+        ]
+        assert tool_results == []
+        # Length preserved
+        assert len(result) == len(messages)
+        # No message content was altered to CLEARED_TOOL_RESULT
+        assert all(CLEARED_TOOL_RESULT not in item_text(m) for m in result)
 
     def test_empty_history(self):
         """Should handle empty history."""
@@ -108,20 +182,21 @@ class TestShouldCompact:
     """Tests for should_compact function."""
 
     def test_no_compaction_under_threshold(self):
-        """Should not compact when under 50% of context limit."""
-        # Default 200K tokens * 0.5 = 100K threshold; 5 tokens is well under
+        """Should not compact when well under the overflow threshold."""
+        # claude-sonnet-4-5 has 200K context; usable = 170K (buffer 30K).
+        # 5 tokens is well under.
         result = should_compact(5, model_id="claude-sonnet-4-5-20250929")
         assert result is False
 
     def test_compaction_over_threshold(self):
-        """Should compact when over threshold."""
-        # 300K tokens is over 50% of a 200K-token context window
+        """Should compact when over the real-overflow threshold."""
+        # 300K tokens is well over the 170K threshold of a 200K-context model.
         result = should_compact(300000, model_id="claude-sonnet-4-5-20250929")
         assert result is True
 
     def test_custom_context_limit(self):
         """Should respect custom context limit."""
-        # gpt-4o has 128K context, 50% = 64K; 50K is under threshold
+        # gpt-4o has 128K context; usable = 98K. 50K is under.
         result = should_compact(50000, model_id="gpt-4o")
         assert isinstance(result, bool)
 
@@ -145,7 +220,8 @@ class TestCompactionTriggerUsesPerCallMetric:
 
     def test_small_per_call_window_does_not_fire(self):
         """Reproduces the exact bug report: per-call ~20K on qwen3.6-plus
-        (128K limit, ~75.6K threshold) must NOT trigger compaction."""
+        (128K limit, ~98K threshold with 30K buffer) must NOT
+        trigger compaction."""
         # Values taken from the real session where compaction fired incorrectly:
         # "context: 20,184 (in: 16,652 / out: 696 / cache_read: 2,836)"
         last_input = 16_652
@@ -158,7 +234,7 @@ class TestCompactionTriggerUsesPerCallMetric:
         )
         assert last_call_window == 20_184, "window computation changed"
 
-        # 20K is ~3.7× below the 75.6K threshold for a 128K-context model
+        # 20K is far below the ~98K threshold for a 128K-context model
         assert should_compact(last_call_window, model_id="qwen3.6-plus") is False, (
             "Compaction fired on a small per-call window. The runner is "
             "probably passing cumulative tokens (run_output.metrics.input_tokens) "
@@ -169,7 +245,9 @@ class TestCompactionTriggerUsesPerCallMetric:
     def test_large_per_call_window_still_fires(self):
         """Positive case: compaction must still fire when the last-call
         window actually approaches the model's context limit."""
-        last_input = 80_000
+        # qwen3.6-plus: 128K limit, usable = 98K (buffer 30K).
+        # 105K input + 2K output + 0 cache = 107K window → must fire.
+        last_input = 105_000
         last_output = 2_000
         last_cache_read = 0
         last_cache_write = 0
@@ -177,17 +255,17 @@ class TestCompactionTriggerUsesPerCallMetric:
         last_call_window = (
             last_input + last_output + last_cache_read + last_cache_write
         )
-        assert last_call_window == 82_000
+        assert last_call_window == 107_000
 
-        # 82K > 75.6K threshold → must fire
+        # 107K > 98K threshold → must fire
         assert should_compact(last_call_window, model_id="qwen3.6-plus") is True
 
     def test_cumulative_metric_is_the_wrong_signal(self):
         """Illustrates WHY the old approach was wrong: a cumulative sum of
-        5 API calls at 18K each is 90K (above threshold), but the actual
+        6 API calls at 18K each is 108K (above threshold), but the actual
         per-call window each time is only 18K (well below)."""
         per_call_window = 18_000
-        num_api_calls_in_turn = 5
+        num_api_calls_in_turn = 6
         cumulative_if_summed = per_call_window * num_api_calls_in_turn
 
         # Old (wrong) behavior: cumulative triggers compaction
@@ -196,8 +274,8 @@ class TestCompactionTriggerUsesPerCallMetric:
         # New (correct) behavior: per-call does NOT trigger compaction
         assert should_compact(per_call_window, model_id="qwen3.6-plus") is False
 
-        # The difference is the entire bug
-        assert cumulative_if_summed > 75_600 > per_call_window
+        # The difference is the entire bug (threshold is 98K for qwen3.6-plus)
+        assert cumulative_if_summed > 98_000 > per_call_window
 
     def test_runner_source_uses_per_call_metric(self):
         """Static check against silent regression.
