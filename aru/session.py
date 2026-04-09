@@ -18,13 +18,14 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
 
 # Pricing per million tokens (USD). Cache read/write have separate rates.
 # Format: {model_id_prefix: (input, output, cache_read, cache_write)}
-# Prices as of 2025-05. Models not listed fall back to "default".
+# Prices as of 2026-04. Models not listed fall back to "default".
 MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     # Anthropic  (input, output, cache_read=10%, cache_write=125%)
     "claude-sonnet-4-5":    (3.00,  15.00,  0.30,   3.75),
     "claude-sonnet-4-6":    (3.00,  15.00,  0.30,   3.75),
     "claude-opus-4":        (15.00, 75.00,  1.50,  18.75),
-    "claude-opus-4-6":      (15.00, 75.00,  1.50,  18.75),
+    "claude-opus-4-5":      (5.00,  25.00,  0.50,   6.25),
+    "claude-opus-4-6":      (5.00,  25.00,  0.50,   6.25),
     "claude-haiku-3-5":     (0.80,   4.00,  0.08,   1.00),
     "claude-haiku-4-5":     (1.00,   5.00,  0.10,   1.25),
     # OpenAI
