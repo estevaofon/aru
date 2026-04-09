@@ -633,8 +633,14 @@ class TestImageMentions:
         assert mr.count == 2
         assert len(mr.images) == 1
         assert mr.images[0].id == "diagram.jpg"
-        # Text file content goes into file_messages
-        all_content = " ".join(m["content"] for m in mr.file_messages)
+        # Text file content is emitted as structured tool_result blocks
+        all_content = " ".join(
+            b.get("content", "")
+            for m in mr.file_messages
+            if m["role"] == "tool"
+            for b in m["content"]
+            if b.get("type") == "tool_result"
+        )
         assert "print('hello')" in all_content
 
     def test_resolve_mentions_multiple_images(self, tmp_path):

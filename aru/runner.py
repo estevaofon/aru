@@ -46,19 +46,17 @@ def build_env_context(session, cwd: str | None = None) -> str:
 
 @dataclass
 class AgentRunResult:
-    """Result from run_agent_capture including text output and tool call history."""
+    """Result from run_agent_capture.
+
+    When a `session` is passed to `run_agent_capture`, the runner persists
+    the assistant turn(s) + tool_result message(s) to `session.history`
+    directly as block-shaped content (see aru.history_blocks). Callers
+    only need `content` (final text) for display and `stalled` for
+    retry logic. `tool_calls` is kept as a display-only list of labels.
+    """
     content: str | None = None
     tool_calls: list[str] = field(default_factory=list)
     stalled: bool = False
-
-    def with_tools_summary(self) -> str | None:
-        """Return content with appended tool call summary for session history."""
-        if not self.content:
-            return self.content
-        if not self.tool_calls:
-            return self.content
-        tools_section = "\n".join(f"  - {t}" for t in self.tool_calls)
-        return f"{self.content}\n\n[Tools]\n{tools_section}"
 
 
 async def run_agent_capture(agent, message: str, session=None, lightweight: bool = False,
@@ -82,11 +80,32 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         ToolCallCompletedEvent,
         ToolCallStartedEvent,
     )
+    from aru.history_blocks import (
+        text_block, tool_use_block, tool_result_block, to_agno_messages,
+    )
 
     console.print()
     final_content = None
     collected_tool_calls: list[str] = []
     _stalled = False
+
+    # Structured capture: the stream loop appends to these in event order.
+    # On stream completion we persist them to session.history as blocks.
+    # `assistant_blocks` holds interleaved text + tool_use blocks for the
+    # assistant turn; `tool_result_msgs` holds per-round tool result
+    # messages (one tool-role message per round of tool calls).
+    assistant_blocks: list[dict] = []
+    tool_result_msgs: list[dict] = []  # list of {"role": "tool", "content": [tool_result_blocks]}
+    pending_tool_uses: dict[str, dict] = {}  # tool_call_id → tool_use block
+    _flushed_text_len: int = 0  # chars of `accumulated` already added to assistant_blocks
+
+    def _flush_pending_text(accumulated_text: str):
+        """Move any unflushed accumulated text into a text block."""
+        nonlocal _flushed_text_len
+        new_text = accumulated_text[_flushed_text_len:]
+        if new_text.strip():
+            assistant_blocks.append(text_block(new_text))
+        _flushed_text_len = len(accumulated_text)
 
     try:
         from aru.runtime import get_ctx
@@ -114,25 +133,19 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         else:
             run_message = message
 
-        # Build conversation history as real messages for the LLM
+        # Build conversation history as real messages for the LLM.
+        # At turn start we only do reversible pruning — destructive compaction
+        # is reserved for the post-turn reactive path (below) which fires when
+        # real token count threatens context overflow.
         from aru.context import prune_history, should_compact, compact_conversation, would_prune
         if session and session.history and not lightweight:
             if would_prune(session.history, model_id=session.model_id):
-                try:
-                    session.history = await compact_conversation(
-                        session.history, session.model_ref, session.plan_task,
-                        model_id=session.model_id,
-                    )
-                    console.print("[dim]Context compacted to save tokens.[/dim]")
-                except Exception:
-                    pass
+                session.history = prune_history(session.history, model_id=session.model_id)
 
         history_messages: list[Message] = []
         if session and session.history and not lightweight:
             prior_history = session.history[:-1]
-            pruned = prune_history(prior_history, model_id=session.model_id)
-            for msg in pruned:
-                history_messages.append(Message(role=msg["role"], content=msg["content"], from_history=True))
+            history_messages = to_agno_messages(prior_history)
 
         # Combine: history messages + current enriched message
         if history_messages:
@@ -170,6 +183,14 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                         tool_id = getattr(event, "tool_call_id", None) or tool_name
                     label = _format_tool_label(tool_name, tool_args)
                     collected_tool_calls.append(label)
+                    # Structured capture: flush any text streamed so far into
+                    # a text block, then append the tool_use block. This
+                    # preserves the order text → tool call → more text.
+                    _flush_pending_text(accumulated)
+                    assistant_blocks.append(
+                        tool_use_block(tool_id, tool_name, tool_args if isinstance(tool_args, dict) else {})
+                    )
+                    pending_tool_uses[tool_id] = assistant_blocks[-1]
                     if accumulated[display._flushed_len:]:
                         live.stop()
                         display.flush()
@@ -183,8 +204,27 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                     _stall_counter = 0
                     if hasattr(event, "tool") and event.tool:
                         tool_id = getattr(event.tool, "tool_call_id", None) or getattr(event.tool, "tool_name", "tool")
+                        tool_result_text = getattr(event.tool, "result", None)
                     else:
                         tool_id = getattr(event, "tool_call_id", None) or getattr(event, "tool_name", "tool")
+                        tool_result_text = getattr(event, "content", None)
+
+                    # Structured capture: bundle the tool_result into the
+                    # most recent tool-role message (same "round" of tool
+                    # calls) so they become a single user-side follow-up
+                    # in Anthropic's wire format.
+                    if tool_id in pending_tool_uses:
+                        result_str = str(tool_result_text) if tool_result_text is not None else ""
+                        tr_block = tool_result_block(tool_id, result_str)
+                        if tool_result_msgs and tool_result_msgs[-1]["_open"]:
+                            tool_result_msgs[-1]["content"].append(tr_block)
+                        else:
+                            tool_result_msgs.append({
+                                "role": "tool",
+                                "content": [tr_block],
+                                "_open": True,
+                            })
+                        pending_tool_uses.pop(tool_id, None)
 
                     result = tracker.complete(tool_id)
                     for label, duration in tracker.pop_completed():
@@ -197,6 +237,10 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                         ))
                     if not tracker.active_labels:
                         status.resume_cycling()
+                        # Close the current tool_result round — any further
+                        # tool calls start a new round.
+                        if tool_result_msgs and tool_result_msgs[-1]["_open"]:
+                            tool_result_msgs[-1]["_open"] = False
                     live.update(display)
 
                 elif isinstance(event, RunContentEvent):
@@ -236,13 +280,39 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         ctx.live = None
         ctx.display = None
 
+        # Flush any trailing text into a final text block, then persist the
+        # assistant turn + tool_result messages to session.history as
+        # structured blocks. This is how tool results survive across turns.
+        _flush_pending_text(accumulated)
+        if session and not lightweight:
+            if assistant_blocks:
+                session.add_structured_message("assistant", assistant_blocks)
+            for tr_msg in tool_result_msgs:
+                session.add_structured_message(tr_msg["role"], tr_msg["content"])
+
         if run_output and session and hasattr(run_output, "metrics"):
             session.track_tokens(run_output.metrics)
 
             # Reactive compaction: runs with a visible spinner so the user
             # sees progress instead of a frozen screen.
-            run_input_tokens = getattr(run_output.metrics, "input_tokens", 0) or 0
-            if should_compact(run_input_tokens, session.model_id):
+            #
+            # IMPORTANT: the compaction trigger must reflect the *per-call*
+            # context window (what the next API request would occupy), NOT
+            # the cumulative input across all API calls in this turn.
+            # Agno's `RunMetrics.input_tokens` is cumulative (it does
+            # `metrics.input_tokens += input_tokens` on every call), so
+            # using it here causes compaction to fire on multi-tool turns
+            # even when the actual per-call window is comfortably small.
+            # `session.track_tokens` above already populated `last_*` via
+            # `cache_patch.get_last_call_metrics`, which gives us the real
+            # last-call window — the same metric shown in the status bar.
+            last_call_window = (
+                session.last_input_tokens
+                + session.last_output_tokens
+                + session.last_cache_read
+                + session.last_cache_write
+            )
+            if should_compact(last_call_window, session.model_id):
                 from rich.status import Status
                 with Status("[dim]Compacting context...[/dim]", console=console, spinner="dots"):
                     try:
@@ -322,7 +392,11 @@ async def execute_plan_steps(session, executor_factory) -> str | None:
             f"## Plan\n{session.current_plan}"
         )
         run_result = await run_agent_capture(executor, exec_prompt, session, lightweight=True)
-        return run_result.with_tools_summary()
+        content = run_result.content or ""
+        if run_result.tool_calls:
+            tools_section = "\n".join(f"  - {t}" for t in run_result.tool_calls)
+            content = f"{content}\n\n[Tools]\n{tools_section}" if content else tools_section
+        return content or None
 
     all_results = []
     completed_context = ""

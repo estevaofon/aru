@@ -497,9 +497,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 else:
                     agent = create_general_agent(session, config, env_context=env_ctx)
                 session.add_message("user", user_input)
-                run_result = await run_agent_capture(agent, prompt, session, images=attached_images or None)
-                if run_result.content:
-                    session.add_message("assistant", run_result.with_tools_summary())
+                await run_agent_capture(agent, prompt, session, images=attached_images or None)
             elif cmd_name in config.skills:
                 skill = config.skills[cmd_name]
                 if not skill.user_invocable:
@@ -510,9 +508,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
                     agent = create_general_agent(session, config, env_context=_build_env_ctx())
                     session.add_message("user", user_input)
-                    run_result = await run_agent_capture(agent, prompt, session, images=attached_images or None)
-                    if run_result.content:
-                        session.add_message("assistant", run_result.with_tools_summary())
+                    await run_agent_capture(agent, prompt, session, images=attached_images or None)
             elif cmd_name in config.custom_agents:
                 agent_def = config.custom_agents[cmd_name]
                 if agent_def.mode == "subagent":
@@ -523,9 +519,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     agent = create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
                     session.add_message("user", user_input)
                     with permission_scope(agent_def.permission):
-                        run_result = await run_agent_capture(agent, cmd_args or user_input, session, images=attached_images or None)
-                    if run_result.content:
-                        session.add_message("assistant", run_result.with_tools_summary())
+                        await run_agent_capture(agent, cmd_args or user_input, session, images=attached_images or None)
             else:
                 console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
                 console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /agents, /cost, /quit[/dim]")
@@ -551,15 +545,11 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 agent = create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
                 with permission_scope(agent_def.permission):
-                    run_result = await run_agent_capture(agent, message_text, session, images=attached_images or None)
-                if run_result.content:
-                    session.add_message("assistant", run_result.with_tools_summary())
+                    await run_agent_capture(agent, message_text, session, images=attached_images or None)
             else:
                 agent = create_general_agent(session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
-                run_result = await run_agent_capture(agent, user_input, session, images=attached_images or None)
-                if run_result.content:
-                    session.add_message("assistant", run_result.with_tools_summary())
+                await run_agent_capture(agent, user_input, session, images=attached_images or None)
 
         # Show token usage and auto-save
         if session.token_summary:

@@ -102,6 +102,12 @@ If none, write "None."
 What was done so far — be specific about files created/changed and functions added/modified. \
 List what is in progress and what remains (bullet list).
 
+## File contents (key excerpts)
+For each file whose contents were shown in the conversation (via @mention or tool reads), \
+preserve the most important excerpts verbatim: function/class signatures, critical \
+constants, bug-related lines. Format as ```path\\n<excerpt>\\n```. \
+If no file contents were shown, write "None."
+
 ## Relevant files / directories
 Structured list of file paths relevant to continuing the work (one per line)."""
 
@@ -117,84 +123,164 @@ def _get_prune_protect_chars(model_id: str = "default") -> int:
     limit = MODEL_CONTEXT_LIMITS.get(model_id, MODEL_CONTEXT_LIMITS["default"])
     # ~4 chars per token, protect ~7% of context
     protect = int(limit * 0.07 * 4)
-    # Clamp between 10K (minimum usable) and 40K (diminishing returns)
-    return max(10_000, min(protect, 40_000))
+    # Clamp between 10K (minimum usable) and 200K (~57K tokens, fits 1M-context models)
+    return max(10_000, min(protect, 200_000))
 
 
 def prune_history(
-    history: list[dict[str, str]], model_id: str = "default"
-) -> list[dict[str, str]]:
-    """Replace old messages with a short placeholder to reduce tokens.
+    history: list[dict], model_id: str = "default"
+) -> list[dict]:
+    """Reduce history token footprint by dropping old content blocks.
 
-    Walks backward through history, protecting the most recent content
-    (scaled to the model's context size). Older messages beyond that
-    budget are pruned:
-    - Assistant messages: replaced entirely with placeholder (unless protected)
-    - User messages over PRUNE_USER_MSG_THRESHOLD: truncated to first N chars
+    Operates on block-shaped history (see `aru.history_blocks`). The
+    algorithm walks backward accumulating a char budget, and for any
+    message that falls outside the protection window:
+
+    - `text` blocks on assistant messages → replaced with `[cleared]`
+      text block.
+    - Large `text` blocks on user messages → truncated to first N chars.
+    - `tool_use` blocks → dropped **together with** their matching
+      `tool_result` block in the subsequent tool/user message. Dropping
+      them atomically is required: Anthropic's API rejects orphans with
+      `400: tool_use_id not found`.
+    - `tool_result` blocks → dropped only when their paired `tool_use`
+      is also dropped.
 
     Protection layers:
-    1. Turn-based: last PRUNE_PROTECT_TURNS user turns always kept
-    2. Char-based: recent content within the protection window
-    3. Content-based: messages containing PRUNE_PROTECTED_MARKERS never pruned
+    1. Turn-based: last `PRUNE_PROTECT_TURNS` user turns always kept
+       intact, along with the assistant response right after each.
+    2. Char-based: recent content within the protection window is kept.
+    3. Content-based: messages whose stringified content contains any
+       `PRUNE_PROTECTED_MARKERS` or `PRUNE_PROTECTED_TOOLS` never prune.
 
     Returns a new list (does not mutate the input).
     """
+    from aru.history_blocks import (
+        coerce_history_item, item_char_len, item_text,
+        is_text, is_tool_use, is_tool_result, text_block,
+    )
+
     if len(history) <= 2:
-        return list(history)
+        return [coerce_history_item(m) for m in history]
 
     protect_chars = _get_prune_protect_chars(model_id)
+    result = [coerce_history_item(m) for m in history]
 
-    # Calculate total prunable chars (both roles)
-    total_chars = sum(len(msg["content"]) for msg in history)
-
-    # Not enough to prune
+    total_chars = sum(item_char_len(msg) for msg in result)
     if total_chars < protect_chars + PRUNE_MINIMUM_CHARS:
-        return list(history)
+        return result
 
     # Identify indices of last N user turns (always protected)
     turn_protected: set[int] = set()
     user_turns_seen = 0
-    for i in range(len(history) - 1, -1, -1):
-        if history[i]["role"] == "user":
+    for i in range(len(result) - 1, -1, -1):
+        if result[i]["role"] == "user":
             user_turns_seen += 1
             if user_turns_seen <= PRUNE_PROTECT_TURNS:
                 turn_protected.add(i)
-                # Also protect the assistant response right after this user turn
-                if i + 1 < len(history):
+                if i + 1 < len(result):
                     turn_protected.add(i + 1)
 
+    # Build a map of tool_use_id → (assistant_idx, user_idx) so we can
+    # drop both halves of a pair atomically. The user_idx points to the
+    # next message(s) after the assistant carrying the matching tool_result.
+    tool_pair_loc: dict[str, tuple[int, int]] = {}
+    for i, msg in enumerate(result):
+        if msg["role"] != "assistant":
+            continue
+        for block in msg["content"]:
+            if not is_tool_use(block):
+                continue
+            tu_id = block.get("id")
+            if not tu_id:
+                continue
+            # Look forward for the matching tool_result (usually i+1)
+            for j in range(i + 1, min(i + 3, len(result))):
+                for rb in result[j]["content"]:
+                    if is_tool_result(rb) and rb.get("tool_use_id") == tu_id:
+                        tool_pair_loc[tu_id] = (i, j)
+                        break
+                if tu_id in tool_pair_loc:
+                    break
+
     # Walk backward, protecting recent content
-    result = list(history)
     protected = 0
+    dropped_tool_use_ids: set[str] = set()
 
     for i in range(len(result) - 1, -1, -1):
         msg = result[i]
-        msg_len = len(msg["content"])
+        msg_len = item_char_len(msg)
 
-        # Turn-based protection: never prune last N user turns
         if i in turn_protected:
             protected += msg_len
             continue
 
         if protected + msg_len <= protect_chars:
-            # Still within protection window
             protected += msg_len
-        else:
-            # Check protected markers and tool names before pruning
-            content = msg["content"]
-            if (any(marker in content for marker in PRUNE_PROTECTED_MARKERS)
-                    or any(tool in content for tool in PRUNE_PROTECTED_TOOLS)):
-                protected += msg_len
-                continue
+            continue
 
-            # Beyond protection window — prune
-            if msg["role"] == "assistant":
-                if msg["content"] != PRUNED_PLACEHOLDER:
-                    result[i] = {"role": "assistant", "content": PRUNED_PLACEHOLDER}
-            elif msg["role"] == "user" and msg_len > PRUNE_USER_MSG_THRESHOLD:
-                truncated = msg["content"][:PRUNE_USER_MSG_KEEP] + \
-                    f"\n\n[... {msg_len - PRUNE_USER_MSG_KEEP:,} chars pruned to save context ...]"
-                result[i] = {"role": "user", "content": truncated}
+        # Outside protection window — check content-based protection
+        text_view = item_text(msg)
+        if (any(marker in text_view for marker in PRUNE_PROTECTED_MARKERS)
+                or any(tool in text_view for tool in PRUNE_PROTECTED_TOOLS)):
+            protected += msg_len
+            continue
+
+        # Prune this message's blocks
+        new_blocks: list[dict] = []
+        for block in msg["content"]:
+            if is_text(block):
+                if msg["role"] == "assistant":
+                    # Replace with a single placeholder (only if not already)
+                    if not new_blocks or new_blocks[-1].get("text") != PRUNED_PLACEHOLDER:
+                        new_blocks.append(text_block(PRUNED_PLACEHOLDER))
+                elif msg["role"] == "user":
+                    text = block.get("text", "")
+                    if len(text) > PRUNE_USER_MSG_THRESHOLD:
+                        truncated = (
+                            text[:PRUNE_USER_MSG_KEEP]
+                            + f"\n\n[... {len(text) - PRUNE_USER_MSG_KEEP:,} "
+                              "chars pruned to save context ...]"
+                        )
+                        new_blocks.append(text_block(truncated))
+                    else:
+                        new_blocks.append(block)
+                else:
+                    new_blocks.append(block)
+            elif is_tool_use(block):
+                # Drop the tool_use entirely and mark its id for paired removal
+                tu_id = block.get("id")
+                if tu_id:
+                    dropped_tool_use_ids.add(tu_id)
+                # Do NOT add to new_blocks
+            elif is_tool_result(block):
+                # Drop only if its paired tool_use is also being dropped
+                tu_id = block.get("tool_use_id")
+                if tu_id in dropped_tool_use_ids:
+                    pass  # drop
+                else:
+                    new_blocks.append(block)
+            else:
+                new_blocks.append(block)
+
+        result[i] = {"role": msg["role"], "content": new_blocks}
+
+    # Second pass: any tool_result blocks in user messages whose tool_use
+    # was dropped on a previous pass (covers case where user msg was
+    # inside protection but its paired assistant was outside).
+    if dropped_tool_use_ids:
+        for idx, msg in enumerate(result):
+            if not msg["content"]:
+                continue
+            filtered = [
+                b for b in msg["content"]
+                if not (is_tool_result(b) and b.get("tool_use_id") in dropped_tool_use_ids)
+            ]
+            if len(filtered) != len(msg["content"]):
+                result[idx] = {"role": msg["role"], "content": filtered}
+
+    # Drop any messages that ended up with zero blocks (valid but useless)
+    result = [m for m in result if m["content"]]
 
     return result
 
@@ -330,9 +416,13 @@ def truncate_output(
 
 # ── Layer 3: Compaction ───────────────────────────────────────────
 
-def estimate_history_tokens(history: list[dict[str, str]]) -> int:
-    """Estimate token count from conversation history chars (~3.5 chars/token)."""
-    total_chars = sum(len(msg["content"]) for msg in history)
+def estimate_history_tokens(history: list[dict]) -> int:
+    """Estimate token count from conversation history chars (~3.5 chars/token).
+
+    Works on both flat-text legacy history and block-shaped history.
+    """
+    from aru.history_blocks import item_char_len
+    total_chars = sum(item_char_len(msg) for msg in history)
     return int(total_chars / 3.5)
 
 
@@ -364,29 +454,31 @@ def should_compact(
     return tokens >= threshold
 
 
-def would_prune(history: list[dict[str, str]], model_id: str = "default") -> bool:
+def would_prune(history: list[dict], model_id: str = "default") -> bool:
     """Check if prune_history would discard content from this history.
 
     Uses the exact same criteria as prune_history: total chars exceed
     the protection window + minimum prunable threshold.
     """
+    from aru.history_blocks import item_char_len
     if len(history) <= 2:
         return False
-    total_chars = sum(len(msg["content"]) for msg in history)
+    total_chars = sum(item_char_len(msg) for msg in history)
     protect_chars = _get_prune_protect_chars(model_id)
     return total_chars >= protect_chars + PRUNE_MINIMUM_CHARS
 
 
-def _split_history(history: list[dict[str, str]], model_id: str = "default") -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _split_history(history: list[dict], model_id: str = "default") -> tuple[list[dict], list[dict]]:
     """Split history into old (to summarize) and recent (to keep intact).
 
     Uses the same protection window as pruning.
     """
+    from aru.history_blocks import item_char_len
     protect_chars = _get_prune_protect_chars(model_id)
     protected = 0
     split_idx = len(history)
     for i in range(len(history) - 1, -1, -1):
-        msg_len = len(history[i]["content"])
+        msg_len = item_char_len(history[i])
         if protected + msg_len <= protect_chars:
             protected += msg_len
             split_idx = i
@@ -396,7 +488,7 @@ def _split_history(history: list[dict[str, str]], model_id: str = "default") -> 
 
 
 def build_compaction_prompt(
-    history: list[dict[str, str]],
+    history: list[dict],
     plan_task: str | None = None,
     model_id: str = "default",
 ) -> str:
@@ -405,6 +497,7 @@ def build_compaction_prompt(
     Only includes OLD messages (outside the protection window) for
     summarization. Recent messages are kept intact by apply_compaction.
     """
+    from aru.history_blocks import item_text
     old_msgs, _ = _split_history(history, model_id)
 
     parts = [COMPACTION_TEMPLATE, "\n\n---\n\n## Conversation to summarize:\n"]
@@ -413,16 +506,38 @@ def build_compaction_prompt(
         parts.append(f"**Active task:** {plan_task}\n\n")
 
     import re as _re
-    _code_block_re = _re.compile(r"```[\s\S]*?```")
+    _code_block_re = _re.compile(r"(```[\s\S]*?```)")
+    _CODE_BLOCK_LIMIT = 3_000
+    _MSG_LIMIT = 8_000
+
+    def _truncate_code_block(match: _re.Match) -> str:
+        block = match.group(1)
+        if len(block) <= _CODE_BLOCK_LIMIT:
+            return block
+        # Preserve the opening fence line and truncate the body
+        fence_end = block.find("\n")
+        if fence_end == -1:
+            return block[:_CODE_BLOCK_LIMIT]
+        opener = block[:fence_end + 1]
+        body_budget = _CODE_BLOCK_LIMIT - len(opener) - 4  # room for closing ```
+        body = block[fence_end + 1:-3] if block.endswith("```") else block[fence_end + 1:]
+        truncated_body = body[:body_budget]
+        return (
+            f"{opener}{truncated_body}\n"
+            f"... [code block truncated to {_CODE_BLOCK_LIMIT} chars]\n```"
+        )
 
     for msg in old_msgs:
         role = msg["role"].upper()
-        content = msg["content"]
-        # Strip large code blocks — compactor only needs to know what was done, not raw code
-        content = _code_block_re.sub("[code block removed]", content)
-        # Cap individual messages in the compaction input to avoid blowing up
-        if len(content) > 2000:
-            content = content[:2000] + f"... [{len(content) - 2000} chars truncated]"
+        # Project block content into text for the compactor. item_text handles
+        # tool_use/tool_result blocks with bracketed placeholders.
+        content = item_text(msg)
+        # Truncate large code blocks instead of removing them wholesale — the
+        # compactor still needs enough file content to produce useful excerpts.
+        content = _code_block_re.sub(_truncate_code_block, content)
+        # Cap individual messages (more generous than before to fit excerpts)
+        if len(content) > _MSG_LIMIT:
+            content = content[:_MSG_LIMIT] + f"... [{len(content) - _MSG_LIMIT} chars truncated]"
         parts.append(f"**{role}:** {content}\n\n")
 
     return "".join(parts)
@@ -430,35 +545,34 @@ def build_compaction_prompt(
 
 
 def apply_compaction(
-    history: list[dict[str, str]], summary: str, model_id: str = "default"
-) -> list[dict[str, str]]:
+    history: list[dict], summary: str, model_id: str = "default"
+) -> list[dict]:
     """Replace OLD messages with a summary, keep RECENT messages intact.
 
-    Uses the same protection window as pruning: recent messages within
-    the window are preserved as-is, older messages are replaced by a
-    compaction summary. Replays the last user message to maintain continuity.
+    The summary is emitted as a synthetic user→assistant exchange so that
+    role alternation stays natural:
+        [user: "Please summarize..."]
+        [assistant: "<summary>"]
+        + recent messages as-is
+
+    This shape avoids the `[user, user, ...]` sequence that previously
+    biased the model toward describing actions rather than emitting
+    structured tool calls.
     """
+    from aru.history_blocks import text_block, coerce_history_item
     _, recent = _split_history(history, model_id)
 
-    compacted = [
-        {"role": "user", "content": f"[Conversation compacted]\n\n{summary}"}
+    compacted: list[dict] = [
+        {
+            "role": "user",
+            "content": [text_block("Please summarize the prior conversation so we can continue.")],
+        },
+        {
+            "role": "assistant",
+            "content": [text_block(f"Prior conversation summary:\n\n{summary}")],
+        },
     ]
-    compacted.extend(recent)
-
-    # Replay: ensure the last message is from the user so the LLM continues naturally
-    if not compacted or compacted[-1]["role"] != "user":
-        # Find last user message in original history for replay
-        last_user = None
-        for msg in reversed(history):
-            if msg["role"] == "user":
-                last_user = msg["content"]
-                break
-        if last_user:
-            # Truncate replayed message to avoid re-bloating context
-            replay = last_user[:1000] if len(last_user) > 1000 else last_user
-            compacted.append({"role": "user", "content": replay})
-        else:
-            compacted.append({"role": "user", "content": "Continue if you have next steps, or stop and ask for clarification."})
+    compacted.extend(coerce_history_item(m) for m in recent)
 
     return compacted
 
@@ -485,12 +599,14 @@ async def compact_conversation(
         small_ref = get_ctx().small_model_ref
         compactor = Agent(
             name="Compactor",
-            model=create_model(small_ref, max_tokens=2048),
+            model=create_model(small_ref, max_tokens=4096),
             instructions=(
                 "You summarize coding conversations concisely. Output ONLY the requested sections, no preamble. "
                 "Preserve: user goals, explicit instructions/preferences, file paths with line numbers, "
-                "function/class names that were modified, and what remains to be done. "
-                "Drop: raw code blocks, tool output details, greetings, reasoning."
+                "function/class names that were modified, what remains to be done, AND verbatim excerpts "
+                "from any file contents shown in the conversation (signatures, critical constants, "
+                "bug-related lines) under the '## File contents (key excerpts)' section. "
+                "Drop: greetings, reasoning chains, redundant tool output, transient status messages."
             ),
             markdown=True,
         )
@@ -510,8 +626,15 @@ async def compact_conversation(
         return apply_compaction(history, summary, model_id=model_id)
 
 
-def _fallback_summary(history: list[dict[str, str]], plan_task: str | None = None) -> str:
-    """Mechanical summary when the compaction agent is unavailable."""
+def _fallback_summary(history: list[dict], plan_task: str | None = None) -> str:
+    """Mechanical summary when the compaction agent is unavailable.
+
+    Operates on block-shaped history. Uses `item_text` to project each
+    message's content blocks into a string for regex extraction and
+    excerpting.
+    """
+    from aru.history_blocks import item_text
+
     parts = []
     if plan_task:
         parts.append(f"**Task:** {plan_task}")
@@ -522,7 +645,7 @@ def _fallback_summary(history: list[dict[str, str]], plan_task: str | None = Non
 
     # Extract file paths mentioned
     import re
-    all_text = " ".join(m["content"] for m in history)
+    all_text = " ".join(item_text(m) for m in history)
     files = set(re.findall(r'[\w./\\-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|md|json|yaml|yml|toml)', all_text))
     if files:
         parts.append(f"**Files referenced:** {', '.join(sorted(files)[:20])}")
@@ -531,9 +654,9 @@ def _fallback_summary(history: list[dict[str, str]], plan_task: str | None = Non
     parts.append("\n**Recent context:**")
     for msg in history[-3:]:
         role = msg["role"]
-        text = msg["content"][:300]
-        if len(msg["content"]) > 300:
-            text += "..."
+        text = item_text(msg)
+        if len(text) > 300:
+            text = text[:300] + "..."
         parts.append(f"- [{role}]: {text}")
 
     return "\n".join(parts)

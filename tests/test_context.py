@@ -11,19 +11,21 @@ from aru.context import (
     build_compaction_prompt,
     format_context_block,
 )
+from aru.history_blocks import coerce_history, item_text
 
 
 class TestPruneHistory:
     """Tests for prune_history function."""
 
     def test_no_pruning_when_under_threshold(self):
-        """Should not prune when total is under 70,000 chars."""
+        """Should not prune when total is under threshold."""
         messages = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
         ]
         result = prune_history(messages)
-        assert result == messages
+        # Input is auto-coerced to block form on return
+        assert result == coerce_history(messages)
 
     def test_prunes_old_assistant_messages(self):
         """Should prune old assistant messages when over threshold."""
@@ -46,13 +48,13 @@ class TestPruneHistory:
         old_user = {"role": "user", "content": "Old user message"}
         old_assistant = {"role": "assistant", "content": "Old assistant " * 10000}
         recent = {"role": "user", "content": "Recent request"}
-        
+
         messages = [old_user, old_assistant, recent]
         result = prune_history(messages)
-        
+
         # User messages should be preserved (as placeholders or original)
         recent_preserved = any(
-            m.get("role") == "user" and "Recent" in m.get("content", "")
+            m.get("role") == "user" and "Recent" in item_text(m)
             for m in result
         )
         assert recent_preserved
@@ -122,6 +124,125 @@ class TestShouldCompact:
         # gpt-4o has 128K context, 50% = 64K; 50K is under threshold
         result = should_compact(50000, model_id="gpt-4o")
         assert isinstance(result, bool)
+
+
+class TestCompactionTriggerUsesPerCallMetric:
+    """Regression guard: the runner must trigger compaction on the last-call
+    context window, not on cumulative tokens across all API calls in a turn.
+
+    Before this fix, `aru/runner.py` passed `run_output.metrics.input_tokens`
+    to `should_compact`, which is cumulative (Agno does `metrics.input_tokens
+    += input_tokens` on every API call — see agno/metrics.py:703). On a
+    multi-tool turn the cumulative could exceed the compaction threshold
+    even when the actual per-call window was comfortably small, causing
+    needless compaction on simple first-turn conversations.
+
+    The fix uses `session.last_input_tokens + last_output_tokens +
+    last_cache_read + last_cache_write`, which is the per-call window
+    populated from `cache_patch.get_last_call_metrics()` — the same metric
+    the status bar displays to the user.
+    """
+
+    def test_small_per_call_window_does_not_fire(self):
+        """Reproduces the exact bug report: per-call ~20K on qwen3.6-plus
+        (128K limit, ~75.6K threshold) must NOT trigger compaction."""
+        # Values taken from the real session where compaction fired incorrectly:
+        # "context: 20,184 (in: 16,652 / out: 696 / cache_read: 2,836)"
+        last_input = 16_652
+        last_output = 696
+        last_cache_read = 2_836
+        last_cache_write = 0
+
+        last_call_window = (
+            last_input + last_output + last_cache_read + last_cache_write
+        )
+        assert last_call_window == 20_184, "window computation changed"
+
+        # 20K is ~3.7× below the 75.6K threshold for a 128K-context model
+        assert should_compact(last_call_window, model_id="qwen3.6-plus") is False, (
+            "Compaction fired on a small per-call window. The runner is "
+            "probably passing cumulative tokens (run_output.metrics.input_tokens) "
+            "instead of the per-call window. See aru/runner.py reactive "
+            "compaction path."
+        )
+
+    def test_large_per_call_window_still_fires(self):
+        """Positive case: compaction must still fire when the last-call
+        window actually approaches the model's context limit."""
+        last_input = 80_000
+        last_output = 2_000
+        last_cache_read = 0
+        last_cache_write = 0
+
+        last_call_window = (
+            last_input + last_output + last_cache_read + last_cache_write
+        )
+        assert last_call_window == 82_000
+
+        # 82K > 75.6K threshold → must fire
+        assert should_compact(last_call_window, model_id="qwen3.6-plus") is True
+
+    def test_cumulative_metric_is_the_wrong_signal(self):
+        """Illustrates WHY the old approach was wrong: a cumulative sum of
+        5 API calls at 18K each is 90K (above threshold), but the actual
+        per-call window each time is only 18K (well below)."""
+        per_call_window = 18_000
+        num_api_calls_in_turn = 5
+        cumulative_if_summed = per_call_window * num_api_calls_in_turn
+
+        # Old (wrong) behavior: cumulative triggers compaction
+        assert should_compact(cumulative_if_summed, model_id="qwen3.6-plus") is True
+
+        # New (correct) behavior: per-call does NOT trigger compaction
+        assert should_compact(per_call_window, model_id="qwen3.6-plus") is False
+
+        # The difference is the entire bug
+        assert cumulative_if_summed > 75_600 > per_call_window
+
+    def test_runner_source_uses_per_call_metric(self):
+        """Static check against silent regression.
+
+        The runner's reactive-compaction block must read the per-call
+        window from `session.last_*`, NOT from `run_output.metrics`.
+        A future refactor that reverts to `run_output.metrics.input_tokens`
+        would reintroduce the bug without breaking any other test, because
+        we can't easily mock Agno's streaming RunOutput.metrics in a unit
+        test. This inspects the runner.py source text directly.
+        """
+        import pathlib
+        runner_src = pathlib.Path(
+            __file__
+        ).parent.parent.joinpath("aru", "runner.py").read_text(encoding="utf-8")
+
+        # Locate the reactive compaction block
+        assert "Reactive compaction" in runner_src, (
+            "Couldn't find the reactive compaction block in runner.py — "
+            "did it get removed or renamed?"
+        )
+
+        # The fix: must compose the window from session.last_* fields
+        assert "session.last_input_tokens" in runner_src, (
+            "runner.py no longer references session.last_input_tokens — "
+            "the compaction-metric fix was likely reverted. The per-call "
+            "window must be derived from session.last_* (populated by "
+            "cache_patch.get_last_call_metrics), not from the cumulative "
+            "run_output.metrics.input_tokens."
+        )
+
+        # The bug: must NOT pass run_output.metrics.input_tokens directly
+        # to should_compact. We grep for the specific anti-pattern and
+        # assert it's absent from the compaction block.
+        # We look for the exact dangerous line, not just the string.
+        dangerous_pattern = "should_compact(run_input_tokens"
+        old_assignment = 'run_input_tokens = getattr(run_output.metrics, "input_tokens"'
+        if old_assignment in runner_src and dangerous_pattern in runner_src:
+            raise AssertionError(
+                "runner.py still passes run_output.metrics.input_tokens "
+                "(cumulative) to should_compact. See the original bug: "
+                "Agno accumulates metrics.input_tokens across every API "
+                "call in a turn, so multi-tool turns fire compaction "
+                "needlessly. Use session.last_* fields instead."
+            )
 
 
 class TestCompactConversation:

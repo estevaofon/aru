@@ -57,8 +57,34 @@ class TestBuildInstructions:
         result_empty = build_instructions("general", extra="")
         assert not result_empty.endswith("\n\n")
         assert BASE_INSTRUCTIONS in result_empty
-        
+
         # Case: None
         result_none = build_instructions("general", extra=None)
         assert not result_none.endswith("\n\n")
         assert BASE_INSTRUCTIONS in result_none
+
+
+class TestReasoningRules:
+    """Regression guard for the verify-before-assert and scope-correction rules.
+
+    These rules address two non-architectural failure modes observed in a
+    qwen3.6-plus session after the history-blocks refactor:
+    1. Model speculated about `put_item_ateleia_maintenance_window` behavior
+       without reading it, producing a wrong answer until the user pushed back.
+    2. Model kept hedging caveats about a superseded file after the user
+       explicitly narrowed the scope.
+    """
+
+    @pytest.mark.parametrize("role", ["planner", "executor", "general"])
+    def test_verify_before_asserting_rule_present(self, role):
+        instructions = build_instructions(role)
+        assert "Verify before asserting" in instructions, (
+            f"{role}: verify-before-assert rule missing — silent deletion regression?"
+        )
+
+    @pytest.mark.parametrize("role", ["planner", "executor", "general"])
+    def test_scope_correction_rule_present(self, role):
+        instructions = build_instructions(role)
+        assert "Adopt user scope corrections immediately" in instructions, (
+            f"{role}: scope-correction rule missing — silent deletion regression?"
+        )

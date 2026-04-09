@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -24,11 +26,28 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _IMAGE_MAX_SIZE = 20 * 1024 * 1024  # 20MB
 
 
+@lru_cache(maxsize=1)
+def _read_file_arg_name() -> str:
+    """Return the name of the first parameter of the real `read_file` tool.
+
+    Used by `_resolve_mentions` to forge tool_use blocks whose `input` dict
+    key matches the real tool signature exactly. If `read_file` is ever
+    renamed or its signature changes, this introspection picks up the new
+    name automatically — eliminating the entire class of "forged example
+    drifted from real tool" bugs.
+
+    Cached via lru_cache so the introspection runs once per process.
+    Imported lazily to avoid any import-time coupling with aru.tools.
+    """
+    from aru.tools.codebase import read_file
+    return next(iter(inspect.signature(read_file).parameters))
+
+
 @dataclass
 class MentionResult:
     """Result of resolving @file mentions."""
     text: str                          # User text (without file contents)
-    file_messages: list[dict[str, str]]  # Simulated tool-call pairs for history
+    file_messages: list[dict]          # Block-shaped tool_use/tool_result pairs for history
     images: list[Image]
     count: int                         # Total attached (files + images)
 
@@ -37,20 +56,25 @@ def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) 
     """Resolve @file mentions as simulated read_file tool calls.
 
     Instead of inlining file contents into the user message (which bloats
-    history and can't be pruned), we return separate assistant+tool_result
-    message pairs that the session can prune/compact like normal tool outputs.
+    history and can't be pruned), we return real block-shaped tool_use /
+    tool_result message pairs with synthetic tool_use_ids. The prune
+    pipeline in `aru.context.prune_history` then treats them as atomic
+    pairs — label and content can't be cut apart.
 
     Image files are returned as Image objects.
     Skips @mentions that match known agent names.
     """
+    from aru.history_blocks import tool_use_block, tool_result_block
+
     agent_names = agent_names or set()
     matches = list(_MENTION_RE.finditer(text))
     if not matches:
         return MentionResult(text=text, file_messages=[], images=[], count=0)
 
-    file_messages: list[dict[str, str]] = []
+    file_messages: list[dict] = []
     images: list[Image] = []
     seen = set()
+    mention_idx = 0
     for m in matches:
         rel_path = m.group(1)
         if rel_path.lower() in agent_names:
@@ -78,12 +102,30 @@ def _resolve_mentions(text: str, cwd: str, agent_names: set[str] | None = None) 
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read(_MENTION_MAX_SIZE)
             truncated = size > _MENTION_MAX_SIZE
-            label = f"[read_file: {rel_path}]"
             if truncated:
-                label += f" (truncated to {_MENTION_MAX_SIZE // 1000}KB of {size // 1000}KB — use read_file for the rest)"
-            # Simulated tool call pair — can be pruned like normal tool outputs
-            file_messages.append({"role": "assistant", "content": label})
-            file_messages.append({"role": "user", "content": content})
+                content += (
+                    f"\n\n[truncated to {_MENTION_MAX_SIZE // 1000}KB of "
+                    f"{size // 1000}KB — use read_file for the rest]"
+                )
+            # Synthetic tool_use_id so the prune pipeline can pair the
+            # assistant tool_use block with its matching tool_result.
+            # The `input` dict key is derived at runtime from the real
+            # read_file signature via `_read_file_arg_name()` — this makes
+            # the forgery drift-proof: if `read_file` is ever renamed or
+            # its first parameter changes, the forged example automatically
+            # tracks the new name. Without this, the model would see its
+            # own prior "tool calls" in history using a stale arg name and
+            # copy that stale pattern, producing Pydantic validation errors.
+            tu_id = f"mention_{mention_idx}_{abs(hash(rel_path)) & 0xFFFFFF:06x}"
+            mention_idx += 1
+            file_messages.append({
+                "role": "assistant",
+                "content": [tool_use_block(tu_id, "read_file", {_read_file_arg_name(): rel_path})],
+            })
+            file_messages.append({
+                "role": "tool",
+                "content": [tool_result_block(tu_id, content)],
+            })
         except OSError:
             continue
 

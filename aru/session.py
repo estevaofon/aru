@@ -163,13 +163,13 @@ class Session:
 
     # Approximate chars-per-token ratio for estimation (conservative)
     _CHARS_PER_TOKEN = 3.5
-    # History summarization threshold: summarize oldest messages when history exceeds this
-    _HISTORY_SUMMARIZE_THRESHOLD = 20
-    _HISTORY_SUMMARIZE_COUNT = 6  # number of oldest messages to condense
 
     def __init__(self, session_id: str | None = None):
         self.session_id: str = session_id or _generate_session_id()
-        self.history: list[dict[str, str]] = []
+        # History is a list of block-shaped items:
+        # {"role": "user" | "assistant" | "tool", "content": list[Block]}
+        # See aru.history_blocks for block schema and helpers.
+        self.history: list[dict] = []
         self.current_plan: str | None = None
         self.plan_task: str | None = None
         self.plan_steps: list[PlanStep] = []
@@ -213,12 +213,13 @@ class Session:
     @property
     def title(self) -> str:
         """Generate a short title from the first user message or plan task."""
+        from aru.history_blocks import item_text
         if self.plan_task:
             return self.plan_task[:60]
         for msg in self.history:
             if msg["role"] == "user":
-                text = msg["content"][:60]
-                return text.split("\n")[0]
+                text = item_text(msg)[:60]
+                return text.split("\n")[0] if text else "(empty session)"
         return "(empty session)"
 
     def set_plan(self, task: str, plan_content: str):
@@ -385,43 +386,33 @@ class Session:
             return f"[yellow]Token budget at {pct:.0f}%[/yellow]"
         return None
 
-    def add_message(self, role: str, content: str):
-        self.history.append({"role": role, "content": content})
-        # Summarize oldest messages instead of hard-truncating
-        if len(self.history) > self._HISTORY_SUMMARIZE_THRESHOLD:
-            self._summarize_old_messages()
-        # Hard cap as safety net
-        if len(self.history) > 30:
-            self.history = self.history[-30:]
+    def add_message(self, role: str, content):
+        """Append a message to history.
 
-    def _summarize_old_messages(self):
-        """Condense the oldest messages into a single summary message.
-
-        Preserves [Tools] and [Plan] sections so the model knows what actions
-        were taken even after summarization.
+        `content` may be a string (auto-wrapped as a single text block) or
+        already a list of block dicts (used by the runner to persist
+        structured assistant/tool_result turns).
         """
-        n = self._HISTORY_SUMMARIZE_COUNT
-        old = self.history[:n]
-        rest = self.history[n:]
-        summary_parts = []
-        for msg in old:
-            role = msg["role"]
-            content = msg["content"]
-            # Extract [Tools] section before truncating
-            tools_section = ""
-            tools_idx = content.find("\n[Tools]\n")
-            if tools_idx != -1:
-                tools_section = content[tools_idx:]
-            # Truncate the main text but keep tools metadata
-            text = content[:300] if tools_idx == -1 else content[:tools_idx][:300]
-            if len(content) > 300:
-                text += "..."
-            if tools_section:
-                text += tools_section
-            summary_parts.append(f"[{role}]: {text}")
-        summary = "[Conversation summary of earlier messages]\n" + "\n".join(summary_parts)
-        self.history = [{"role": "user", "content": summary}] + rest
-        self.updated_at = datetime.now().isoformat(timespec="milliseconds")
+        from aru.history_blocks import coerce_content
+        blocks = coerce_content(content)
+        # Skip empty messages entirely — they only add noise and break
+        # role alternation assertions.
+        if not blocks:
+            return
+        self.history.append({"role": role, "content": blocks})
+        # Hard cap as safety net — structured pruning/compaction in
+        # aru/context.py handles the normal case; this only fires if
+        # something bypasses them.
+        if len(self.history) > 60:
+            self.history = self.history[-60:]
+
+    def add_structured_message(self, role: str, blocks: list[dict]):
+        """Explicitly add a message with pre-built content blocks.
+
+        Thin wrapper over `add_message` for call sites that want to make
+        it obvious they are producing structured content.
+        """
+        self.add_message(role, blocks)
 
     def compact_history(self, max_tokens: int) -> int:
         """Remove oldest messages until the estimated token total is below max_tokens.
@@ -432,8 +423,10 @@ class Session:
         Returns:
             Number of messages removed.
         """
+        from aru.history_blocks import item_char_len
+
         def _total_tokens() -> int:
-            return sum(self.estimate_tokens(m["content"]) for m in self.history)
+            return sum(int(item_char_len(m) / self._CHARS_PER_TOKEN) for m in self.history)
 
         removed = 0
         while self.history and _total_tokens() > max_tokens:
@@ -460,8 +453,11 @@ class Session:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
+        from aru.history_blocks import coerce_history
         session = cls(session_id=data["session_id"])
-        session.history = data.get("history", [])
+        # Backward compat: old sessions stored content as strings; coerce to
+        # block-shaped form on load so downstream code can assume blocks.
+        session.history = coerce_history(data.get("history", []))
         session.current_plan = data.get("current_plan")
         session.plan_task = data.get("plan_task")
         session.plan_steps = [PlanStep.from_dict(s) for s in data.get("plan_steps", [])]
@@ -590,9 +586,11 @@ class SessionStore:
         return sessions[:limit]
 
     def _first_user_msg(self, data: dict) -> str:
+        from aru.history_blocks import item_text
         for msg in data.get("history", []):
             if msg["role"] == "user":
-                return msg["content"][:60].split("\n")[0]
+                text = item_text(msg)[:60]
+                return text.split("\n")[0] if text else "(empty session)"
         return "(empty session)"
 
     def load_last(self) -> Session | None:

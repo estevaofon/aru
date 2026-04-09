@@ -54,11 +54,20 @@ class TestResolveMentions:
     def test_resolves_file_mention(self, tmp_path):
         (tmp_path / "config.py").write_text("DEBUG = True")
         mr = _resolve_mentions("check @config.py", str(tmp_path))
-        # File content now goes into file_messages, not inline text
+        # Mentions are now real tool_use/tool_result block pairs
         assert mr.count == 1
-        assert len(mr.file_messages) == 2  # assistant label + user content
-        assert "read_file: config.py" in mr.file_messages[0]["content"]
-        assert "DEBUG = True" in mr.file_messages[1]["content"]
+        assert len(mr.file_messages) == 2  # assistant tool_use + tool tool_result
+        assistant_blocks = mr.file_messages[0]["content"]
+        tool_blocks = mr.file_messages[1]["content"]
+        assert assistant_blocks[0]["type"] == "tool_use"
+        assert assistant_blocks[0]["name"] == "read_file"
+        # Must match the real read_file signature (file_path, not path)
+        # or the model will copy the wrong arg name in subsequent real calls.
+        assert assistant_blocks[0]["input"]["file_path"] == "config.py"
+        assert tool_blocks[0]["type"] == "tool_result"
+        assert "DEBUG = True" in tool_blocks[0]["content"]
+        # tool_use_id pairing
+        assert assistant_blocks[0]["id"] == tool_blocks[0]["tool_use_id"]
 
     def test_nonexistent_file_ignored(self, tmp_path):
         mr = _resolve_mentions("check @missing.py", str(tmp_path))
@@ -77,7 +86,14 @@ class TestResolveMentions:
         mr = _resolve_mentions("@a.py and @b.py", str(tmp_path))
         assert mr.count == 2
         assert len(mr.file_messages) == 4  # two pairs
-        all_content = " ".join(m["content"] for m in mr.file_messages)
+        # Collect all tool_result content from the tool-role messages
+        all_content = " ".join(
+            b.get("content", "")
+            for m in mr.file_messages
+            if m["role"] == "tool"
+            for b in m["content"]
+            if b.get("type") == "tool_result"
+        )
         assert "aaa" in all_content
         assert "bbb" in all_content
 
@@ -88,6 +104,69 @@ class TestResolveMentions:
     def test_mention_not_in_email(self):
         matches = _MENTION_RE.findall("user@email.com")
         assert "email.com" not in matches
+
+    def test_mention_tool_use_input_matches_real_read_file_signature(self, tmp_path):
+        """Synthetic @mention tool_use blocks must use the REAL read_file arg names.
+
+        Regression: an earlier version used `{"path": rel_path}` as the synthetic
+        input, which made the model see its own prior "tool calls" in history
+        using `path=...` and copy that pattern. The real `read_file` signature
+        is `file_path: str`, so the model's real calls hit Pydantic validation
+        errors: `Unexpected keyword argument 'path'`.
+        """
+        import inspect
+        from aru.tools.codebase import read_file
+
+        # Introspect the real signature — first positional arg name
+        sig_params = list(inspect.signature(read_file).parameters.keys())
+        real_arg_name = sig_params[0]
+
+        (tmp_path / "foo.py").write_text("data")
+        mr = _resolve_mentions("@foo.py", str(tmp_path))
+        tool_use_input = mr.file_messages[0]["content"][0]["input"]
+
+        assert real_arg_name in tool_use_input, (
+            f"Synthetic @mention tool_use uses input keys {list(tool_use_input)}, "
+            f"but the real read_file signature expects '{real_arg_name}'. "
+            f"The model will copy the wrong arg name from history — fix "
+            f"aru/completers.py:_resolve_mentions to use the real arg name."
+        )
+
+    def test_mention_arg_name_derived_dynamically_via_introspection(self, tmp_path):
+        """The mention forgery must derive the arg name from inspect.signature.
+
+        Regression guard: if someone reverts to a hardcoded key (e.g.
+        `{"file_path": rel_path}` literal), this test still passes — but
+        if `read_file` is renamed, we want the test to catch the drift.
+        So we monkey-patch the cached introspection result and verify the
+        mention uses whatever the introspection returned.
+
+        This proves the arg name is *actually* derived, not accidentally
+        matching a hardcoded value.
+        """
+        from aru import completers
+
+        # Clear the lru_cache and patch the introspection to return a fake name
+        completers._read_file_arg_name.cache_clear()
+        original = completers._read_file_arg_name.__wrapped__
+
+        def fake_arg_name():
+            return "xXx_fake_arg_xXx"
+
+        completers._read_file_arg_name = lambda: fake_arg_name()  # type: ignore[assignment]
+        try:
+            (tmp_path / "bar.py").write_text("data")
+            mr = _resolve_mentions("@bar.py", str(tmp_path))
+            tool_use_input = mr.file_messages[0]["content"][0]["input"]
+            assert "xXx_fake_arg_xXx" in tool_use_input, (
+                "The mention forgery ignored the introspection result — "
+                "it's probably hardcoding the arg name instead of deriving it."
+            )
+        finally:
+            # Restore
+            completers._read_file_arg_name = original  # type: ignore[assignment]
+            from functools import lru_cache
+            completers._read_file_arg_name = lru_cache(maxsize=1)(completers._read_file_arg_name)
 
 
 # ── PlanStep ─────────────────────────────────────────────────────────
@@ -233,14 +312,13 @@ class TestSession:
         assert len(session.history) == 1
         assert session.history[0]["role"] == "user"
 
-    def test_add_message_summarizes_and_truncates_history(self):
+    def test_add_message_caps_history(self):
         session = Session()
-        for i in range(35):
+        for i in range(75):
             session.add_message("user", f"msg {i}")
-        # History should be bounded (summarization + hard cap)
-        assert len(session.history) <= 30
-        # First message should be a summary of older messages
-        assert "[Conversation summary" in session.history[0]["content"]
+        # History is bounded by a hard cap (structured compaction in
+        # aru.context handles the normal-path token management).
+        assert len(session.history) <= 60
 
     def test_set_plan(self):
         session = Session()
@@ -364,44 +442,25 @@ class TestSession:
 # ── AgentRunResult ───────────────────────────────────────────────────
 
 class TestAgentRunResult:
-    def test_with_tools_summary_no_tools(self):
+    def test_basic_fields(self):
         result = AgentRunResult(content="Hello world")
-        assert result.with_tools_summary() == "Hello world"
+        assert result.content == "Hello world"
+        assert result.tool_calls == []
+        assert result.stalled is False
 
-    def test_with_tools_summary_with_tools(self):
+    def test_with_tool_labels(self):
         result = AgentRunResult(
             content="I edited the file.",
             tool_calls=["Read(foo.py)", "Edit(foo.py)"],
         )
-        summary = result.with_tools_summary()
-        assert "[Tools]" in summary
-        assert "Read(foo.py)" in summary
-        assert "Edit(foo.py)" in summary
-        assert summary.startswith("I edited the file.")
+        assert result.content == "I edited the file."
+        assert len(result.tool_calls) == 2
+        assert "Read(foo.py)" in result.tool_calls
 
-    def test_with_tools_summary_none_content(self):
+    def test_none_content(self):
         result = AgentRunResult(content=None, tool_calls=["Read(x.py)"])
-        assert result.with_tools_summary() is None
-
-    def test_empty_tool_calls(self):
-        result = AgentRunResult(content="text", tool_calls=[])
-        assert result.with_tools_summary() == "text"
-
-    def test_summarize_preserves_tools_section(self):
-        """When history is summarized, [Tools] sections should be preserved."""
-        session = Session()
-        msg_with_tools = "I fixed the bug.\n\n[Tools]\n  - Edit(main.py)\n  - Bash(pytest)"
-        session.history = [
-            {"role": "user", "content": "fix the bug"},
-            {"role": "assistant", "content": msg_with_tools},
-        ] * 5  # 10 messages
-        # Add enough to trigger summarization (threshold=20)
-        for i in range(15):
-            session.add_message("user", f"msg {i}")
-        # The summary should contain [Tools] references
-        summary_msg = session.history[0]["content"]
-        assert "[Tools]" in summary_msg
-        assert "Edit(main.py)" in summary_msg
+        assert result.content is None
+        assert result.tool_calls == ["Read(x.py)"]
 
 
 # ── SessionStore ─────────────────────────────────────────────────────
