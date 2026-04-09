@@ -14,6 +14,7 @@ import os
 import sys
 
 from rich.markdown import Markdown
+from rich.panel import Panel
 
 # ── Re-exports for backward compatibility ─────────────────────────────
 # Tests and external code import these from aru.cli; keep them accessible.
@@ -413,6 +414,15 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             _show_help(config)
             continue
 
+        if user_input.lower() == "/cost":
+            console.print(Panel(
+                session.cost_summary,
+                title="[bold]Token Usage & Cost[/bold]",
+                border_style="cyan",
+                padding=(1, 2),
+            ))
+            continue
+
         if user_input.startswith("! "):
             cmd = user_input[2:].strip()
             if not cmd:
@@ -518,7 +528,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                         session.add_message("assistant", run_result.with_tools_summary())
             else:
                 console.print(f"[yellow]Unknown command: /{cmd_name}[/yellow]")
-                console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /agents, /quit[/dim]")
+                console.print(f"[dim]Built-in: /plan, /model, /sessions, /commands, /skills, /agents, /cost, /quit[/dim]")
                 if config.commands:
                     console.print(f"[dim]Custom: {', '.join(f'/{k}' for k in config.commands)}[/dim]")
                 if config.skills:

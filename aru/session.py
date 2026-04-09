@@ -282,21 +282,11 @@ class Session:
 
     @property
     def token_summary(self) -> str:
-        total = self.total_input_tokens + self.total_output_tokens
-        if total == 0:
+        """One-line summary shown after each response: context window + cost."""
+        if self.last_input_tokens <= 0 and self.total_input_tokens == 0:
             return ""
-        # Line 1: cumulative totals
-        metrics_str = f"in: {self.total_input_tokens:,} / out: {self.total_output_tokens:,}"
-        if self.total_cache_read_tokens > 0:
-            metrics_str += f" / cached: {self.total_cache_read_tokens:,}"
         cost = self.estimated_cost
         cost_str = f"${cost:.4f}" if cost < 0.01 else f"${cost:.2f}"
-        line1 = f"tokens: {total:,} ({metrics_str}) | cost: {cost_str} | calls: {self.api_calls}"
-        if self.token_budget > 0:
-            pct = int(total / self.token_budget * 100)
-            line1 += f" | budget: {pct}%"
-        # Line 2: last API call context window (comparable to OpenCode metrics)
-        # OpenCode sums: input + output + cache_read + cache_write
         if self.last_input_tokens > 0:
             ctx_total = self.last_input_tokens + self.last_output_tokens + self.last_cache_read + self.last_cache_write
             parts = [f"in: {self.last_input_tokens:,}", f"out: {self.last_output_tokens:,}"]
@@ -304,9 +294,47 @@ class Session:
                 parts.append(f"cache_read: {self.last_cache_read:,}")
             if self.last_cache_write > 0:
                 parts.append(f"cache_write: {self.last_cache_write:,}")
-            line2 = f"context: {ctx_total:,} ({' / '.join(parts)})"
-            return f"{line1}\n{line2}"
-        return line1
+            return f"context: {ctx_total:,} ({' / '.join(parts)}) | cost: {cost_str}"
+        # Fallback when per-call metrics aren't available
+        total = self.total_input_tokens + self.total_output_tokens
+        return f"tokens: {total:,} | cost: {cost_str}"
+
+    @property
+    def cost_summary(self) -> str:
+        """Detailed cost breakdown for /cost command."""
+        total = self.total_input_tokens + self.total_output_tokens
+        if total == 0:
+            return "No token usage yet."
+        cost = self.estimated_cost
+        cost_str = f"${cost:.4f}" if cost < 0.01 else f"${cost:.2f}"
+        lines = [
+            f"Session cost: {cost_str}",
+            f"",
+            f"Cumulative tokens:",
+            f"  input:       {self.total_input_tokens:,}",
+            f"  output:      {self.total_output_tokens:,}",
+        ]
+        if self.total_cache_read_tokens > 0:
+            lines.append(f"  cache_read:  {self.total_cache_read_tokens:,}")
+        if self.total_cache_write_tokens > 0:
+            lines.append(f"  cache_write: {self.total_cache_write_tokens:,}")
+        lines.append(f"  total:       {total:,}")
+        lines.append(f"  api calls:   {self.api_calls}")
+        if self.last_input_tokens > 0:
+            ctx_total = self.last_input_tokens + self.last_output_tokens + self.last_cache_read + self.last_cache_write
+            lines.append(f"")
+            lines.append(f"Last context window: {ctx_total:,}")
+            lines.append(f"  input:       {self.last_input_tokens:,}")
+            lines.append(f"  output:      {self.last_output_tokens:,}")
+            if self.last_cache_read > 0:
+                lines.append(f"  cache_read:  {self.last_cache_read:,}")
+            if self.last_cache_write > 0:
+                lines.append(f"  cache_write: {self.last_cache_write:,}")
+        if self.token_budget > 0:
+            pct = int(total / self.token_budget * 100)
+            lines.append(f"")
+            lines.append(f"Budget: {pct}% used")
+        return "\n".join(lines)
 
     def invalidate_context_cache(self):
         """Mark cached tree/git status as stale. Call after file mutations."""
