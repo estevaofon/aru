@@ -286,16 +286,32 @@ class TestSession:
         session.total_output_tokens = 500
         session.api_calls = 3
         summary = session.token_summary
-        assert "1,000" in summary or "1000" in summary
-        assert "calls: 3" in summary
+        assert "tokens: 1,500" in summary
+        assert "cost:" in summary
 
-    def test_token_summary_with_cache(self):
+    def test_token_summary_with_context(self):
+        session = Session()
+        session.total_input_tokens = 1000
+        session.total_output_tokens = 500
+        session.last_input_tokens = 800
+        session.last_output_tokens = 200
+        session.last_cache_read = 100
+        session.api_calls = 1
+        summary = session.token_summary
+        assert "context:" in summary
+        assert "cache_read:" in summary
+        assert "cost:" in summary
+
+    def test_cost_summary(self):
         session = Session()
         session.total_input_tokens = 100
         session.total_output_tokens = 50
         session.total_cache_read_tokens = 200
         session.api_calls = 1
-        assert "cached" in session.token_summary
+        summary = session.cost_summary
+        assert "Session cost:" in summary
+        assert "input:" in summary
+        assert "cache_read:" in summary
 
     def test_to_dict_and_from_dict(self):
         session = Session(session_id="test123")

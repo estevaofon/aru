@@ -21,6 +21,7 @@ SLASH_COMMANDS = [
     ("/skills", "List available skills", "/skills"),
     ("/agents", "List custom agents", "/agents"),
     ("/mcp", "List loaded MCP tools", "/mcp"),
+    ("/cost", "Show detailed token usage and cost", "/cost"),
     ("/quit", "Exit aru", "/quit"),
 ]
 
