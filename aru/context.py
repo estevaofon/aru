@@ -24,8 +24,8 @@ from __future__ import annotations
 # ── Constants ──────────────────────────────────────────────────────
 
 # Pruning: minimum chars that must be freeable to justify a prune pass.
-# Matches opencode's PRUNE_MINIMUM = 20_000 tokens (~80K chars @ 4 chars/token).
-PRUNE_MINIMUM_CHARS = 80_000  # ~20K tokens
+# Lower than opencode's 20K tokens to fire early and keep context ~30K tokens.
+PRUNE_MINIMUM_CHARS = 20_000  # ~5K tokens
 # Placeholder that replaces cleared tool_result content. Matches
 # cache_patch.py's _PRUNED_PLACEHOLDER so both layers produce identical
 # text when a tool output is cleared.
@@ -177,24 +177,20 @@ def _tool_result_content_len(msg: dict) -> int:
 
 
 def _get_prune_protect_chars(model_id: str = "default") -> int:
-    """Chars of recent history that must NEVER be pruned.
+    """Chars of recent tool-result content that must NEVER be pruned.
 
-    Flat value across all models, mirroring opencode's fixed
-    `PRUNE_PROTECT = 40_000` tokens (compaction.ts:36). At ~4 chars/token
-    that's 160K chars of tool-result content kept intact in the recent
-    window. Older tool_result blocks beyond this budget are eligible for
-    the lossy clear pass in `prune_history`.
-
-    Why flat (not scaled by model): opencode validated this in production
-    on contexts from 128K to 1M — scaling by ratio adds complexity without
-    improving behavior, and protecting too much in 1M-context models can
-    actually hurt prompt caching by keeping rarely-touched tail content warm.
+    Targets a ~30K token total context window. With ~5K tokens of
+    system prompt + tool definitions and ~7K of user/assistant text,
+    the tool output budget is ~18K tokens ≈ 65K chars. We protect
+    55K chars (~14K tokens) of recent tool output so pruning fires
+    at protect + PRUNE_MINIMUM = 55K + 20K = 75K chars (~19K tokens
+    of tool output), keeping the steady-state around 30K total.
 
     The `model_id` parameter is retained for signature compatibility with
     older call sites; it has no effect on the returned value.
     """
     del model_id  # unused — kept for signature compatibility
-    return 160_000
+    return 55_000
 
 
 def prune_history(

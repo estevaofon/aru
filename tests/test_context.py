@@ -37,16 +37,17 @@ class TestPruneHistory:
 
     def test_prunes_old_tool_results_when_over_threshold(self):
         """Should clear old tool_result content when total tool output
-        exceeds protect + minimum (opencode-aligned budget semantics).
+        exceeds protect + minimum (budget semantics).
 
         The budget walks backward over tool_result content chars only.
         Text and tool_use args don't count, so this test uses large
         tool_result payloads to actually trip the prune path.
         """
-        # Three rounds of read_file-sized outputs. Total ~300K chars
-        # of tool_result content — clears the 240K entry gate, and
-        # the 160K protect budget will cover only the most recent one.
-        big_output = "line of code\n" * 8_000  # ~100K chars
+        # Three rounds of tool outputs. Each ~30K chars, total ~90K chars.
+        # Entry gate: protect (55K) + minimum (20K) = 75K → 90K exceeds it.
+        # Protection budget (55K) covers the most recent block (30K) plus
+        # part of the middle, so at least tu_old gets cleared.
+        big_output = "line of code\n" * 2_300  # ~30K chars each
         messages = [
             {"role": "user", "content": "round 1"},
             {
@@ -97,7 +98,7 @@ class TestPruneHistory:
 
         # The older tool_result must have been cleared — at least one
         # of tu_old/tu_mid should now hold the placeholder, since only
-        # 160K chars worth fits inside the protect window.
+        # 55K chars worth fits inside the protect window.
         cleared_count = sum(
             1 for tu_id in ("tu_old", "tu_mid")
             if by_id[tu_id]["content"] == CLEARED_TOOL_RESULT

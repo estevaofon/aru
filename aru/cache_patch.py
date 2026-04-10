@@ -22,9 +22,9 @@ from __future__ import annotations
 # - Protect recent tool results within a token budget
 # - Only prune if there's enough to free (avoid churn)
 # - Walk backwards, protecting recent content first
-# OpenCode uses 40K protect / 20K minimum; we use chars (~4 chars/token)
-_PRUNE_PROTECT_CHARS = 160_000   # ~40K tokens — recent content always kept
-_PRUNE_MINIMUM_CHARS = 80_000    # ~20K tokens — only prune if this much is freeable
+# Aligned with context.py thresholds to keep context ~30K tokens.
+_PRUNE_PROTECT_CHARS = 55_000    # ~14K tokens — recent content always kept
+_PRUNE_MINIMUM_CHARS = 20_000    # ~5K tokens — only prune if this much is freeable
 _PRUNED_PLACEHOLDER = "[Old tool result cleared]"
 
 # Last API call metrics (updated on every internal API call)
