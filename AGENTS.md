@@ -32,6 +32,12 @@ aru/
 │   ├── base.py         # Shared instruction templates (BASE_INSTRUCTIONS, roles)
 │   ├── planner.py      # Planning agent — read-only tools, outputs structured plans
 │   └── executor.py     # Execution agent — all tools, implements plan steps
+├── plugins/
+│   ├── __init__.py     # Public API: tool, Hooks, HookEvent, PluginInput
+│   ├── tool_api.py     # @tool decorator for custom tools
+│   ├── custom_tools.py # Discovery, loading, and registration of custom tool files
+│   ├── hooks.py        # Hook system: Hooks, HookEvent, PluginInput
+│   └── manager.py      # PluginManager — loads plugins, fires hooks
 └── tools/
     ├── codebase.py     # 16 core tools (read/write/edit/search/bash/web/delegate)
     ├── ast_tools.py    # Tree-sitter Python AST analysis (classes, functions, imports)
@@ -99,12 +105,24 @@ Score = `0.50 * name_match + 0.30 * structural + 0.20 * recency`
 
 Tree-sitter based Python parser. Extracts imports, classes, functions, decorators with line numbers.
 
+### `plugins/` — Plugin System (OpenCode-compatible)
+
+Two layers:
+1. **Custom Tools**: Python files in `.aru/tools/` or `.agents/tools/` — simplest entry point
+2. **Plugins**: Full hook system via `PluginManager` — tools + lifecycle hooks
+
+Custom tool format: `@tool` decorator or bare `def fn() -> str`. Discovery: `~/.aru/tools/`, `.aru/tools/`, `~/.agents/tools/`, `.agents/tools/`. Later roots override earlier.
+
+Plugin hooks: `config`, `tool.execute.before/after`, `tool.definition`, `permission.ask`, `shell.env`, `session.compact`.
+
 ## Configuration
 
 - `.env` → `ANTHROPIC_API_KEY`
-- `aru.json` → permissions, model defaults, custom providers
+- `aru.json` → permissions, model defaults, custom providers, plugins, tools config
 - `.agents/commands/*.md` → custom slash commands
 - `skills/<name>/SKILL.md` → agentskills.io skills
+- `.aru/tools/*.py` → custom tools (Python)
+- `.aru/plugins/*.py` → custom plugins (Python)
 - `.aru/sessions/` → saved conversation sessions (JSON)
 
 ## Development

@@ -208,6 +208,38 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     paste_state = PasteState()
     prompt_session = _create_prompt_session(paste_state, config)
 
+    # Load custom tools (synchronous — fast, no network)
+    from aru.plugins.custom_tools import discover_custom_tools, register_custom_tools
+    _disabled_tools = config.disabled_tools if hasattr(config, "disabled_tools") else []
+    _custom_tool_descs = discover_custom_tools(disabled=_disabled_tools)
+    if _custom_tool_descs:
+        _ct_count = register_custom_tools(_custom_tool_descs)
+        console.print(f"[dim]Loaded {_ct_count} custom tool(s): {', '.join(d['name'] for d in _custom_tool_descs)}[/dim]")
+
+    # Load plugins (local imports only, no network)
+    from aru.plugins.manager import PluginManager
+    from aru.plugins.hooks import PluginInput
+    _plugin_mgr = PluginManager()
+    ctx.plugin_manager = _plugin_mgr
+
+    try:
+        _p_input = PluginInput(
+            directory=os.getcwd(),
+            config_path="aru.json" if os.path.isfile("aru.json") else "",
+            model_ref=session.model_ref,
+        )
+        _plugin_specs = config.plugin_specs if hasattr(config, "plugin_specs") else []
+        _plugin_count = await _plugin_mgr.load_all(_p_input, plugin_specs=_plugin_specs)
+        if _plugin_count:
+            plugin_tools = _plugin_mgr.get_plugin_tools()
+            if plugin_tools:
+                _pt_count = register_custom_tools(plugin_tools)
+                console.print(f"[dim]Loaded {_plugin_count} plugin(s): {', '.join(_plugin_mgr.plugin_names)} ({_pt_count} tool(s))[/dim]")
+            else:
+                console.print(f"[dim]Loaded {_plugin_count} plugin(s): {', '.join(_plugin_mgr.plugin_names)}[/dim]")
+    except Exception as exc:
+        console.print(f"[dim yellow]Warning: plugin loading failed: {exc}[/dim yellow]")
+
     # Startup: load MCP tools in background (don't block REPL)
     async def _load_mcp_background():
         from aru.tools.codebase import load_mcp_tools

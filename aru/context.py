@@ -420,34 +420,52 @@ def truncate_output(
     # Save full output to disk before truncating (like OpenCode)
     saved_path = _save_truncated_output(text)
 
-    # Truncate by lines
+    # Truncate by lines — keep head + tail so summaries at the end are visible
     if line_count > TRUNCATE_MAX_LINES:
         head = lines[:TRUNCATE_KEEP_START]
-        omitted = line_count - TRUNCATE_KEEP_START
+        tail = lines[-TRUNCATE_KEEP_END:]
+        omitted = line_count - TRUNCATE_KEEP_START - TRUNCATE_KEEP_END
         hint = _build_truncation_hint(source_file, source_tool, TRUNCATE_KEEP_START, saved_path)
         return (
             "".join(head)
             + f"\n\n[... {omitted:,} lines omitted ({line_count:,} total)]\n"
-            + hint + "\n"
+            + hint + "\n\n"
+            + "".join(tail)
         )
 
     # Truncate by bytes (lines fit but total bytes too large)
-    kept_lines: list[str] = []
-    total = 0
+    # Reserve ~20% of budget for tail lines
+    head_budget = int(TRUNCATE_MAX_BYTES * 0.75)
+    tail_budget = TRUNCATE_MAX_BYTES - head_budget
+
+    head_lines: list[str] = []
+    head_bytes = 0
     for line in lines:
         line_bytes = len(line.encode("utf-8", errors="replace"))
-        if total + line_bytes > TRUNCATE_MAX_BYTES:
+        if head_bytes + line_bytes > head_budget:
             break
-        kept_lines.append(line)
-        total += line_bytes
+        head_lines.append(line)
+        head_bytes += line_bytes
 
-    remaining = line_count - len(kept_lines)
-    hint = _build_truncation_hint(source_file, source_tool, len(kept_lines), saved_path)
+    # Collect tail lines within tail budget
+    tail_lines: list[str] = []
+    tail_bytes = 0
+    for line in reversed(lines[len(head_lines):]):
+        line_bytes = len(line.encode("utf-8", errors="replace"))
+        if tail_bytes + line_bytes > tail_budget:
+            break
+        tail_lines.append(line)
+        tail_bytes += line_bytes
+    tail_lines.reverse()
+
+    omitted = line_count - len(head_lines) - len(tail_lines)
+    hint = _build_truncation_hint(source_file, source_tool, len(head_lines), saved_path)
     return (
-        "".join(kept_lines)
+        "".join(head_lines)
         + f"\n\n[... truncated at ~{TRUNCATE_MAX_BYTES // 1024}KB — "
-        f"{remaining:,} more lines]\n"
-        + hint + "\n"
+        f"{omitted:,} lines omitted]\n"
+        + hint + "\n\n"
+        + "".join(tail_lines)
     )
 
 
@@ -659,6 +677,17 @@ async def compact_conversation(
     Falls back to a mechanical summary if the agent call fails.
     """
     from aru.providers import create_model
+
+    # Fire session.compact hook — plugins can pre-process history.
+    # Import is lazy here to avoid circular dependency (context ← runtime).
+    try:
+        from aru.runtime import get_ctx  # noqa: lazy to avoid circular dep
+        mgr = get_ctx().plugin_manager
+        if mgr is not None and mgr.loaded:
+            event = await mgr.fire("session.compact", {"history": history})
+            history = event.data.get("history", history)
+    except (LookupError, AttributeError, ImportError):
+        pass  # no plugin manager available — proceed without hooks
 
     prompt = build_compaction_prompt(history, plan_task, model_id=model_id)
 

@@ -119,6 +119,9 @@ class RuntimeContext:
     mcp_catalog_text: str = ""
     mcp_loaded_msg: str = ""
 
+    # -- Plugins --
+    plugin_manager: Any = None  # aru.plugins.manager.PluginManager (lazy to avoid circular)
+
 
 # ── ContextVar plumbing ──────────────────────────────────────────────
 

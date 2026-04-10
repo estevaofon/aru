@@ -61,8 +61,10 @@ class TestStatusBar:
         bar = StatusBar(interval=0.05)
         bar.set_text("Fixed")
         assert bar.current_text == "Fixed"
-        
-        time.sleep(0.06)
+        # Reset the clock so we have a clean starting point
+        bar._last_switch = time.monotonic()
+
+        time.sleep(0.07)
         bar._maybe_rotate()
         # After rotation, override is cleared by _maybe_rotate
         assert bar._override is None
@@ -141,7 +143,7 @@ class TestToolTracker:
         tracker = ToolTracker()
         tracker.start("t1", "Long Task")
         _, elapsed1 = tracker.active_labels[0]
-        time.sleep(0.01)
+        time.sleep(0.05)
         _, elapsed2 = tracker.active_labels[0]
         assert elapsed2 > elapsed1
 

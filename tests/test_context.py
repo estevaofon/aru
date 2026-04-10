@@ -139,43 +139,46 @@ class TestPruneHistory:
         assert result == []
 
 
+@patch("aru.context._save_truncated_output", return_value=None)
 class TestTruncateOutput:
     """Tests for truncate_output function."""
 
-    def test_no_truncation_under_limits(self):
+    def test_no_truncation_under_limits(self, _mock_save):
         """Should not truncate when under both limits."""
         output = "Short output"
         result = truncate_output(output)
         assert result == output
 
-    def test_truncates_long_output_by_lines(self):
-        """Should truncate when exceeding 500 lines."""
-        lines = ["line " + str(i) for i in range(600)]
-        output = "\n".join(lines)
-        result = truncate_output(output)
-        
-        # Should contain the marker
-        assert "[... N lines omitted]" in result or len(result) < len(output)
-
-    def test_truncates_long_output_by_bytes(self):
-        """Should truncate when exceeding 20KB."""
-        # 25KB of content
-        output = "x" * 25000
-        result = truncate_output(output)
-        
-        assert len(result) < len(output)
-        assert "[... N lines omitted]" in result or len(result) <= 20000
-
-    def test_preserves_beginning_and_end(self):
-        """Should keep first 350 and last 100 lines."""
+    def test_truncates_long_output_by_lines(self, _mock_save):
+        """Should truncate when exceeding max lines."""
         lines = [f"line {i}" for i in range(600)]
         output = "\n".join(lines)
         result = truncate_output(output)
-        
-        # Should start with line 0
+
+        assert len(result) < len(output)
+        assert "lines omitted" in result
+
+    def test_truncates_long_output_by_bytes(self, _mock_save):
+        """Should truncate when exceeding max bytes."""
+        # 25KB of content
+        output = "x" * 25000
+        result = truncate_output(output)
+
+        assert len(result) < len(output)
+        assert "lines omitted" in result or "truncated" in result
+
+    def test_preserves_beginning_and_end(self, _mock_save):
+        """Should keep head and tail lines."""
+        lines = [f"line {i}" for i in range(600)]
+        output = "\n".join(lines)
+        result = truncate_output(output)
+
+        # Should contain head
         assert "line 0" in result
-        # Should end with later lines
-        assert "line 5" in result or "line 59" in result
+        # Should contain tail (last 60 lines = lines 540-599)
+        assert "line 599" in result
+        # Middle should be omitted
+        assert "lines omitted" in result
 
 
 class TestShouldCompact:

@@ -54,13 +54,13 @@
         "web_fetch": "allow",
         "delegate_task": "allow",
         "edit": {
-            "*": "allow",
+            "*": "ask",
             "*.env": "deny",
             "*.env.*": "deny",
             "*.env.example": "allow"
         },
         "write": {
-            "*": "allow",
+            "*": "ask",
             "*.env": "deny"
         },
         "bash": {

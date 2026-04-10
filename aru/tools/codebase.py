@@ -264,7 +264,7 @@ def write_file(file_path: str, content: str) -> str:
     header = Text(file_path, style="bold")
     diff = _format_diff("", preview)
     if not check_permission("write", file_path, Group(header, Text(), diff)):
-        return f"Permission denied: write to {file_path}"
+        return f"PERMISSION DENIED by user: write to {file_path}. Do NOT retry this operation. Stop and ask the user for new instructions."
     try:
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
@@ -294,7 +294,7 @@ def write_files(file_list: list[dict]) -> str:
         parts.append(_format_diff("", preview))
         parts.append(Text())
     if not check_permission("write", ", ".join(e.get("path", "") for e in file_list), Group(*parts)):
-        return f"Permission denied: batch write of {len(file_list)} files"
+        return f"PERMISSION DENIED by user: batch write of {len(file_list)} files. Do NOT retry this operation. Stop and ask the user for new instructions."
 
     results = []
     errors = []
@@ -361,7 +361,7 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
     header = Text(file_path, style="bold")
     diff = _format_diff(old_string, new_string)
     if not check_permission("edit", file_path, Group(header, Text(), diff)):
-        return f"Permission denied: edit {file_path}"
+        return f"PERMISSION DENIED by user: edit {file_path}. Do NOT retry this operation. Stop and ask the user for new instructions."
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -408,7 +408,7 @@ def edit_files(edits: list[dict]) -> str:
         parts.append(_format_diff(old, new))
         parts.append(Text())
     if not check_permission("edit", ", ".join(e.get("path", "") for e in edits), Group(*parts)):
-        return f"Permission denied: batch edit of {len(edits)} files"
+        return f"PERMISSION DENIED by user: batch edit of {len(edits)} files. Do NOT retry this operation. Stop and ask the user for new instructions."
 
     results = []
     errors = []
@@ -762,15 +762,34 @@ def _is_long_running(command: str) -> bool:
     return any(pattern in cmd for pattern in BACKGROUND_PATTERNS)
 
 
-async def run_command(command: str, timeout: int = 60, working_directory: str = "") -> str:
+async def _fire_plugin_hook(event_name: str, data: dict) -> dict:
+    """Fire a plugin hook if the plugin manager is available. Returns the (mutated) data."""
+    try:
+        ctx = get_ctx()
+        mgr = ctx.plugin_manager
+        if mgr is not None and mgr.loaded:
+            event = await mgr.fire(event_name, data)
+            return event.data
+    except (LookupError, AttributeError):
+        pass
+    return data
+
+
+async def run_command(command: str, timeout: int = 60, working_directory: str = "", extra_env: dict | None = None) -> str:
     """Execute a shell command and return output (async, non-blocking).
 
     Args:
         command: The command to execute.
         timeout: Max seconds. Default 60.
         working_directory: Directory to run in. Default: cwd.
+        extra_env: Extra environment variables to inject (from plugins).
     """
     cwd = working_directory or os.getcwd()
+
+    # Merge extra environment variables from plugins
+    env = None
+    if extra_env and isinstance(extra_env, dict) and any(extra_env.values()):
+        env = {**os.environ, **{k: str(v) for k, v in extra_env.items() if v is not None}}
 
     # Long-running commands: start, capture initial output for a few seconds, then detach
     if _is_long_running(command):
@@ -781,6 +800,8 @@ async def run_command(command: str, timeout: int = 60, working_directory: str = 
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
             )
+            if env:
+                bg_kwargs["env"] = env
             if sys.platform != "win32":
                 bg_kwargs["start_new_session"] = True
             process = await asyncio.create_subprocess_shell(command, **bg_kwargs)
@@ -820,6 +841,8 @@ async def run_command(command: str, timeout: int = 60, working_directory: str = 
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
+        if env:
+            create_kwargs["env"] = env
         if sys.platform == "win32":
             create_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
@@ -879,8 +902,13 @@ async def bash(command: str, timeout: int = 60, working_directory: str = "") -> 
         Text(f"cwd: {cwd}", style="dim"),
     )
     if not check_permission("bash", command, cmd_display):
-        return f"Permission denied: {command}"
-    result = await run_command(command, timeout=timeout, working_directory=working_directory)
+        return f"PERMISSION DENIED by user: {command}. Do NOT retry this operation. Stop and ask the user for new instructions."
+
+    # Fire shell.env hook — plugins can inject environment variables
+    extra_env = await _fire_plugin_hook("shell.env", {"cwd": cwd, "command": command, "env": {}})
+    shell_env = extra_env.get("env") if isinstance(extra_env, dict) else None
+
+    result = await run_command(command, timeout=timeout, working_directory=working_directory, extra_env=shell_env)
     # Bash can modify files, so always invalidate cache
     _notify_file_mutation()
     return result

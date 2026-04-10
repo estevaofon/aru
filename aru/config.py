@@ -161,6 +161,8 @@ class AgentConfig:
     custom_agents: dict[str, CustomAgent] = field(default_factory=dict)
     plan_reviewer: bool = True
     tree_depth: int = 2  # max depth for directory tree in system prompt
+    disabled_tools: list[str] = field(default_factory=list)  # tools to skip loading
+    plugin_specs: list = field(default_factory=list)  # plugin specs from aru.json
 
     @property
     def has_instructions(self) -> bool:
@@ -515,6 +517,14 @@ def load_config(cwd: str | None = None) -> AgentConfig:
                         td = data["tree_depth"]
                         if isinstance(td, int) and 0 <= td <= 5:
                             config.tree_depth = td
+                    # Plugin specs
+                    if "plugins" in data and isinstance(data["plugins"], list):
+                        config.plugin_specs = data["plugins"]
+                    # Custom tools config
+                    if "tools" in data and isinstance(data["tools"], dict):
+                        tools_cfg = data["tools"]
+                        if "disabled" in tools_cfg and isinstance(tools_cfg["disabled"], list):
+                            config.disabled_tools = [str(t) for t in tools_cfg["disabled"]]
                     # Resolve instructions (local files, globs, URLs)
                     if "instructions" in data and isinstance(data["instructions"], list):
                         entries = [str(e) for e in data["instructions"] if isinstance(e, str)]

@@ -413,6 +413,42 @@ def resolve_permission(
 # Permission gate (user-facing prompt)
 # ---------------------------------------------------------------------------
 
+def _fire_permission_hook(mgr, category: str, subject: str) -> bool | None:
+    """Fire permission.ask hook through all plugin handlers.
+
+    Supports both sync and async handlers. Returns True/False if a handler
+    sets event.data["allow"], or None if no handler overrode the decision.
+    """
+    import asyncio
+    from aru.plugins.hooks import HookEvent
+
+    evt = HookEvent(hook="permission.ask", data={"category": category, "subject": subject})
+
+    for hooks_obj in mgr._hooks:
+        for handler in hooks_obj.get_handlers("permission.ask"):
+            try:
+                if asyncio.iscoroutinefunction(handler):
+                    # Async handler — run via the event loop
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Schedule as a task and wait with run_until_complete
+                        # won't work, so use a new loop in a thread
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            pool.submit(asyncio.run, handler(evt)).result(timeout=5)
+                    else:
+                        loop.run_until_complete(handler(evt))
+                else:
+                    handler(evt)
+            except Exception:
+                continue  # skip broken handlers
+
+            if "allow" in evt.data:
+                return bool(evt.data["allow"])
+
+    return None  # no handler overrode
+
+
 def check_permission(
     category: str,
     subject: str,
@@ -429,8 +465,20 @@ def check_permission(
     if action == "deny":
         return False
 
-    # action == "ask" -> prompt user
+    # Fire permission.ask hook — plugins can override the decision.
+    # check_permission runs in a sync context (called from tool threads),
+    # so we fire sync handlers directly and async handlers via the event loop.
     ctx = get_ctx()
+    mgr = getattr(ctx, "plugin_manager", None)
+    if mgr is not None and getattr(mgr, "loaded", False):
+        try:
+            override = _fire_permission_hook(mgr, category, subject)
+            if override is not None:
+                return override
+        except Exception:
+            pass  # never let plugin errors block permissions
+
+    # action == "ask" -> prompt user
     with ctx.permission_lock:
         # Re-check after acquiring lock (another thread may have resolved it)
         action2, pattern2 = resolve_permission(category, subject)
