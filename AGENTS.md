@@ -118,7 +118,8 @@ Plugin hooks: `config`, `tool.execute.before/after`, `tool.definition`, `permiss
 ## Configuration
 
 - `.env` → `ANTHROPIC_API_KEY`
-- `aru.json` → permissions, model defaults, custom providers, plugins, tools config
+- `~/.aru/config.json` → global user config (applies to all projects)
+- `aru.json` or `.aru/config.json` → project config (deep-merged over global)
 - `.agents/commands/*.md` → custom slash commands
 - `skills/<name>/SKILL.md` → agentskills.io skills
 - `.aru/tools/*.py` → custom tools (Python)

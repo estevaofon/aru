@@ -265,8 +265,47 @@ Without any `aru.json` config, aru applies safe defaults:
 - Bash → ~40 safe command prefixes auto-allowed (`ls`, `git status`, `grep`, etc.), rest → `ask`
 - Sensitive files (`*.env`, `*.env.*`) → `deny` for read/edit/write (except `*.env.example`)
 
-> `aru.json` can also be placed at `.aru/config.json`.
->
+#### Config file locations
+
+Aru loads configuration from two levels, with project settings overriding global ones:
+
+| Level | Path | Purpose |
+|-------|------|---------|
+| **Global (user)** | `~/.aru/config.json` | Defaults that apply to all projects (model, aliases, permissions, providers) |
+| **Project** | `aru.json` or `.aru/config.json` | Project-specific overrides |
+
+Global config is loaded first, then the project config is **deep-merged** on top — scalar values and lists are replaced, nested objects (like `permission`, `providers`, `model_aliases`) are merged recursively. This means you can set your preferred model and aliases globally and only override what's different per project.
+
+**Example `~/.aru/config.json`:**
+
+```json
+{
+  "default_model": "anthropic/claude-sonnet-4-6",
+  "model_aliases": {
+    "sonnet": "anthropic/claude-sonnet-4-6",
+    "opus": "anthropic/claude-opus-4-6"
+  },
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow"
+  }
+}
+```
+
+Then a project `aru.json` only needs project-specific settings:
+
+```json
+{
+  "default_model": "ollama/codellama",
+  "permission": {
+    "bash": { "pytest *": "allow" }
+  }
+}
+```
+
+The result: `default_model` becomes `ollama/codellama`, `model_aliases` come from global, and `permission` merges both levels (`read`, `glob`, `grep` from global + `bash` from project).
+
 > A full `aru.json` config reference here: [`aru.json`](./aru.json)
 
 ### AGENTS.md

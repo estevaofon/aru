@@ -195,6 +195,7 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                     )
                     pending_tool_uses[tool_id] = assistant_blocks[-1]
                     if accumulated[display._flushed_len:]:
+                        display.content = None
                         live.stop()
                         display.flush()
                         live.start()
@@ -279,6 +280,10 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                             "Moving on.[/yellow]"
                         )
                         break
+
+            # Clear live content before the Live context exits so its final
+            # render doesn't duplicate text that we print explicitly below.
+            display.content = None
 
         ctx.live = None
         ctx.display = None

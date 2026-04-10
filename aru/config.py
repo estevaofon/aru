@@ -436,6 +436,63 @@ def _discover_agents(search_roots: list[Path]) -> dict[str, CustomAgent]:
     return agents
 
 
+def _load_json_file(path: Path) -> dict | None:
+    """Read and parse a JSON file, returning None on any error."""
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+        data = json.loads(content)
+        return data if isinstance(data, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Override values win for scalars;
+    dicts are merged recursively; lists are replaced (not concatenated)."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _apply_config_data(config: AgentConfig, data: dict, root: Path) -> None:
+    """Apply a merged config dict to an AgentConfig object."""
+    if "permission" in data:
+        config.permissions = data["permission"]
+    if "providers" in data:
+        from aru.providers import load_providers_from_config
+        load_providers_from_config(data)
+    if "default_model" in data:
+        config.default_model = data["default_model"]
+    if "model_aliases" in data and isinstance(data["model_aliases"], dict):
+        config.model_aliases = data["model_aliases"]
+    if "plan_reviewer" in data:
+        config.plan_reviewer = bool(data["plan_reviewer"])
+    if "tree_depth" in data:
+        td = data["tree_depth"]
+        if isinstance(td, int) and 0 <= td <= 5:
+            config.tree_depth = td
+    if "plugins" in data and isinstance(data["plugins"], list):
+        config.plugin_specs = data["plugins"]
+    if "tools" in data and isinstance(data["tools"], dict):
+        tools_cfg = data["tools"]
+        if "disabled" in tools_cfg and isinstance(tools_cfg["disabled"], list):
+            config.disabled_tools = [str(t) for t in tools_cfg["disabled"]]
+    if "instructions" in data and isinstance(data["instructions"], list):
+        entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
+        config.rules_instructions = _resolve_instructions(entries, root)
+    if "agent" in data and isinstance(data["agent"], dict):
+        for agent_name, agent_data in data["agent"].items():
+            if agent_name in config.custom_agents and isinstance(agent_data, dict):
+                if "permission" in agent_data:
+                    config.custom_agents[agent_name].permission = agent_data["permission"]
+
+
 def load_config(cwd: str | None = None) -> AgentConfig:
     """Load agent configuration from AGENTS.md and .agents/ directory.
 
@@ -492,52 +549,27 @@ def load_config(cwd: str | None = None) -> AgentConfig:
     config.skills = _discover_skills(skill_roots)
     config.custom_agents = _discover_agents(skill_roots)
 
-    # Load opencode-style config (aru.json or .aru/config.json)
-    config_paths = [root / "aru.json", root / ".aru" / "config.json"]
-    for config_path in config_paths:
-        if config_path.is_file():
-            try:
-                content = config_path.read_text(encoding="utf-8")
-                data = json.loads(content)
-                if isinstance(data, dict):
-                    if "permission" in data:
-                        config.permissions = data["permission"]
-                    # Load provider configuration
-                    if "providers" in data:
-                        from aru.providers import load_providers_from_config
-                        load_providers_from_config(data)
-                    # Store default model and aliases for CLI
-                    if "default_model" in data:
-                        config.default_model = data["default_model"]
-                    if "model_aliases" in data and isinstance(data["model_aliases"], dict):
-                        config.model_aliases = data["model_aliases"]
-                    if "plan_reviewer" in data:
-                        config.plan_reviewer = bool(data["plan_reviewer"])
-                    if "tree_depth" in data:
-                        td = data["tree_depth"]
-                        if isinstance(td, int) and 0 <= td <= 5:
-                            config.tree_depth = td
-                    # Plugin specs
-                    if "plugins" in data and isinstance(data["plugins"], list):
-                        config.plugin_specs = data["plugins"]
-                    # Custom tools config
-                    if "tools" in data and isinstance(data["tools"], dict):
-                        tools_cfg = data["tools"]
-                        if "disabled" in tools_cfg and isinstance(tools_cfg["disabled"], list):
-                            config.disabled_tools = [str(t) for t in tools_cfg["disabled"]]
-                    # Resolve instructions (local files, globs, URLs)
-                    if "instructions" in data and isinstance(data["instructions"], list):
-                        entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
-                        config.rules_instructions = _resolve_instructions(entries, root)
-                    # Agent-level permission overrides from aru.json
-                    if "agent" in data and isinstance(data["agent"], dict):
-                        for agent_name, agent_data in data["agent"].items():
-                            if agent_name in config.custom_agents and isinstance(agent_data, dict):
-                                if "permission" in agent_data:
-                                    config.custom_agents[agent_name].permission = agent_data["permission"]
-                break
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                pass
+    # Load config: global (~/.aru/config.json) first, then project-level on top.
+    # Project values override global values via deep merge.
+    home = Path.home()
+    global_config_paths = [home / ".aru" / "config.json"]
+    project_config_paths = [root / "aru.json", root / ".aru" / "config.json"]
+
+    merged_data: dict = {}
+    for config_path in global_config_paths:
+        data = _load_json_file(config_path)
+        if data is not None:
+            merged_data = data
+            break
+
+    for config_path in project_config_paths:
+        data = _load_json_file(config_path)
+        if data is not None:
+            merged_data = _deep_merge(merged_data, data)
+            break
+
+    if merged_data:
+        _apply_config_data(config, merged_data, root)
 
     return config
 
