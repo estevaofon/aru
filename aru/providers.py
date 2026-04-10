@@ -330,34 +330,161 @@ def create_model(
     )
 
 
-def _make_cached_openai_chat_class():
-    """Create a CachedOpenAIChat subclass (lazy import to avoid top-level dependency)."""
+def _apply_cache_control(formatted_msg: dict) -> bool:
+    """Attach `cache_control: ephemeral` to a formatted OpenAI message.
+
+    Returns True if the marker was applied (i.e., the message had cacheable
+    content and wasn't already tagged). Skips messages whose content is not
+    a string or block list, messages already marked, and empty content.
+
+    Used by `CachedOpenAIChat` to tag system + last N user/assistant messages
+    for providers that honor OpenAI-style content blocks with `cache_control`
+    (DashScope/Qwen, and any OpenAI-compatible endpoint that mirrors the
+    Anthropic cache_control convention).
+    """
+    content = formatted_msg.get("content")
+    cache_tag = {"type": "ephemeral"}
+    if isinstance(content, str):
+        if not content:
+            return False
+        formatted_msg["content"] = [
+            {"type": "text", "text": content, "cache_control": cache_tag}
+        ]
+        return True
+    if isinstance(content, list) and content:
+        last = content[-1]
+        if isinstance(last, dict) and "cache_control" not in last:
+            last["cache_control"] = cache_tag
+            return True
+    return False
+
+
+def _make_cached_openai_chat_class(mark_recent_messages: bool = False):
+    """Create a CachedOpenAIChat subclass that injects prompt-cache markers.
+
+    DashScope (Qwen) and other OpenAI-compatible APIs support explicit prompt
+    caching via `cache_control: {"type": "ephemeral"}` on content blocks. This
+    subclass tags:
+
+    1. The **system message** — always. This is the minimum cache coverage
+       and is safe for any OpenAI-compatible provider that supports the marker
+       (unknown fields are ignored by providers that don't).
+
+    2. The **last 2 non-system / non-tool messages** — only when
+       `mark_recent_messages=True`. This unlocks prefix caching for the growing
+       conversation history (the big win: 5-8× cost reduction on multi-turn
+       sessions), but is gated because OpenAI's own API may not accept the
+       marker on user/assistant messages. The flag is wired from
+       `_create_provider_model` based on whether the provider has a custom
+       `base_url` — a strong signal that we're talking to a non-official
+       OpenAI endpoint (Qwen/DashScope/custom) that mirrors the Anthropic
+       convention.
+
+    Implementation: each of the 4 invoke methods (invoke/ainvoke plus stream
+    variants) pre-formats the full batch using the parent's `_format_message`,
+    tags the target messages via `_apply_cache_control`, stores the tagged
+    versions in `self._current_cache_tag_map` keyed by `id(original)`, and
+    then delegates to `super().<method>()`. The overridden `_format_message`
+    consults the map and returns the pre-tagged version when present.
+    """
     from agno.models.openai import OpenAIChat
     from agno.models.message import Message
 
     class CachedOpenAIChat(OpenAIChat):
-        """OpenAIChat subclass that injects cache_control into system messages.
+        _cache_recent_messages: bool = mark_recent_messages
 
-        DashScope (Qwen) and other OpenAI-compatible APIs support explicit prompt caching
-        via cache_control: {"type": "ephemeral"} on content blocks. This subclass
-        automatically adds that marker to system messages so the provider can cache
-        the system prompt between turns (up to 90% cost reduction on cached tokens).
-        """
+        # --- core hook ------------------------------------------------------
 
         def _format_message(self, message: Message, compress_tool_results: bool = False):
+            # If an invoke-level pre-tag map is active, use the tagged version
+            tag_map = getattr(self, "_current_cache_tag_map", None)
+            if tag_map is not None:
+                pre = tag_map.get(id(message))
+                if pre is not None:
+                    return pre
+
+            # Otherwise fall back to parent format + always-tag system
             formatted = super()._format_message(message, compress_tool_results)
-
-            if message.role == "system" and isinstance(formatted.get("content"), str):
-                text = formatted["content"]
-                formatted["content"] = [
-                    {
-                        "type": "text",
-                        "text": text,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-
+            if message.role == "system":
+                _apply_cache_control(formatted)
             return formatted
+
+        # --- batch pre-tagging ---------------------------------------------
+
+        def _build_cache_tag_map(self, messages, compress_tool_results: bool) -> dict:
+            """Format all messages up-front and tag system + last 2 recent.
+
+            Returns id(original_message) -> tagged formatted dict so the
+            overridden `_format_message` can substitute during super's
+            inline list comprehension.
+
+            Note: `OpenAIChat._format_message` rewrites `system` → `developer`
+            for newer OpenAI models. We check `Message.role` on the ORIGINAL
+            message (not the formatted dict) so the logic works regardless of
+            that rewrite.
+            """
+            # Use OpenAIChat's format directly (not self's) so the tag_map
+            # we're building doesn't cause recursive substitution.
+            base = [
+                OpenAIChat._format_message(self, m, compress_tool_results)
+                for m in messages
+            ]
+
+            # Tag the first system message (first Message with role=="system")
+            for orig, fmt in zip(messages, base):
+                if orig.role == "system":
+                    _apply_cache_control(fmt)
+                    break
+
+            # Optionally tag the last 2 non-system / non-tool messages.
+            # Iterate original+formatted in reverse so role checks stay
+            # on the unmodified Message role.
+            if self._cache_recent_messages:
+                marked = 0
+                for orig, fmt in zip(reversed(messages), reversed(base)):
+                    if marked >= 2:
+                        break
+                    if orig.role in ("system", "tool"):
+                        continue
+                    if _apply_cache_control(fmt):
+                        marked += 1
+
+            return {id(orig): fmt for orig, fmt in zip(messages, base)}
+
+        # --- invoke overrides: set up tag map, delegate to parent -----------
+
+        def invoke(self, messages, assistant_message, **kwargs):
+            compress = kwargs.get("compress_tool_results", False)
+            self._current_cache_tag_map = self._build_cache_tag_map(messages, compress)
+            try:
+                return super().invoke(messages, assistant_message, **kwargs)
+            finally:
+                self._current_cache_tag_map = None
+
+        async def ainvoke(self, messages, assistant_message, **kwargs):
+            compress = kwargs.get("compress_tool_results", False)
+            self._current_cache_tag_map = self._build_cache_tag_map(messages, compress)
+            try:
+                return await super().ainvoke(messages, assistant_message, **kwargs)
+            finally:
+                self._current_cache_tag_map = None
+
+        def invoke_stream(self, messages, assistant_message, **kwargs):
+            compress = kwargs.get("compress_tool_results", False)
+            self._current_cache_tag_map = self._build_cache_tag_map(messages, compress)
+            try:
+                yield from super().invoke_stream(messages, assistant_message, **kwargs)
+            finally:
+                self._current_cache_tag_map = None
+
+        async def ainvoke_stream(self, messages, assistant_message, **kwargs):
+            compress = kwargs.get("compress_tool_results", False)
+            self._current_cache_tag_map = self._build_cache_tag_map(messages, compress)
+            try:
+                async for item in super().ainvoke_stream(messages, assistant_message, **kwargs):
+                    yield item
+            finally:
+                self._current_cache_tag_map = None
 
     return CachedOpenAIChat
 
@@ -400,7 +527,14 @@ def _create_provider_model(
             }
         params.update(kwargs)
         if cache_system_prompt:
-            CachedOpenAIChat = _make_cached_openai_chat_class()
+            # Only mark recent messages with cache_control when the provider
+            # has a custom base_url (DashScope/Qwen/custom OpenAI-compat).
+            # Official OpenAI's API may reject the marker on user/assistant
+            # messages — for them, keep system-only caching.
+            mark_recent = bool(provider.base_url)
+            CachedOpenAIChat = _make_cached_openai_chat_class(
+                mark_recent_messages=mark_recent
+            )
             return CachedOpenAIChat(**params)
         from agno.models.openai import OpenAIChat
         return OpenAIChat(**params)
@@ -463,7 +597,14 @@ def _create_provider_model(
             }
         params.update(kwargs)
         if cache_system_prompt:
-            CachedOpenAIChat = _make_cached_openai_chat_class()
+            # Fallback branch always means "unknown OpenAI-compat provider"
+            # — if there's a base_url it's a custom endpoint that may honor
+            # the cache_control marker. Without base_url we're in an odd
+            # state (unknown type, no endpoint) — default to system-only.
+            mark_recent = bool(provider.base_url)
+            CachedOpenAIChat = _make_cached_openai_chat_class(
+                mark_recent_messages=mark_recent
+            )
             return CachedOpenAIChat(**params)
         from agno.models.openai import OpenAIChat
         return OpenAIChat(**params)
