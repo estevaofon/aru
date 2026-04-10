@@ -47,6 +47,23 @@ TRUNCATE_MAX_LINE_LENGTH = 1500  # chars per individual line (prevents minified 
 # Directory for saving full truncated outputs (like opencode pattern)
 TRUNCATE_SAVE_DIR = ".aru/truncated"
 
+# Compaction: chars of recent conversation preserved verbatim post-compact.
+#
+# Separate from the prune protect window (160K) because they measure
+# different things:
+#   - Prune protect: "how much tool_result content stays intact"
+#   - Compact recent: "how much full-message history stays verbatim after
+#     the summary replaces the older portion"
+#
+# Set to 80K chars (~20K tokens) — half the prune window. Rationale:
+# with the compactor now running on the main model (not a small one),
+# summaries are faithful enough that we don't need 40K of recent overlap
+# as a safety net. 20K still covers 3-6 recent turns verbatim, which
+# mirrors the "last few exchanges" a human would re-read to resume work.
+# Going to zero would match opencode exactly but requires the reactive
+# overflow replay flow we haven't implemented yet.
+COMPACT_RECENT_CHARS = 80_000
+
 # Compaction: trigger when per-call input tokens approach real overflow.
 # Matches opencode's philosophy: only fire near the model's actual context
 # limit, not routinely. Routine context reduction is handled by prune_history
@@ -491,19 +508,29 @@ def would_prune(history: list[dict], model_id: str = "default") -> bool:
 def _split_history(history: list[dict], model_id: str = "default") -> tuple[list[dict], list[dict]]:
     """Split history into old (to summarize) and recent (to keep intact).
 
-    Uses the same protection window as pruning. Defensively, the first
-    user turn (index 0) is always pulled into `recent` so the original
-    ask survives literal even through a full compaction — the compactor
-    extracts it into the `## Goal` section of the summary, but keeping
-    it in recent too means the agent can quote it verbatim afterward.
+    Uses `COMPACT_RECENT_CHARS` (80K chars ≈ 20K tokens) as the "recent"
+    budget — half of the prune protect window. Rationale: the compactor
+    now runs on the main model and produces high-fidelity summaries, so
+    we don't need 40K of recent overlap as a safety net. 20K covers 3-6
+    recent turns verbatim, which is enough to absorb the gap between
+    the last summarized state and the next turn.
+
+    Defensively, the first user turn (index 0) is always pulled into
+    `recent` so the original ask survives literal even through a full
+    compaction — the compactor extracts it into the `## Goal` section
+    of the summary, but keeping it in recent too means the agent can
+    quote it verbatim afterward.
+
+    The `model_id` parameter is retained for signature compatibility;
+    the recent budget is a flat value not scaled by model context.
     """
+    del model_id  # unused — recent budget is flat across models
     from aru.history_blocks import item_char_len
-    protect_chars = _get_prune_protect_chars(model_id)
     protected = 0
     split_idx = len(history)
     for i in range(len(history) - 1, -1, -1):
         msg_len = item_char_len(history[i])
-        if protected + msg_len <= protect_chars:
+        if protected + msg_len <= COMPACT_RECENT_CHARS:
             protected += msg_len
             split_idx = i
         else:
@@ -617,10 +644,20 @@ async def compact_conversation(
 ) -> list[dict[str, str]]:
     """Run the compaction agent to summarize and replace history.
 
-    Uses a small/fast model for the summarization to minimize cost.
-    Falls back to simple truncation if the agent call fails.
+    Uses the **same model** as the main session (`model_ref`), not a
+    cheaper small model. Rationale:
+
+    - Compaction is rare (only on real overflow, ~0-2× per long session).
+    - The summary is the *only* persistent record of pre-window history.
+    - A weaker compactor risks dropping subtle decisions that the main
+      model would have caught — and once dropped, they cannot be recovered
+      mid-session.
+    - The marginal cost (Sonnet: ~$0.20-0.40 per session; Opus: a few
+      dollars) is justified by the fidelity gain on a non-recoverable
+      step.
+
+    Falls back to a mechanical summary if the agent call fails.
     """
-    from aru.runtime import get_ctx
     from aru.providers import create_model
 
     prompt = build_compaction_prompt(history, plan_task, model_id=model_id)
@@ -628,16 +665,17 @@ async def compact_conversation(
     try:
         from agno.agent import Agent
 
-        small_ref = get_ctx().small_model_ref
         compactor = Agent(
             name="Compactor",
-            model=create_model(small_ref, max_tokens=4096),
+            model=create_model(model_ref, max_tokens=4096),
             instructions=(
                 "You summarize coding conversations concisely. Output ONLY the requested sections, no preamble. "
                 "Preserve: user goals, explicit instructions/preferences, file paths with line numbers, "
-                "function/class names that were modified, what remains to be done, AND verbatim excerpts "
-                "from any file contents shown in the conversation (signatures, critical constants, "
-                "bug-related lines) under the '## File contents (key excerpts)' section. "
+                "function/class names that were modified, what remains to be done. "
+                "For the '## File contents (key excerpts)' section, use your judgment: "
+                "if a file was central to the work (being debugged, actively edited, or referenced "
+                "in a decision), include the critical lines verbatim; if a file was only briefly "
+                "read for context, just list the path. Do not mechanically copy everything. "
                 "Drop: greetings, reasoning chains, redundant tool output, transient status messages."
             ),
             markdown=True,
