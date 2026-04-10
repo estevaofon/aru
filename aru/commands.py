@@ -21,6 +21,7 @@ SLASH_COMMANDS = [
     ("/skills", "List available skills", "/skills"),
     ("/agents", "List custom agents", "/agents"),
     ("/mcp", "List loaded MCP tools", "/mcp"),
+    ("/undo", "Undo last turn — restore files and/or conversation", "/undo"),
     ("/cost", "Show detailed token usage and cost", "/cost"),
     ("/quit", "Exit aru", "/quit"),
 ]
@@ -83,6 +84,7 @@ def _show_help(config) -> None:
     table.add_row("/skills", "List available skills")
     table.add_row("/agents", "List custom agents")
     table.add_row("/mcp", "List loaded MCP tools")
+    table.add_row("/undo", "Undo last turn (restore files and/or conversation)")
     table.add_row("/help", "Show this help")
     table.add_row("/quit", "Exit aru")
     table.add_row("! <cmd>", "Run shell command")

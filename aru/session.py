@@ -386,6 +386,24 @@ class Session:
             return f"[yellow]Token budget at {pct:.0f}%[/yellow]"
         return None
 
+    def undo_last_turn(self) -> int:
+        """Remove the last complete turn (user message + assistant/tool responses).
+
+        Pops backward from the end of history until the last user message
+        (inclusive) is removed. Returns the number of messages removed.
+        """
+        if not self.history:
+            return 0
+        removed = 0
+        # Pop from the end until we've removed one user message
+        while self.history:
+            msg = self.history.pop()
+            removed += 1
+            if msg["role"] == "user":
+                break
+        self.updated_at = datetime.now().isoformat(timespec="milliseconds")
+        return removed
+
     def add_message(self, role: str, content):
         """Append a message to history.
 

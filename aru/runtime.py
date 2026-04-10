@@ -122,6 +122,9 @@ class RuntimeContext:
     # -- Plugins --
     plugin_manager: Any = None  # aru.plugins.manager.PluginManager (lazy to avoid circular)
 
+    # -- Checkpoints --
+    checkpoint_manager: Any = None  # aru.checkpoints.CheckpointManager (lazy)
+
 
 # ── ContextVar plumbing ──────────────────────────────────────────────
 

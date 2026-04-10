@@ -49,7 +49,7 @@ aru/
 
 ### CLI Modules (refactored from `cli.py`)
 
-- **`cli.py`**: Entry point (`run_cli()`), main async REPL loop, argument parsing
+- **`cli.py`**: Entry point (`run_cli()`, `run_oneshot()`), main async REPL loop, argument parsing, non-interactive mode
 - **`agent_factory.py`**: Creates general-purpose and custom agents with tools and instructions
 - **`commands.py`**: Slash command definitions, help display, shell execution, user prompts
 - **`completers.py`**: Input completions, paste detection, `@file` mention resolution
@@ -91,6 +91,7 @@ Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured 
 
 | Category | Tools |
 |----------|-------|
+| Session | `/undo` (remove last turn from history) |
 | File I/O | `read_file`, `write_file`, `edit_file` |
 | Search | `glob_search`, `grep_search`, `rank_files`, `list_directory` |
 | Shell | `bash` |
@@ -130,6 +131,7 @@ Plugin hooks: `config`, `tool.execute.before/after`, `tool.definition`, `permiss
 
 - **Python:** 3.13+
 - **Entry point:** `aru = "aru.cli:main"` (pyproject.toml)
+- **Non-interactive mode:** `aru "prompt"` (one-shot with tools), `aru --print "prompt"` (text-only, no tools), `echo "prompt" | aru` (piped input)
 - **Async throughout:** asyncio, `arun()` for agent execution
 - **Tests:** `tests/` directory, use `pytest-asyncio` with `asyncio_mode = "auto"`
 

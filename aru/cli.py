@@ -203,6 +203,11 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     ctx.on_file_mutation = session.invalidate_context_cache
     atexit.register(lambda: cleanup_processes(ctx.tracked_processes))
 
+    # Initialize checkpoint manager for undo/rewind support
+    from aru.checkpoints import CheckpointManager
+    ctx.checkpoint_manager = CheckpointManager(session.session_id)
+    _turn_counter = 0
+
     planner = None
     executor = None
     paste_state = PasteState()
@@ -329,6 +334,64 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         # Reset "allow all" approvals for each new user message
         perm_reset_session()
 
+        if user_input.lower() == "/undo":
+            affected_files = ctx.checkpoint_manager.get_last_snapshot_files()
+            if not affected_files and not session.history:
+                console.print("[dim]Nothing to undo.[/dim]")
+                continue
+
+            # Show what will be reverted
+            if affected_files:
+                cwd = os.getcwd()
+                console.print("[bold]Files that will be restored:[/bold]")
+                for f in affected_files:
+                    rel = os.path.relpath(f, cwd) if f.startswith(cwd) else f
+                    console.print(f"  [cyan]{rel}[/cyan]")
+
+            console.print()
+            console.print("[bold]Restore options:[/bold]")
+            console.print("  [cyan](b)[/cyan] Restore code and conversation (both)")
+            console.print("  [cyan](c)[/cyan] Restore only code (keep conversation)")
+            console.print("  [cyan](v)[/cyan] Restore only conversation (keep code)")
+            console.print("  [cyan](n)[/cyan] Cancel")
+            try:
+                choice = console.input("[bold yellow]Choice (b/c/v/n):[/bold yellow] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+
+            if choice in ("n", ""):
+                console.print("[dim]Cancelled.[/dim]")
+                continue
+
+            restored_files = []
+            msgs_removed = 0
+
+            if choice in ("b", "c"):
+                # Restore files from checkpoint
+                restored_files, _ = ctx.checkpoint_manager.undo_last_turn()
+
+            if choice in ("b", "v"):
+                # Remove last turn from conversation
+                msgs_removed = session.undo_last_turn()
+
+            parts = []
+            if restored_files:
+                cwd = os.getcwd()
+                for f in restored_files:
+                    rel = os.path.relpath(f, cwd) if f.startswith(cwd) else f
+                    parts.append(f"  [cyan]{rel}[/cyan]")
+                console.print(f"[green]Restored {len(restored_files)} file(s):[/green]")
+                for p in parts:
+                    console.print(p)
+                session.invalidate_context_cache()
+            if msgs_removed:
+                console.print(f"[green]Removed {msgs_removed} message(s) from conversation.[/green]")
+            if not restored_files and not msgs_removed:
+                console.print("[dim]Nothing was changed.[/dim]")
+            else:
+                store.save(session)
+            continue
+
         if user_input.lower() in ("/quit", "/exit", "quit", "exit"):
             store.save(session)
             console.print(f"\n[dim]Session saved: {session.session_id}[/dim]")
@@ -454,6 +517,10 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 padding=(1, 2),
             ))
             continue
+
+        # Begin a new checkpoint turn for undo support
+        _turn_counter += 1
+        ctx.checkpoint_manager.begin_turn(_turn_counter)
 
         if user_input.startswith("! "):
             cmd = user_input[2:].strip()
@@ -609,6 +676,72 @@ def _list_sessions_and_exit():
     console.print(f"\n[dim]Resume with: aru --resume <id>[/dim]")
 
 
+async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: bool = False):
+    """Run a single prompt non-interactively and exit.
+
+    Args:
+        prompt: The user prompt to execute.
+        print_only: If True, run without tools (text-only response).
+        skip_permissions: If True, skip all permission checks.
+    """
+    from aru.runtime import init_ctx
+    from aru.config import load_config
+    from aru.cache_patch import apply_cache_patch
+
+    apply_cache_patch()
+    ctx = init_ctx(console=console, skip_permissions=skip_permissions)
+
+    config = load_config()
+    session = Session()
+    if config.default_model:
+        session.model_ref = config.default_model
+
+    ctx.model_id = session.model_id
+    small_ref = config.model_aliases.get("small") if config else None
+    if not small_ref:
+        from aru.providers import resolve_model_ref
+        provider_key, _ = resolve_model_ref(session.model_ref)
+        _small_defaults = {
+            "anthropic": "anthropic/claude-haiku-4-5",
+            "openai": "openai/gpt-4o-mini",
+            "groq": "groq/llama-3.1-8b-instant",
+            "deepseek": "deepseek/deepseek-chat",
+            "ollama": "ollama/llama3.1",
+        }
+        small_ref = _small_defaults.get(provider_key, session.model_ref)
+    ctx.small_model_ref = small_ref
+
+    extra_instructions = config.get_extra_instructions()
+
+    if print_only:
+        # Text-only mode: no tools, just a direct LLM call
+        from agno.agent import Agent
+        from aru.providers import create_model
+        from aru.agents.base import build_instructions
+
+        agent = Agent(
+            name="Aru",
+            model=create_model(session.model_ref, max_tokens=8192),
+            tools=[],
+            instructions=build_instructions("general", extra_instructions),
+            markdown=True,
+        )
+        response = await agent.arun(prompt)
+        if response and response.content:
+            # Print raw text to stdout for piping
+            print(response.content)
+    else:
+        # Full mode with tools
+        from aru.runner import build_env_context
+        env_ctx = build_env_context(session)
+        agent = create_general_agent(session, config, env_context=env_ctx)
+        session.add_message("user", prompt)
+        await run_agent_capture(agent, prompt, session)
+
+        if session.token_summary:
+            console.print(f"[dim]{session.token_summary}[/dim]")
+
+
 def main():
     """Entry point for the aru CLI."""
     from dotenv import load_dotenv
@@ -616,6 +749,7 @@ def main():
     load_dotenv()
     args = sys.argv[1:]
     skip_permissions = "--dangerously-skip-permissions" in args
+    print_only = "--print" in args or "-p" in args
 
     if "--list" in args:
         _list_sessions_and_exit()
@@ -629,6 +763,39 @@ def main():
         else:
             resume_id = "last"
 
+    # Collect positional arguments (non-flag, non-flag-value)
+    flags_with_value = {"--resume"}
+    positional = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.startswith("--") or arg.startswith("-"):
+            if arg in flags_with_value:
+                skip_next = True
+            continue
+        positional.append(arg)
+
+    # Piped stdin: echo "fix bug" | aru
+    if not sys.stdin.isatty() and not positional:
+        piped_input = sys.stdin.read().strip()
+        if piped_input:
+            positional = [piped_input]
+
+    # One-shot mode: aru "fix the bug" or aru --print "explain this"
+    if positional:
+        prompt = " ".join(positional)
+        try:
+            asyncio.run(run_oneshot(prompt, print_only=print_only, skip_permissions=skip_permissions))
+        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
+            pass
+        except Exception as e:
+            from rich.markup import escape
+            console.print(f"\n[bold red]Fatal error: {escape(str(e))}[/bold red]")
+        return
+
+    # Interactive REPL mode
     try:
         asyncio.run(run_cli(skip_permissions=skip_permissions, resume_id=resume_id))
     except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
