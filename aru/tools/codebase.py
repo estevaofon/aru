@@ -72,15 +72,15 @@ def clear_read_cache():
     get_ctx().read_cache.clear()
 
 
-def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 8_000) -> str:
+def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: int = 12_000) -> str:
     """Read file contents. Returns chunked output for large files.
 
     Args:
         file_path: Path to the file (absolute or relative).
         start_line: First line (1-indexed, inclusive). 0 = beginning.
         end_line: Last line (1-indexed, inclusive). 0 = end.
-        max_size: Max bytes before truncation. Default 8KB.
-            Set to 0 to read the full file in chunks — each chunk up to ~25KB.
+        max_size: Max bytes before truncation. Default 12KB.
+            Set to 0 to read the full file in chunks — each chunk up to ~40KB.
             The first chunk includes a continuation hint so you can call again
             with start_line to get the next chunk.
     """
@@ -519,15 +519,15 @@ def glob_search(pattern: str, directory: str = ".") -> str:
     return "\n".join(matches)
 
 
-def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context_lines: int = 5) -> str:
+def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context_lines: int = 10) -> str:
     """Search for a regex pattern in file contents.
 
     Args:
         pattern: Regular expression pattern to search for.
         directory: Directory to search in. Defaults to current directory.
         file_glob: Optional glob to filter which files to search (e.g. '*.py').
-        context_lines: Lines of context before and after each match (like grep -C). Default 5.
-            Use 0 for file-level matches only. Use 20+ for full function bodies.
+        context_lines: Lines of context before and after each match (like grep -C). Default 10.
+            Use 0 for file-level matches only. Use 30+ for full function bodies.
     """
     import re
 

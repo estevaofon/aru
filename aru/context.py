@@ -24,8 +24,8 @@ from __future__ import annotations
 # ── Constants ──────────────────────────────────────────────────────
 
 # Pruning: minimum chars that must be freeable to justify a prune pass.
-# Lower than opencode's 20K tokens to fire early and keep context ~30K tokens.
-PRUNE_MINIMUM_CHARS = 20_000  # ~5K tokens
+# Matches opencode's PRUNE_MINIMUM = 20_000 tokens (~80K chars @ 4 chars/token).
+PRUNE_MINIMUM_CHARS = 80_000  # ~20K tokens
 # Placeholder that replaces cleared tool_result content. Matches
 # cache_patch.py's _PRUNED_PLACEHOLDER so both layers produce identical
 # text when a tool output is cleared.
@@ -48,21 +48,9 @@ TRUNCATE_MAX_LINE_LENGTH = 1500  # chars per individual line (prevents minified 
 TRUNCATE_SAVE_DIR = ".aru/truncated"
 
 # Compaction: chars of recent conversation preserved verbatim post-compact.
-#
-# Separate from the prune protect window (160K) because they measure
-# different things:
-#   - Prune protect: "how much tool_result content stays intact"
-#   - Compact recent: "how much full-message history stays verbatim after
-#     the summary replaces the older portion"
-#
-# Set to 80K chars (~20K tokens) — half the prune window. Rationale:
-# with the compactor now running on the main model (not a small one),
-# summaries are faithful enough that we don't need 40K of recent overlap
-# as a safety net. 20K still covers 3-6 recent turns verbatim, which
-# mirrors the "last few exchanges" a human would re-read to resume work.
-# Going to zero would match opencode exactly but requires the reactive
-# overflow replay flow we haven't implemented yet.
-COMPACT_RECENT_CHARS = 80_000
+# Uses the same budget as prune protect (160K chars ≈ 40K tokens) to match
+# opencode's approach where the split point mirrors the prune window.
+COMPACT_RECENT_CHARS = 160_000
 
 # Compaction: trigger when per-call input tokens approach real overflow.
 # Matches opencode's philosophy: only fire near the model's actual context
@@ -177,20 +165,24 @@ def _tool_result_content_len(msg: dict) -> int:
 
 
 def _get_prune_protect_chars(model_id: str = "default") -> int:
-    """Chars of recent tool-result content that must NEVER be pruned.
+    """Chars of recent history that must NEVER be pruned.
 
-    Targets a ~30K token total context window. With ~5K tokens of
-    system prompt + tool definitions and ~7K of user/assistant text,
-    the tool output budget is ~18K tokens ≈ 65K chars. We protect
-    55K chars (~14K tokens) of recent tool output so pruning fires
-    at protect + PRUNE_MINIMUM = 55K + 20K = 75K chars (~19K tokens
-    of tool output), keeping the steady-state around 30K total.
+    Flat value across all models, mirroring opencode's fixed
+    `PRUNE_PROTECT = 40_000` tokens (compaction.ts:36). At ~4 chars/token
+    that's 160K chars of tool-result content kept intact in the recent
+    window. Older tool_result blocks beyond this budget are eligible for
+    the lossy clear pass in `prune_history`.
+
+    Why flat (not scaled by model): opencode validated this in production
+    on contexts from 128K to 1M — scaling by ratio adds complexity without
+    improving behavior, and protecting too much in 1M-context models can
+    actually hurt prompt caching by keeping rarely-touched tail content warm.
 
     The `model_id` parameter is retained for signature compatibility with
     older call sites; it has no effect on the returned value.
     """
     del model_id  # unused — kept for signature compatibility
-    return 55_000
+    return 160_000
 
 
 def prune_history(
