@@ -114,7 +114,7 @@ Two layers:
 
 Custom tool format: `@tool` decorator or bare `def fn() -> str`. Discovery: `~/.aru/tools/`, `.aru/tools/`, `~/.agents/tools/`, `.agents/tools/`. Later roots override earlier.
 
-Plugin hooks: `config`, `tool.execute.before/after`, `tool.definition`, `permission.ask`, `shell.env`, `session.compact`.
+Plugin hooks: `config`, `tool.execute.before/after`, `tool.definition`, `permission.ask`, `shell.env`, `session.compact`, `chat.message`, `chat.params`, `chat.system.transform`, `chat.messages.transform`, `command.execute.before`, `event`.
 
 ## Configuration
 

@@ -22,3 +22,4 @@ coverage.json
 .pypirc
 publish.ps1
 docs/agent-coding-references/ac-core-spec.md
+docs/agent-explorer-system-spec.md

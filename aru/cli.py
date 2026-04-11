@@ -228,10 +228,20 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     ctx.plugin_manager = _plugin_mgr
 
     try:
+        _config_dict = {
+            "default_model": config.default_model,
+            "model_aliases": config.model_aliases,
+            "permissions": config.permissions,
+            "plugin_specs": config.plugin_specs,
+            "disabled_tools": config.disabled_tools,
+            "plan_reviewer": config.plan_reviewer,
+        }
         _p_input = PluginInput(
             directory=os.getcwd(),
             config_path="aru.json" if os.path.isfile("aru.json") else "",
             model_ref=session.model_ref,
+            config=_config_dict,
+            session=session,
         )
         _plugin_specs = config.plugin_specs if hasattr(config, "plugin_specs") else []
         _plugin_count = await _plugin_mgr.load_all(_p_input, plugin_specs=_plugin_specs)
@@ -251,6 +261,17 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
         await load_mcp_tools()
 
     asyncio.create_task(_load_mcp_background())
+
+    # Event: session.start
+    if _plugin_mgr.loaded:
+        try:
+            await _plugin_mgr.publish("session.start", {
+                "session_id": getattr(session, "id", None),
+                "model_ref": session.model_ref,
+                "directory": os.getcwd(),
+            })
+        except Exception:
+            pass
 
     while True:
         try:
@@ -393,6 +414,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             continue
 
         if user_input.lower() in ("/quit", "/exit", "quit", "exit"):
+            # Event: session.end
+            if _plugin_mgr.loaded:
+                try:
+                    await _plugin_mgr.publish("session.end", {
+                        "session_id": getattr(session, "id", None),
+                    })
+                except Exception:
+                    pass
             store.save(session)
             console.print(f"\n[dim]Session saved: {session.session_id}[/dim]")
             console.print(f"[dim]Resume with:[/dim] [bold cyan]aru --resume {session.session_id}[/bold cyan]")
@@ -578,6 +607,26 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             parts = user_input[1:].split(None, 1)
             cmd_name = parts[0].lower()
             cmd_args = parts[1] if len(parts) > 1 else ""
+
+            # Hook: command.execute.before — plugins can block or modify
+            _cmd_blocked = False
+            try:
+                _mgr = ctx.plugin_manager
+                if _mgr is not None and _mgr.loaded:
+                    _cmd_event = await _mgr.fire("command.execute.before", {
+                        "command": cmd_name,
+                        "command_args": cmd_args,
+                        "blocked": False,
+                    })
+                    if _cmd_event.data.get("blocked"):
+                        console.print(f"[yellow]Command /{cmd_name} blocked by plugin.[/yellow]")
+                        _cmd_blocked = True
+                    else:
+                        cmd_args = _cmd_event.data.get("command_args", cmd_args)
+            except Exception:
+                pass
+            if _cmd_blocked:
+                continue
 
             if cmd_name in config.commands:
                 cmd_def = config.commands[cmd_name]

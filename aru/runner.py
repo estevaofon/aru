@@ -26,6 +26,50 @@ from aru.permissions import get_skip_permissions
 _MUTATION_TOOLS = {"write_file", "edit_file", "bash"}
 
 
+async def _fire_plugin_hook(event_name: str, data: dict) -> dict:
+    """Fire a plugin hook if the plugin manager is available. Returns (mutated) data."""
+    try:
+        from aru.runtime import get_ctx
+        ctx = get_ctx()
+        mgr = ctx.plugin_manager
+        if mgr is not None and mgr.loaded:
+            event = await mgr.fire(event_name, data)
+            return event.data
+    except (LookupError, AttributeError):
+        pass
+    return data
+
+
+async def _publish_event(event_type: str, data: dict | None = None) -> None:
+    """Publish an event to the plugin event bus (fire-and-forget)."""
+    try:
+        from aru.runtime import get_ctx
+        ctx = get_ctx()
+        mgr = ctx.plugin_manager
+        if mgr is not None and mgr.loaded:
+            await mgr.publish(event_type, data or {})
+    except (LookupError, AttributeError):
+        pass
+
+
+async def _fire_chat_message_hook(message: str, session=None) -> str:
+    """Fire chat.message hook — plugins can modify the user message."""
+    data = await _fire_plugin_hook("chat.message", {
+        "message": message,
+        "session_id": getattr(session, "id", None),
+    })
+    return data.get("message", message)
+
+
+async def _fire_chat_messages_transform_hook(messages: list, session=None) -> list:
+    """Fire chat.messages.transform hook — plugins can modify message history."""
+    data = await _fire_plugin_hook("chat.messages.transform", {
+        "messages": messages,
+        "session_id": getattr(session, "id", None),
+    })
+    return data.get("messages", messages)
+
+
 def build_env_context(session, cwd: str | None = None) -> str:
     """Build environment context string (cwd, git status) for system prompt.
 
@@ -133,6 +177,15 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         else:
             run_message = message
 
+        # Hook: chat.message — let plugins intercept/modify user message
+        run_message = await _fire_chat_message_hook(run_message, session)
+
+        # Event: message.user
+        await _publish_event("message.user", {
+            "message": run_message,
+            "session_id": getattr(session, "id", None),
+        })
+
         # Build conversation history as real messages for the LLM.
         # At turn start we only do reversible pruning — destructive compaction
         # is reserved for the post-turn reactive path (below) which fires when
@@ -149,6 +202,10 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         if session and session.history and not lightweight:
             prior_history = session.history[:-1]
             history_messages = to_agno_messages(prior_history)
+
+        # Hook: chat.messages.transform — let plugins modify history before LLM
+        if history_messages:
+            history_messages = await _fire_chat_messages_transform_hook(history_messages, session)
 
         # Combine: history messages + current enriched message
         if history_messages:
@@ -203,6 +260,11 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                     tracker.start(tool_id, label)
                     status.set_text(f"{label}...")
                     live.update(display)
+                    # Event: tool.called
+                    await _publish_event("tool.called", {
+                        "tool_name": tool_name, "tool_id": tool_id,
+                        "args": tool_args if isinstance(tool_args, dict) else {},
+                    })
 
                 elif isinstance(event, ToolCallCompletedEvent):
                     _stall_counter = 0
@@ -230,6 +292,11 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                             })
                         pending_tool_uses.pop(tool_id, None)
 
+                    # Event: tool.completed
+                    await _publish_event("tool.completed", {
+                        "tool_id": tool_id,
+                        "result_length": len(str(tool_result_text)) if tool_result_text else 0,
+                    })
                     result = tracker.complete(tool_id)
                     for label, duration in tracker.pop_completed():
                         dur_str = f" {duration:.1f}s" if duration >= 0.5 else ""
@@ -334,6 +401,14 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
                         pass
 
         final_content = accumulated or final_content
+
+        # Event: message.assistant
+        await _publish_event("message.assistant", {
+            "content": final_content,
+            "tool_calls": collected_tool_calls,
+            "session_id": getattr(session, "id", None),
+        })
+
         remaining = (final_content or "")[display._flushed_len:]
         if remaining:
             console.print(Markdown(remaining))

@@ -52,9 +52,11 @@ def plugin(ctx: PluginInput, options: dict | None = None) -> Hooks:
 ```python
 @dataclass
 class PluginInput:
-    directory: str     # Project root (os.getcwd())
-    config_path: str   # Path to aru.json (or "")
-    model_ref: str     # Current model (e.g. "anthropic/claude-sonnet-4-5")
+    directory: str              # Project root (os.getcwd())
+    config_path: str            # Path to aru.json (or "")
+    model_ref: str              # Current model (e.g. "anthropic/claude-sonnet-4-5")
+    config: dict[str, Any]      # Config dict (default_model, model_aliases, permissions, etc.)
+    session: Any | None         # Session object (if available at init time)
 ```
 
 ### Hooks Object
@@ -76,25 +78,81 @@ def handler(event: HookEvent):
 All hook handlers receive a `HookEvent` with a mutable `data` dict:
 
 ```python
-event.hook        # hook name (str)
-event.data        # full payload (dict) — mutate this to change behavior
-event.tool_name   # shortcut for event.data["tool_name"]
-event.args        # shortcut for event.data["args"]
-event.result      # shortcut for event.data["result"]
-event.env         # shortcut for event.data["env"]
+event.hook           # hook name (str)
+event.data           # full payload (dict) — mutate this to change behavior
+
+# Tool hook shortcuts
+event.tool_name      # event.data["tool_name"]
+event.args           # event.data["args"] (get/set)
+event.result         # event.data["result"] (get/set)
+
+# Chat hook shortcuts
+event.message        # event.data["message"] (get/set) — user message text
+event.messages       # event.data["messages"] (get/set) — message history list
+event.system_prompt  # event.data["system_prompt"] (get/set)
+event.params         # event.data["params"] (get/set) — LLM parameters dict
+
+# Command hook shortcuts
+event.command        # event.data["command"] — slash command name
+event.command_args   # event.data["command_args"] — arguments after the command
+event.blocked        # event.data["blocked"] (get/set) — set True to block execution
+
+# Shell hook shortcuts
+event.env            # event.data["env"] (get/set) — environment variables dict
 ```
 
 ## Hooks Reference
 
+### Chat Lifecycle
+
 | Hook | When it fires | Payload | What you can do |
 |------|--------------|---------|-----------------|
-| `tool.execute.before` | Before any tool runs | `tool_name`, `args` | Inspect/modify arguments, block by raising |
+| `chat.message` | Before user message is sent to LLM | `message`, `session_id` | Modify user message (e.g. inject context, filter PII) |
+| `chat.params` | Before LLM call (agent creation) | `model`, `max_tokens`, `temperature` | Change model, adjust temperature/max_tokens |
+| `chat.system.transform` | Before LLM call (agent creation) | `system_prompt`, `agent` | Modify system prompt (append RAG context, inject rules) |
+| `chat.messages.transform` | Before sending history to LLM | `messages`, `session_id` | Filter, reorder, or modify conversation history |
+
+### Tool Lifecycle
+
+| Hook | When it fires | Payload | What you can do |
+|------|--------------|---------|-----------------|
+| `tool.execute.before` | Before any tool runs | `tool_name`, `args` | Inspect/modify arguments, block by raising `PermissionError` |
 | `tool.execute.after` | After any tool runs | `tool_name`, `args`, `result` | Inspect/modify the result |
+| `tool.definition` | When tools are resolved | `tool_name`, `description`, `parameters` | Modify tool descriptions/params exposed to the LLM |
+
+### Command Lifecycle
+
+| Hook | When it fires | Payload | What you can do |
+|------|--------------|---------|-----------------|
+| `command.execute.before` | Before a slash command runs | `command`, `command_args`, `blocked` | Set `event.blocked = True` to prevent execution, modify args |
+
+### Permission / Shell / Session
+
+| Hook | When it fires | Payload | What you can do |
+|------|--------------|---------|-----------------|
 | `permission.ask` | Before prompting user for permission | `category`, `subject` | Set `event.data["allow"] = True/False` to auto-decide |
 | `shell.env` | Before `bash` subprocess starts | `cwd`, `command`, `env` | Inject environment variables via `event.env` |
 | `session.compact` | Before context compaction | `history` | Pre-process or filter conversation history |
-| `config` | After config is loaded | `AgentConfig` | Modify configuration |
-| `tool.definition` | When tools are resolved | `tools` | Add or remove tools from the set |
+
+### Initialization & Events
+
+| Hook | When it fires | Payload | What you can do |
+|------|--------------|---------|-----------------|
+| `config` | After all plugins loaded | Config dict (model, aliases, permissions, etc.) | React to configuration, initialize plugin state |
+| `event` | On any bus event | `event_type` + event-specific data | Telemetry, logging, custom reactions to lifecycle events |
+
+### Event Bus
+
+The `PluginManager` also has a pub/sub event bus. Plugins registered via the `event` hook receive all events automatically. Available bus events:
+
+| Event | When | Data |
+|-------|------|------|
+| `session.start` | REPL starts | `session_id`, `model_ref`, `directory` |
+| `session.end` | User quits (`/quit`) | `session_id` |
+| `message.user` | User message sent to LLM | `message`, `session_id` |
+| `message.assistant` | LLM response complete | `content`, `tool_calls`, `session_id` |
+| `tool.called` | Tool execution starts | `tool_name`, `tool_id`, `args` |
+| `tool.completed` | Tool execution ends | `tool_id`, `result_length` |
 
 ## Examples
 
@@ -255,6 +313,78 @@ def plugin(ctx: PluginInput, options=None) -> Hooks:
     return hooks
 ```
 
+### RAG Context Injection
+
+```python
+# .aru/plugins/rag_context.py
+from aru.plugins import Hooks, PluginInput
+
+def plugin(ctx: PluginInput, options=None) -> Hooks:
+    hooks = Hooks()
+
+    @hooks.on("chat.system.transform")
+    def inject_rag(event):
+        # Append project-specific context to the system prompt
+        event.system_prompt += "\n\n## Project Rules\n- Always use pydantic for validation\n- Tests go in tests/"
+
+    return hooks
+```
+
+### Model Router
+
+```python
+# .aru/plugins/model_router.py
+from aru.plugins import Hooks, PluginInput
+
+def plugin(ctx: PluginInput, options=None) -> Hooks:
+    hooks = Hooks()
+
+    @hooks.on("chat.params")
+    def route_model(event):
+        # Use a cheaper model for simple queries
+        event.data["max_tokens"] = 4096
+
+    return hooks
+```
+
+### Block Slash Commands
+
+```python
+# .aru/plugins/command_guard.py
+from aru.plugins import Hooks, PluginInput
+
+def plugin(ctx: PluginInput, options=None) -> Hooks:
+    hooks = Hooks()
+
+    @hooks.on("command.execute.before")
+    def guard(event):
+        blocked_commands = {"plan", "undo"}
+        if event.command in blocked_commands:
+            event.blocked = True
+
+    return hooks
+```
+
+### Audit Trail via Event Bus
+
+```python
+# .aru/plugins/audit.py
+import json
+from datetime import datetime
+from aru.plugins import Hooks, PluginInput
+
+def plugin(ctx: PluginInput, options=None) -> Hooks:
+    hooks = Hooks()
+
+    @hooks.on("event")
+    def audit(event):
+        entry = {"ts": datetime.now().isoformat(), **event.data}
+        with open(".aru/audit.jsonl", "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+
+    return hooks
+```
+
 ## Plugin with Options
 
 Configure options in `aru.json`:
@@ -337,9 +467,15 @@ Loaded 1 plugin(s): opencode_bridge
 |--------------|-----------|-------|
 | `tool` (custom tools) | Yes | Callable by the LLM |
 | `tool.execute.before/after` | Yes | Payload serialized as JSON |
+| `chat.message` | Yes | Modify user message |
+| `chat.params` | Yes | Modify model/temperature |
+| `chat.system.transform` | Yes | Modify system prompt |
+| `chat.messages.transform` | Yes | Modify message history |
+| `command.execute.before` | Yes | Block/modify slash commands |
 | `permission.ask` | Yes | Can auto-approve/deny |
 | `shell.env` | Yes | Inject env vars |
-| `auth` / `provider` | No | Python-only; port manually |
+| `event` | Yes | Receive all bus events |
+| `auth` / `provider` | No | Not yet implemented (Tier 2) |
 | TUI plugins | No | Aru has no TUI plugin system |
 
 ### Porting TS to Python (recommended)
@@ -371,6 +507,22 @@ def plugin(ctx: PluginInput, options=None) -> Hooks:
 
     return hooks
 ```
+
+## TODO — Tier 2 Hooks (OpenCode Parity)
+
+The following OpenCode hooks are not yet implemented. They are lower priority but would complete full parity with OpenCode's plugin system:
+
+| Hook | Purpose | OpenCode equivalent |
+|------|---------|---------------------|
+| `provider` | Register dynamic models from plugins (e.g. custom endpoints, local models) | `provider` hook in `packages/plugin/src/index.ts` |
+| `auth` | Custom authentication flows (OAuth, API key prompts) for third-party providers | `auth` hook with `loader` and `prompts` callbacks |
+| `chat.headers` | Modify HTTP headers sent to LLM providers (requires raw HTTP access, Aru uses Agno SDK) | `chat.headers` hook in `session/llm.ts` |
+
+### Implementation Notes
+
+- **`provider`**: Would allow plugins to register new model providers at runtime (e.g. `hooks.on("provider")` returns a list of model IDs). Requires changes to `aru/providers.py` to query plugins during model resolution.
+- **`auth`**: Would allow plugins to define OAuth flows or API key prompts for providers like Copilot, GitLab, etc. Requires a new auth flow UI in the REPL. OpenCode uses this extensively for its built-in auth plugins (Codex, Copilot, GitLab, Poe, Cloudflare).
+- **`chat.headers`**: Low priority for Aru since we use the Agno SDK which manages HTTP internally. Would only be useful if Aru switches to raw HTTP calls for specific providers.
 
 ## Diagnostics
 

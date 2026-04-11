@@ -12,6 +12,7 @@ Plugin sources:
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import importlib
 import importlib.metadata
 import importlib.util
@@ -34,12 +35,20 @@ def _noop_manager():
 
 
 class PluginManager:
-    """Loads plugins, aggregates hooks, and fires events."""
+    """Loads plugins, aggregates hooks, fires events, and manages event bus.
+
+    Two dispatch mechanisms:
+      - ``fire(hook_name, data)`` — sequential interceptors, handlers can mutate data.
+      - ``publish(event_type, data)`` — fan-out notifications, read-only for subscribers.
+        Also fires the ``event`` hook so plugins registered via hooks see all events.
+    """
 
     def __init__(self) -> None:
         self._hooks: list[Hooks] = []
         self._plugin_names: list[str] = []
         self._loaded = False
+        # Event bus: subscribers keyed by event type (or "*" for all)
+        self._subscribers: dict[str, list[Callable]] = defaultdict(list)
 
     @property
     def loaded(self) -> bool:
@@ -125,6 +134,16 @@ class PluginManager:
             pass  # entry_points may fail on older Python
 
         self._loaded = True
+
+        # Fire config hook so plugins can react to the current configuration
+        if count > 0:
+            config_data: dict[str, Any] = {}
+            if plugin_input.config:
+                config_data = dict(plugin_input.config)
+            config_data.setdefault("directory", plugin_input.directory)
+            config_data.setdefault("model_ref", plugin_input.model_ref)
+            await self.fire("config", config_data)
+
         return count
 
     async def fire(self, event_name: str, data: dict[str, Any] | None = None) -> HookEvent:
@@ -151,6 +170,47 @@ class PluginManager:
                     logger.error("Hook handler error (%s): %s", event_name, e)
 
         return event
+
+    # -- Event bus (pub/sub) --
+
+    def subscribe(self, event_type: str, callback: Callable) -> None:
+        """Subscribe to a specific event type (e.g. 'message.user', 'tool.called')."""
+        self._subscribers[event_type].append(callback)
+
+    def subscribe_all(self, callback: Callable) -> None:
+        """Subscribe to all events (wildcard)."""
+        self._subscribers["*"].append(callback)
+
+    async def publish(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        """Publish an event to all subscribers + fire the ``event`` hook.
+
+        Unlike ``fire()``, this is fan-out: subscribers receive a copy and
+        cannot mutate the event for other subscribers.
+        """
+        payload = {"event_type": event_type, **(data or {})}
+
+        # Notify typed subscribers
+        for cb in self._subscribers.get(event_type, []):
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(payload)
+                else:
+                    cb(payload)
+            except Exception as e:
+                logger.error("Event subscriber error (%s): %s", event_type, e)
+
+        # Notify wildcard subscribers
+        for cb in self._subscribers.get("*", []):
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(payload)
+                else:
+                    cb(payload)
+            except Exception as e:
+                logger.error("Event subscriber error (*): %s", e)
+
+        # Fire the ``event`` hook so hook-based plugins also see all events
+        await self.fire("event", payload)
 
     def get_plugin_tools(self) -> list[dict[str, Any]]:
         """Collect all tools registered by plugins.

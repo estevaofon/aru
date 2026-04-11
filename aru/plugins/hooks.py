@@ -29,14 +29,28 @@ logger = logging.getLogger("aru.plugins")
 
 # Valid hook names (mirrors relevant OpenCode hooks)
 VALID_HOOKS = frozenset({
+    # Lifecycle
     "config",                    # After config loaded
+    "event",                     # Subscribe to all bus events
+
+    # Tool lifecycle
     "tool.execute.before",       # Before any tool runs
     "tool.execute.after",        # After any tool runs
-    "tool.definition",           # When tools are resolved (can add/remove)
-    "permission.ask",            # Before permission prompt
+    "tool.definition",           # When tools are resolved (can modify desc/params)
+
+    # Chat lifecycle
+    "chat.message",              # Before user message is sent to LLM (can modify)
+    "chat.params",               # Before LLM call (can modify temperature, max_tokens)
+    "chat.system.transform",     # Before LLM call (can modify system prompt)
+    "chat.messages.transform",   # Before LLM call (can modify message history)
+
+    # Command lifecycle
+    "command.execute.before",    # Before slash command runs (can block/modify)
+
+    # Permission / shell
+    "permission.ask",            # Before permission prompt (can auto-allow/deny)
     "shell.env",                 # Before bash subprocess
     "session.compact",           # Before context compaction
-    "event",                     # Subscribe to all events
 })
 
 
@@ -75,6 +89,60 @@ class HookEvent:
     def env(self, value: dict[str, str]) -> None:
         self.data["env"] = value
 
+    # -- Chat hook accessors --
+
+    @property
+    def message(self) -> str:
+        return self.data.get("message", "")
+
+    @message.setter
+    def message(self, value: str) -> None:
+        self.data["message"] = value
+
+    @property
+    def messages(self) -> list:
+        return self.data.get("messages", [])
+
+    @messages.setter
+    def messages(self, value: list) -> None:
+        self.data["messages"] = value
+
+    @property
+    def system_prompt(self) -> str:
+        return self.data.get("system_prompt", "")
+
+    @system_prompt.setter
+    def system_prompt(self, value: str) -> None:
+        self.data["system_prompt"] = value
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return self.data.get("params", {})
+
+    @params.setter
+    def params(self, value: dict[str, Any]) -> None:
+        self.data["params"] = value
+
+    # -- Command hook accessors --
+
+    @property
+    def command(self) -> str:
+        return self.data.get("command", "")
+
+    @property
+    def command_args(self) -> str:
+        return self.data.get("command_args", "")
+
+    @property
+    def blocked(self) -> bool:
+        return self.data.get("blocked", False)
+
+    @blocked.setter
+    def blocked(self, value: bool) -> None:
+        self.data["blocked"] = value
+
+    # -- Generic accessors --
+
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
@@ -91,6 +159,8 @@ class PluginInput:
     directory: str        # project root (os.getcwd())
     config_path: str      # path to aru.json (or "")
     model_ref: str        # current model reference
+    config: dict[str, Any] = field(default_factory=dict)  # full config dict
+    session: Any = None   # session object (if available at init time)
 
 
 class Hooks:
