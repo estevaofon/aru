@@ -8,5 +8,6 @@ Public API for plugin authors:
 
 from aru.plugins.tool_api import tool
 from aru.plugins.hooks import Hooks, HookEvent, PluginInput
+from aru.plugins.manager import PluginManager
 
-__all__ = ["tool", "Hooks", "HookEvent", "PluginInput"]
+__all__ = ["tool", "Hooks", "HookEvent", "PluginInput", "PluginManager"]

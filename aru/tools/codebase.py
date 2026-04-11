@@ -918,9 +918,13 @@ async def bash(command: str, timeout: int = 60, working_directory: str = "") -> 
     if not check_permission("bash", command, cmd_display):
         return f"PERMISSION DENIED by user: {command}. Do NOT retry this operation. Stop and ask the user for new instructions."
 
-    # Fire shell.env hook — plugins can inject environment variables
-    extra_env = await _fire_plugin_hook("shell.env", {"cwd": cwd, "command": command, "env": {}})
-    shell_env = extra_env.get("env") if isinstance(extra_env, dict) else None
+    # Fire shell.env hook — plugins can inject env vars or rewrite/block the command
+    hook_data = await _fire_plugin_hook("shell.env", {"cwd": cwd, "command": command, "env": {}})
+    if isinstance(hook_data, dict):
+        command = hook_data.get("command", command)
+        shell_env = hook_data.get("env") or None
+    else:
+        shell_env = None
 
     result = await run_command(command, timeout=timeout, working_directory=working_directory, extra_env=shell_env)
     # Bash can modify files, so always invalidate cache

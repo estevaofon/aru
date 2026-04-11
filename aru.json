@@ -83,8 +83,5 @@
             "cd *": "ask",
             "find *": "allow"
         }
-    },
-    "instructions": [
-        "additional.md"
-    ]
+    }
 }
