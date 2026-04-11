@@ -122,6 +122,9 @@ class RuntimeContext:
     # -- Plugins --
     plugin_manager: Any = None  # aru.plugins.manager.PluginManager (lazy to avoid circular)
 
+    # -- Session --
+    session: Any = None  # aru.session.Session (set by CLI, used for sub-agent cost tracking)
+
     # -- Checkpoints --
     checkpoint_manager: Any = None  # aru.checkpoints.CheckpointManager (lazy)
 

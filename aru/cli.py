@@ -199,7 +199,8 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     # Apply tree_depth from config
     session._tree_max_depth = config.tree_depth
 
-    # Wire file-mutation callback and atexit cleanup
+    # Wire session and file-mutation callback
+    ctx.session = session
     ctx.on_file_mutation = session.invalidate_context_cache
     atexit.register(lambda: cleanup_processes(ctx.tracked_processes))
 
@@ -745,6 +746,7 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
     if config.default_model:
         session.model_ref = config.default_model
 
+    ctx.session = session
     ctx.model_id = session.model_id
     small_ref = config.model_aliases.get("small") if config else None
     if not small_ref:

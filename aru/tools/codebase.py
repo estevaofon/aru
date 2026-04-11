@@ -1289,6 +1289,22 @@ Do not create documentation files unless explicitly asked.
             from aru.permissions import permission_scope
             with permission_scope(agent_perm):
                 result = await sub.arun(task, stream=False)
+            # Track sub-agent token usage in the session so cost is not underestimated.
+            # We accumulate totals directly instead of calling track_tokens() because
+            # track_tokens() also reads cache_patch globals (last_call_metrics) which
+            # may belong to a different concurrent sub-agent — we must not touch last_*.
+            if result and hasattr(result, "metrics") and result.metrics:
+                try:
+                    session = get_ctx().session
+                    if session is not None:
+                        m = result.metrics
+                        session.total_input_tokens += getattr(m, "input_tokens", 0) or 0
+                        session.total_output_tokens += getattr(m, "output_tokens", 0) or 0
+                        session.total_cache_read_tokens += getattr(m, "cache_read_tokens", 0) or 0
+                        session.total_cache_write_tokens += getattr(m, "cache_write_tokens", 0) or 0
+                        session.api_calls += 1
+                except (LookupError, AttributeError):
+                    pass
             if result and result.content:
                 return _truncate_output(f"[{label}] {result.content}")
             return f"[{label}] Task completed but no output was returned."
