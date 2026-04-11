@@ -2,10 +2,72 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
+import logging
+
 from aru.agents.base import build_instructions as _build_instructions
 from aru.config import AgentConfig, CustomAgent
 from aru.providers import create_model
 from aru.session import Session
+
+logger = logging.getLogger("aru.agent_factory")
+
+
+def _wrap_tools_with_hooks(tools: list) -> list:
+    """Wrap tool functions to fire tool.execute.before/after plugin hooks.
+
+    Before hook can mutate args; after hook can mutate the result.
+    If a before hook raises, the tool is not executed and the error is returned.
+    """
+    from aru.runtime import get_ctx
+
+    async def _fire(event_name: str, data: dict) -> dict:
+        try:
+            ctx = get_ctx()
+            mgr = ctx.plugin_manager
+            if mgr is not None and mgr.loaded:
+                event = await mgr.fire(event_name, data)
+                return event.data
+        except (LookupError, AttributeError):
+            pass
+        return data
+
+    def _wrap_one(fn):
+        if not callable(fn) or getattr(fn, "_hook_wrapped", False):
+            return fn
+
+        @functools.wraps(fn)
+        async def wrapper(**kwargs):
+            tool_name = fn.__name__
+            # Before hook — plugins can mutate args or raise PermissionError to block
+            try:
+                before_data = await _fire("tool.execute.before", {
+                    "tool_name": tool_name,
+                    "args": kwargs,
+                })
+                kwargs = before_data.get("args", kwargs)
+            except PermissionError as e:
+                return f"BLOCKED by plugin: {e}. Do NOT retry this operation."
+
+            # Execute the tool
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(**kwargs)
+            else:
+                result = fn(**kwargs)
+
+            # After hook — plugins can mutate the result
+            after_data = await _fire("tool.execute.after", {
+                "tool_name": tool_name,
+                "args": kwargs,
+                "result": result,
+            })
+            return after_data.get("result", result)
+
+        wrapper._hook_wrapped = True
+        return wrapper
+
+    return [_wrap_one(t) for t in tools]
 
 
 def create_general_agent(
@@ -23,7 +85,7 @@ def create_general_agent(
     from agno.agent import Agent
 
     from aru.tools.codebase import GENERAL_TOOLS
-    tools = GENERAL_TOOLS
+    tools = _wrap_tools_with_hooks(GENERAL_TOOLS)
 
     extra = config.get_extra_instructions() if config else ""
     if env_context:
@@ -49,7 +111,7 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
     from aru.tools.codebase import resolve_tools
 
     model_ref = agent_def.model or session.model_ref
-    tools = resolve_tools(agent_def.tools)
+    tools = _wrap_tools_with_hooks(resolve_tools(agent_def.tools))
 
     extra = config.get_extra_instructions() if config else ""
     if env_context:

@@ -145,6 +145,8 @@ class PluginManager:
                         await handler(event)
                     else:
                         handler(event)
+                except PermissionError:
+                    raise  # let blocking signals propagate
                 except Exception as e:
                     logger.error("Hook handler error (%s): %s", event_name, e)
 
