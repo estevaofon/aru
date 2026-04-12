@@ -6,7 +6,7 @@ An intelligent coding assistant for the terminal, powered by LLMs and [Agno](htt
 
 ## Highlights
 
-- **Multi-Agent Architecture** — Specialized agents for planning, execution, and conversation
+- **Multi-Agent Architecture** — Specialized agents for planning, execution, exploration, and conversation
 - **Interactive CLI** — Streaming responses, multi-line paste, session management
 - **Image Support** — Attach images via `@` mentions for multimodal analysis (Claude, GPT-4o, Gemini)
 - **11 Integrated Tools** — File operations, code search, shell, web search, task delegation
@@ -466,6 +466,7 @@ Aru can load tools from MCP servers. Configure in `.aru/mcp_config.json`:
 | **Planner** | Analyzes codebase, creates structured implementation plans | Read-only tools, search, web |
 | **Executor** | Implements code changes based on plans or instructions | All tools including delegation |
 | **General** | Handles conversation and simple operations | All tools including delegation |
+| **Explorer** | Fast, read-only codebase exploration and search | Read-only tools, search, bash (read-only) |
 
 ## Tools
 
@@ -506,7 +507,8 @@ aru-code/
 │   ├── permissions.py      # Granular permission system (allow/ask/deny)
 │   ├── agents/
 │   │   ├── planner.py      # Planning agent
-│   │   └── executor.py     # Execution agent
+│   │   ├── executor.py     # Execution agent
+│   │   └── explorer.py     # Explorer agent (fast, read-only codebase search)
 │   └── tools/
 │       ├── codebase.py     # 11 core tools
 │       ├── ast_tools.py    # Tree-sitter code analysis
