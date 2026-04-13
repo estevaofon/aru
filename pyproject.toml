@@ -60,6 +60,10 @@ all-providers = [
 [project.scripts]
 aru = "aru.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["aru*"]
+exclude = ["tests*", "site*", "docs*", "docs-site*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
