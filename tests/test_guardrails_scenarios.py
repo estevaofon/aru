@@ -19,6 +19,12 @@ from pathlib import Path
 
 GUARDRAILS_PATH = Path(__file__).resolve().parent.parent / ".aru" / "plugins" / "guardrails.py"
 
+if not GUARDRAILS_PATH.exists():
+    pytest.skip(
+        f"guardrails plugin not available at {GUARDRAILS_PATH}",
+        allow_module_level=True,
+    )
+
 spec = importlib.util.spec_from_file_location("guardrules", GUARDRAILS_PATH)
 _mod = importlib.util.module_from_spec(spec)
 sys.path.insert(0, str(GUARDRAILS_PATH.parent))
