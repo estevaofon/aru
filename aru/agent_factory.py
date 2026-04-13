@@ -182,7 +182,7 @@ def create_general_agent(
         tools=tools,
         instructions=instructions,
         markdown=True,
-        tool_call_limit=20,
+        tool_call_limit=None,
     )
 
 
@@ -216,5 +216,5 @@ def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
         tools=tools,
         instructions=instructions,
         markdown=True,
-        tool_call_limit=agent_def.max_turns or 20,
+        tool_call_limit=agent_def.max_turns,
     )

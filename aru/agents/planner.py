@@ -85,5 +85,5 @@ def create_planner(model_ref: str = "anthropic/claude-sonnet-4-5", extra_instruc
             compress_tool_results=True,
             compress_tool_results_limit=25,
         ),
-        tool_call_limit=20,
+        tool_call_limit=None,
     )

@@ -89,5 +89,5 @@ def create_explorer(task: str, context: str = "") -> Agent:
         tools=EXPLORER_TOOLS,
         instructions=instructions,
         markdown=True,
-        tool_call_limit=15,
+        tool_call_limit=None,
     )
