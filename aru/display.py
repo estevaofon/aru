@@ -161,6 +161,10 @@ class StatusBar:
         self._index = 0
         self._last_switch = time.monotonic()
         self._override: str | None = None
+        # A single persistent Spinner — Rich's Spinner tracks frames via
+        # (time - start_time), so instantiating a new one per render would
+        # reset start_time each frame and make the animation look frozen.
+        self._spinner = Spinner("dots", text="", style="cyan")
 
     @property
     def current_text(self) -> str:
@@ -187,8 +191,8 @@ class StatusBar:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         self._maybe_rotate()
-        spinner = Spinner("dots", text=f"[dim]{self.current_text}[/dim]", style="cyan")
-        yield from spinner.__rich_console__(console, options)
+        self._spinner.update(text=Text(self.current_text, style="dim"))
+        yield from self._spinner.__rich_console__(console, options)
 
     def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
         return Measurement(1, options.max_width)
