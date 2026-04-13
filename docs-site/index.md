@@ -1,13 +1,13 @@
 ---
 title: Aru
-description: Assistente de programação inteligente no terminal, com múltiplos agentes Claude
+description: Assistente de programação inteligente no terminal, com arquitetura multi-agente
 hide:
   - navigation
 ---
 
 # Aru
 
-**Aru** é um assistente de programação inteligente que roda no terminal. Você descreve a tarefa em linguagem natural e agentes especializados planejam, exploram o código e aplicam mudanças usando Claude.
+**Aru** é um assistente de programação inteligente que roda no terminal. Você descreve a tarefa em linguagem natural e agentes especializados planejam, exploram o código e aplicam mudanças — com suporte a múltiplos providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek e outros).
 
 ![Aru demo](https://github.com/user-attachments/assets/e84d5139-ebaa-4d12-bbae-628fae7dbc7a)
 
