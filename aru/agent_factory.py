@@ -6,9 +6,6 @@ import functools
 import inspect
 import logging
 
-from agno.compression.manager import CompressionManager
-from agno.utils.log import log_warning
-
 from aru.agents.base import build_instructions as _build_instructions
 from aru.agents.catalog import AGENTS, AgentSpec
 from aru.config import AgentConfig, CustomAgent
@@ -16,29 +13,6 @@ from aru.providers import create_model
 from aru.session import Session
 
 logger = logging.getLogger("aru.agent_factory")
-
-# Max chars for truncation fallback when compression fails
-_TRUNCATE_FALLBACK = 3000
-
-
-class _SafeCompressionManager(CompressionManager):
-    """CompressionManager that truncates on failure instead of leaving messages uncompressed.
-
-    Agno's default behavior: if compression returns None, the message stays with
-    compressed_content=None → should_compress() fires again → infinite retry loop.
-    This subclass marks failed messages with a truncated version so the loop moves on.
-    """
-
-    async def acompress(self, messages, run_metrics=None):
-        before = {id(m) for m in messages if m.role == "tool" and m.compressed_content is None}
-        await super().acompress(messages, run_metrics=run_metrics)
-        for msg in messages:
-            if id(msg) in before and msg.compressed_content is None:
-                content_str = str(msg.content or "")
-                msg.compressed_content = content_str[:_TRUNCATE_FALLBACK] + (
-                    "... [truncated, compression failed]" if len(content_str) > _TRUNCATE_FALLBACK else ""
-                )
-                log_warning(f"Compression fallback (truncate) for {msg.tool_name}")
 
 
 def _wrap_tools_with_hooks(tools: list) -> list:
@@ -175,16 +149,6 @@ def _apply_chat_hooks(instructions: str, model_ref: str, agent_name: str,
     return instructions, model_ref, max_tokens
 
 
-def _make_compression_manager() -> _SafeCompressionManager:
-    """Construct the safe compression manager used for every native agent."""
-    from aru.runtime import get_ctx
-    return _SafeCompressionManager(
-        model=create_model(get_ctx().small_model_ref, max_tokens=2048),
-        compress_tool_results=True,
-        compress_tool_results_limit=25,
-    )
-
-
 def create_agent_from_spec(
     spec: AgentSpec,
     session: Session | None = None,
@@ -194,8 +158,10 @@ def create_agent_from_spec(
     """Build an Agno Agent from a catalog spec.
 
     Single construction path for all native agents (build/plan/executor/explorer).
-    Resolves model, wraps tools with plugin hooks, applies chat.system.transform
-    and chat.params hooks, and attaches the safe compression manager.
+    Resolves model, wraps tools with plugin hooks, and applies chat.system.transform
+    and chat.params hooks. Context reduction is handled by aru's own layers
+    (`prune_history` for routine tool cleanup, `should_compact` near window limit),
+    so no Agno CompressionManager is attached.
 
     `session` may be None for subagent specs that always use the small model.
     """
@@ -222,8 +188,6 @@ def create_agent_from_spec(
         tools=tools,
         instructions=instructions,
         markdown=True,
-        compress_tool_results=True,
-        compression_manager=_make_compression_manager(),
         tool_call_limit=None,
     )
 
