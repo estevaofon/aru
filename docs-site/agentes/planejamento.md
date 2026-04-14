@@ -1,87 +1,127 @@
 ---
 title: Planejamento
-description: Como funciona o fluxo Planner → Executor do Aru
+description: Plan mode do Aru — manual via /plan ou autônomo via enter_plan_mode
 ---
 
 # Planejamento
 
-O fluxo de planejamento do Aru separa **raciocínio** de **execução**. O Planner gera um plano estruturado em modo read-only, e o Executor implementa cada passo com acesso total às ferramentas.
+O fluxo de planejamento do Aru separa **raciocínio** de **execução**. O agente `plan` gera um plano estruturado em modo read-only, e o `build` / `executor` implementam cada passo com acesso total às ferramentas, marcando progresso conforme avança.
 
-## Quando usar `/plan`
+## Duas formas de ativar
 
-Use `/plan` quando:
+### 1. Manual — `/plan <tarefa>`
 
-- A tarefa envolve **múltiplos arquivos** ou camadas
+```text
+aru> /plan adicionar autenticação JWT ao endpoint /api/users
+```
+
+O planner roda, produz o plano, o reviewer opcionalmente corta escopo, e o resultado é armazenado na sessão.
+
+### 2. Autônoma — `enter_plan_mode(task)`
+
+O agente `build` chama essa ferramenta **sozinho** quando detecta uma tarefa que exige 3+ mudanças coordenadas em vários arquivos. Você não precisa digitar `/plan` — basta descrever o que quer:
+
+```text
+aru> migrar todo o módulo de auth para JWT, atualizando testes e docs
+```
+
+O `build` reconhece o escopo, invoca `enter_plan_mode(...)` internamente, o plano é gerado e armazenado, e na próxima rodada o próprio agente já começa a executá-lo.
+
+!!! tip "Tarefas simples não entram em plan mode"
+    Para 1–2 edits localizados, o `build` executa direto sem planejar. Plan mode existe para proteger tarefas grandes de serem feitas de forma atropelada.
+
+## Ciclo de vida do plano
+
+```text
+Usuário pede algo grande
+         ↓
+build.enter_plan_mode(task)
+         ↓
+plan agent (read-only, Sonnet 4K)
+  - Explora arquivos relevantes
+  - Produz ## Summary + ## Steps
+         ↓
+(opcional) review_plan — corta scope creep
+         ↓
+session.set_plan(task, plan_content)
+         ↓
+<system-reminder> PLAN ACTIVE aparece a cada turno:
+  ○ 1. Criar auth/jwt_middleware.py
+  ○ 2. Adicionar JWT_SECRET em config.py
+  ○ 3. Aplicar @require_jwt em users.py
+  ○ 4. Adicionar testes em test_auth.py
+         ↓
+Para cada passo:
+  1. create_task_list([...])           # 1-10 subtarefas do passo
+  2. Executa as subtarefas
+  3. update_task(i, "completed")       # por subtarefa
+  4. update_plan_step(i, "completed")  # ao terminar o passo
+         ↓
+Quando todos os passos estão marcados,
+o reminder some e o agente imprime o resumo final
+```
+
+## O system-reminder `PLAN ACTIVE`
+
+Enquanto houver passos pendentes, o `runner` injeta automaticamente no prompt do agente um bloco:
+
+```text
+<system-reminder>
+PLAN ACTIVE - 4 steps total (1 completed, 3 pending):
+✓ 1. Criar auth/jwt_middleware.py
+~ 2. Adicionar JWT_SECRET em config.py
+○ 3. Aplicar @require_jwt em users.py
+○ 4. Adicionar testes em test_auth.py
+Execute steps in order. For each: optionally call create_task_list to break
+the step into subtasks, do the work, then call update_plan_step(index,
+'completed') to mark progress. Do NOT skip steps silently.
+</system-reminder>
+```
+
+Isso faz o agente **ver o estado atual toda rodada** — mesmo em sessões compactadas, o plano persiste via `session.plan_steps`.
+
+## Subtarefas (`create_task_list` / `update_task`)
+
+Dentro de cada passo macro, o executor quebra o trabalho em 1–10 subtarefas antes de tocar em qualquer arquivo:
+
+```text
+create_task_list([
+  "Read backend/auth/models.py",
+  "Write backend/auth/jwt_middleware.py",
+  "Edit backend/config.py — add JWT_SECRET",
+  "Run pytest backend/tests/test_auth.py",
+])
+```
+
+Cada `update_task(i, "completed")` atualiza um painel Rich no terminal com ícones coloridos (`○` / `~` / `✓` / `✗`). Essa disciplina força o agente a planejar antes de agir e dá visibilidade do progresso em tempo real.
+
+### Por que obrigatório?
+
+Sem a task list, modelos tendem a "improvisar" — lêem um arquivo, editam no escuro, lêem outro, fazem retrabalho. A task list força um mini-plano antes de cada passo e impede que o agente continue adicionando ações além do que foi declarado.
+
+## Quando usar plan mode
+
+Use (ou deixe o `build` usar) quando:
+
+- A tarefa envolve **3+ arquivos** ou camadas
 - Você quer **revisar a estratégia** antes de aplicar mudanças
 - A mudança é **arquitetural** (migração, refatoração ampla, novo feature)
 - Você precisa de um **registro** do raciocínio para depois
 
-Para edits pequenos e localizados, o General Agent resolve direto sem precisar de plano.
+Para edits pequenos e localizados, o `build` resolve direto.
 
-## Fluxo completo
+## Comandos úteis
 
 ```text
-Usuário: /plan adicionar autenticação JWT ao endpoint /api/users
-
-  ↓ Planner Agent (Sonnet, read-only)
-
-1. Lê arquivos relevantes (auth.py, users.py, settings.py)
-2. Analisa dependências e padrões atuais
-3. Produz plano em Markdown:
-
-   ## Summary
-   Adicionar middleware JWT e proteger /api/users
-
-   ## Steps
-   1. Instalar `pyjwt` no requirements
-   2. Criar `auth/jwt_middleware.py` com decorador `@require_jwt`
-   3. Adicionar `JWT_SECRET` ao `config.py`
-   4. Aplicar `@require_jwt` em `users.py` nas rotas protegidas
-   5. Adicionar testes em `tests/test_auth.py`
-
-  ↓ Usuário confirma
-
-Executor Agent (Sonnet, todas as ferramentas)
-  - Passo 1: executa e reporta
-  - Passo 2: executa e reporta
-  - ...
+aru> /plan <tarefa>        # força entrada em plan mode
+aru> descarte o plano      # pede ao build para limpar session.plan_steps
+aru> o passo 3 tá vago     # pede iteração sobre o plano antes de executar
 ```
-
-## Plano como documento
-
-Planos vivem no estado da sessão e ficam visíveis no status bar. Você pode:
-
-- **Revisar** o plano antes de aprovar a execução
-- **Editar** o plano manualmente pedindo ao agente para modificar passos específicos
-- **Retomar** uma sessão e continuar de onde parou
-- **Descartar** o plano e pedir um novo
-
-## Contexto passado ao Executor
-
-Cada passo é enviado ao Executor com:
-
-- **O passo atual** (descrição + número)
-- **O plano completo** como contexto
-- **Histórico da conversa** (resumido se necessário)
-- **Resultados dos passos anteriores**
-
-Isso permite que o Executor entenda onde está no plano e tome decisões consistentes com os passos já aplicados.
 
 ## Limites
 
-- Planner: **Sonnet, 4K tokens de output** — suficiente para planos bem estruturados
-- Executor: **Sonnet, 8K tokens de output** — suficiente para edits substanciais por passo
+- **Planner:** Sonnet, 4K tokens de output
+- **Executor / build:** Sonnet, 8K tokens de output
+- **Reviewer:** modelo pequeno (Haiku), 2K tokens, sem ferramentas
 
-Se uma tarefa individual for grande demais para um único passo, o Planner deve dividi-la em sub-passos. Se você perceber passos muito grandes, peça um plano mais granular.
-
-## Dica: iteração do plano
-
-Se o primeiro plano não for ideal, você pode pedir ajustes antes de executar:
-
-```text
-aru> /plan migrar banco de SQLite pra Postgres
-aru> o passo 3 tá vago, quebra em sub-passos com os arquivos exatos
-aru> adiciona um passo de rollback caso a migração falhe
-```
-
-O Planner regenera o plano incorporando os ajustes.
+Se um passo individual for grande demais, o planner deve quebrá-lo em sub-passos. Se você perceber passos muito grandes, peça um plano mais granular — ou o reviewer acabará cortando.

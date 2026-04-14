@@ -15,11 +15,11 @@ hide:
 
 <div class="grid cards" markdown>
 
--   :material-brain:{ .lg .middle } __Arquitetura Multi-Agente__
+-   :material-brain:{ .lg .middle } __Arquitetura Multi-Agente (catalog-driven)__
 
     ---
 
-    Agentes especializados para planejamento, execução, exploração e conversação — cada um com seu próprio conjunto de ferramentas e prompt.
+    Agentes nativos (`build`, `plan`, `executor`, `explorer`) declarados como specs em `aru/agents/catalog.py` e instanciados por um factory único.
 
 -   :material-console:{ .lg .middle } __CLI Interativo__
 
@@ -27,11 +27,11 @@ hide:
 
     REPL com respostas em streaming, suporte a multi-linha, histórico de sessões e mentions de arquivos com `@`.
 
--   :material-puzzle:{ .lg .middle } __11 Ferramentas Integradas__
+-   :material-puzzle:{ .lg .middle } __17 Ferramentas Integradas__
 
     ---
 
-    Leitura e edição de arquivos, busca em código, shell, web search e delegação de tarefas a sub-agentes.
+    I/O de arquivos (single + batch), busca, shell, web, delegação a subagentes e tracking estruturado de planos/subtarefas.
 
 -   :material-swap-horizontal:{ .lg .middle } __Multi-Provider__
 
@@ -77,12 +77,13 @@ Pronto. Veja o [Início Rápido](comecando/inicio-rapido.md) para mais detalhes.
 
 ```text
 main.py → cli.run_cli() → REPL
-                           ├─ General Agent   (conversa + ferramentas)
-                           ├─ /plan → Planner (plano passo a passo)
-                           └─ Executor        (implementa cada passo)
+                           ├─ build      (conversa + ferramentas, self-triggers plan mode)
+                           ├─ plan       (read-only, gera plano em Markdown)
+                           ├─ executor   (executa plano passo a passo)
+                           └─ explorer   (subagent read-only, via delegate_task)
 ```
 
-O agente geral resolve tarefas diretas. Quando você pede `/plan`, o Planner gera um plano em Markdown, e o Executor implementa cada passo com acesso a todas as ferramentas.
+Os specs dos agentes nativos vivem em `aru/agents/catalog.py` e são instanciados pelo `agent_factory`. O agente `build` resolve tarefas diretas e, quando detecta uma tarefa que exige 3+ mudanças coordenadas, chama `enter_plan_mode(task)` sozinho — o `plan` gera o plano, que é armazenado na sessão e reaparece a cada turno como um lembrete `PLAN ACTIVE`. Você também pode forçar o fluxo manualmente com `/plan <tarefa>`.
 
 ## Configuração
 
@@ -208,7 +209,7 @@ Aru foi projetado para ser extensível em todas as camadas. Cada tipo de extens�
 
     ---
 
-    11 ferramentas nativas prontas para uso: read, edit, write, bash, grep, glob, web search, delegate e mais — cobrindo o fluxo completo de edição de código.
+    17 ferramentas nativas cobrindo leitura/edição (single + batch), busca, shell, web, delegação, plano autônomo (`enter_plan_mode`) e tracking de subtarefas.
 
     [:octicons-arrow-right-24: Ferramentas integradas](ferramentas/index.md)
 

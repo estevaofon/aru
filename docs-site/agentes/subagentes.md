@@ -5,9 +5,12 @@ description: Como criar e usar subagentes para paralelizar tarefas sem poluir o 
 
 # Subagentes Customizados
 
-**Subagentes** são agentes customizados que rodam em segundo plano via `delegate_task`. Eles têm seu próprio prompt, modelo, ferramentas e janela de contexto — e retornam ao agente principal apenas o resultado final.
+**Subagentes** são agentes que rodam em segundo plano via `delegate_task`. Eles têm seu próprio prompt, modelo, ferramentas e janela de contexto — e retornam ao agente que os invocou apenas o resultado final.
 
-Use subagentes para **isolar trabalho** e **proteger o contexto** do General Agent.
+Use subagentes para **isolar trabalho** e **proteger o contexto** do agente `build`.
+
+!!! info "`explorer` é um subagent nativo"
+    O Aru já vem com o subagent `explorer` registrado no catálogo (`aru/agents/catalog.py`). Ele é usado pelo `build` para pesquisa read-only de codebase via `delegate_task(task, agent_name="explorer")`. Você não precisa criar o seu — mas pode criar outros subagents customizados (reviewer, documenter, etc.) da mesma forma descrita abaixo.
 
 ## Quando usar
 
