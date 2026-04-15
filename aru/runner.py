@@ -180,7 +180,7 @@ async def prompt(input: PromptInput) -> AgentRunResult:
         raise KeyError(f"Unknown native agent: {input.agent_name!r}. "
                        f"Known: {sorted(AGENTS.keys())}")
 
-    agent = create_agent_from_spec(
+    agent = await create_agent_from_spec(
         AGENTS[input.agent_name],
         session=input.session,
         model_ref=input.model_ref,

@@ -623,14 +623,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 env_ctx = _build_env_ctx()
                 if cmd_def.agent and cmd_def.agent in config.custom_agents:
                     agent_def = config.custom_agents[cmd_def.agent]
-                    agent = create_custom_agent_instance(agent_def, session, config, env_context=env_ctx)
+                    agent = await create_custom_agent_instance(agent_def, session, config, env_context=env_ctx)
                 elif cmd_def.agent:
                     console.print(f"[yellow]Warning: agent '{cmd_def.agent}' not found, using default[/yellow]")
-                    agent = create_general_agent(session, config, model_override=cmd_def.model, env_context=env_ctx)
+                    agent = await create_general_agent(session, config, model_override=cmd_def.model, env_context=env_ctx)
                 elif cmd_def.model:
-                    agent = create_general_agent(session, config, model_override=cmd_def.model, env_context=env_ctx)
+                    agent = await create_general_agent(session, config, model_override=cmd_def.model, env_context=env_ctx)
                 else:
-                    agent = create_general_agent(session, config, env_context=env_ctx)
+                    agent = await create_general_agent(session, config, env_context=env_ctx)
                 session.add_message("user", user_input)
                 await run_agent_capture(agent, prompt, session, images=attached_images or None)
             elif cmd_name in config.skills:
@@ -641,7 +641,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     prompt = render_skill_template(skill.content, cmd_args)
                     console.print(f"[bold magenta]Running skill /{cmd_name}...[/bold magenta]")
 
-                    agent = create_general_agent(session, config, env_context=_build_env_ctx())
+                    agent = await create_general_agent(session, config, env_context=_build_env_ctx())
                     session.add_message("user", user_input)
                     await run_agent_capture(agent, prompt, session, images=attached_images or None)
             elif cmd_name in config.custom_agents:
@@ -651,7 +651,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 else:
                     from aru.permissions import permission_scope
                     console.print(f"[bold magenta]Running agent /{cmd_name}...[/bold magenta]")
-                    agent = create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
+                    agent = await create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
                     session.add_message("user", user_input)
                     with permission_scope(agent_def.permission):
                         await run_agent_capture(agent, cmd_args or user_input, session, images=attached_images or None)
@@ -677,12 +677,12 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 agent_def = config.custom_agents[agent_name]
                 from aru.permissions import permission_scope
                 console.print(f"[bold magenta]Routing to @{agent_name}...[/bold magenta]")
-                agent = create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
+                agent = await create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
                 with permission_scope(agent_def.permission):
                     await run_agent_capture(agent, message_text, session, images=attached_images or None)
             else:
-                agent = create_general_agent(session, config, env_context=_build_env_ctx())
+                agent = await create_general_agent(session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
                 await run_agent_capture(agent, user_input, session, images=attached_images or None)
 
@@ -771,7 +771,7 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
         # Full mode with tools
         from aru.runner import build_env_context
         env_ctx = build_env_context(session)
-        agent = create_general_agent(session, config, env_context=env_ctx)
+        agent = await create_general_agent(session, config, env_context=env_ctx)
         session.add_message("user", prompt)
         await run_agent_capture(agent, prompt, session)
 

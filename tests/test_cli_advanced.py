@@ -256,16 +256,16 @@ class TestFormatToolLabel:
 
 
 class TestCreateGeneralAgent:
-    def test_creates_agent_with_default_config(self):
+    async def test_creates_agent_with_default_config(self):
         session = Session()
         session.model_ref = "anthropic/claude-sonnet-4-5"
-        
-        agent = create_general_agent(session, config=None)
+
+        agent = await create_general_agent(session, config=None)
         assert agent is not None
         assert agent.name == "Aru"
         assert agent.model is not None
 
-    def test_creates_agent_with_custom_config(self):
+    async def test_creates_agent_with_custom_config(self):
         session = Session()
         config = AgentConfig(
             readme_md="",
@@ -273,14 +273,14 @@ class TestCreateGeneralAgent:
             commands={},
             skills={}
         )
-        
-        agent = create_general_agent(session, config)
+
+        agent = await create_general_agent(session, config)
         assert agent is not None
         assert agent.name == "Aru"
 
-    def test_agent_has_all_tools(self):
+    async def test_agent_has_all_tools(self):
         session = Session()
-        agent = create_general_agent(session)
+        agent = await create_general_agent(session)
         assert len(agent.tools) > 0
 
 

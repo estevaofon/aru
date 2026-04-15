@@ -32,22 +32,22 @@ class AgentSpec:
 
 
 def _build_tools() -> list:
-    from aru.tools.codebase import GENERAL_TOOLS
+    from aru.tools.registry import GENERAL_TOOLS
     return GENERAL_TOOLS
 
 
 def _plan_tools() -> list:
-    from aru.tools.codebase import PLANNER_TOOLS
+    from aru.tools.registry import PLANNER_TOOLS
     return PLANNER_TOOLS
 
 
 def _exec_tools() -> list:
-    from aru.tools.codebase import EXECUTOR_TOOLS
+    from aru.tools.registry import EXECUTOR_TOOLS
     return EXECUTOR_TOOLS
 
 
 def _explore_tools() -> list:
-    from aru.tools.codebase import EXPLORER_TOOLS
+    from aru.tools.registry import EXPLORER_TOOLS
     return EXPLORER_TOOLS
 
 
