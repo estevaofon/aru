@@ -35,18 +35,29 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         name="Anthropic",
         api_key_env="ANTHROPIC_API_KEY",
         default_model="claude-sonnet-4-5-20250929",
+        # max_tokens numbers mirror models.dev (see OpenCode's registry).
+        # context_window is informational; MODEL_CONTEXT_LIMITS still owns the
+        # authoritative per-model input budget used by compaction.
         models={
-            "claude-sonnet-4-5": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 16384},
-            "claude-sonnet-4-6": {"id": "claude-sonnet-4-6", "max_tokens": 64000},
-            "claude-opus-4": {"id": "claude-opus-4-20250514", "max_tokens": 32000},
-            "claude-opus-4-6": {"id": "claude-opus-4-6", "max_tokens": 64000},
-            "claude-haiku-3-5": {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192},
-            "claude-haiku-4-5": {"id": "claude-haiku-4-5-20251001", "max_tokens": 8192},
-            # Full IDs also work as-is
-            "claude-sonnet-4-5-20250929": {"id": "claude-sonnet-4-5-20250929", "max_tokens": 16384},
-            "claude-opus-4-20250514": {"id": "claude-opus-4-20250514", "max_tokens": 32000},
-            "claude-haiku-3-5-20241022": {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192},
-            "claude-haiku-4-5-20251001": {"id": "claude-haiku-4-5-20251001", "max_tokens": 8192},
+            # Haiku
+            "claude-haiku-3-5":              {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192,   "context_window": 200_000},
+            "claude-haiku-3-5-20241022":     {"id": "claude-haiku-3-5-20241022", "max_tokens": 8192,   "context_window": 200_000},
+            "claude-haiku-4-5":              {"id": "claude-haiku-4-5-20251001", "max_tokens": 64_000, "context_window": 200_000},
+            "claude-haiku-4-5-20251001":     {"id": "claude-haiku-4-5-20251001", "max_tokens": 64_000, "context_window": 200_000},
+            # Sonnet
+            "claude-sonnet-3-7":             {"id": "claude-3-7-sonnet-20250219", "max_tokens": 64_000, "context_window": 200_000},
+            "claude-sonnet-4":               {"id": "claude-sonnet-4-20250514",   "max_tokens": 64_000, "context_window": 200_000},
+            "claude-sonnet-4-5":             {"id": "claude-sonnet-4-5-20250929", "max_tokens": 64_000, "context_window": 200_000},
+            "claude-sonnet-4-5-20250929":    {"id": "claude-sonnet-4-5-20250929", "max_tokens": 64_000, "context_window": 200_000},
+            "claude-sonnet-4-6":             {"id": "claude-sonnet-4-6",          "max_tokens": 64_000, "context_window": 1_000_000},
+            # Opus
+            "claude-opus-4":                 {"id": "claude-opus-4-20250514",     "max_tokens": 32_000, "context_window": 200_000},
+            "claude-opus-4-20250514":        {"id": "claude-opus-4-20250514",     "max_tokens": 32_000, "context_window": 200_000},
+            "claude-opus-4-1":               {"id": "claude-opus-4-1-20250805",   "max_tokens": 32_000, "context_window": 200_000},
+            "claude-opus-4-1-20250805":      {"id": "claude-opus-4-1-20250805",   "max_tokens": 32_000, "context_window": 200_000},
+            "claude-opus-4-5":               {"id": "claude-opus-4-5",            "max_tokens": 64_000, "context_window": 200_000},
+            "claude-opus-4-6":               {"id": "claude-opus-4-6",            "max_tokens": 128_000, "context_window": 1_000_000},
+            "claude-opus-4-7":               {"id": "claude-opus-4-7",            "max_tokens": 128_000, "context_window": 1_000_000},
         },
     ),
     "openai": ProviderConfig(
@@ -283,6 +294,22 @@ def _get_max_tokens(provider: ProviderConfig, model_name: str, default: int = 40
     return default
 
 
+def get_model_max_tokens(model_ref: str, default: int = 4096) -> int:
+    """Public: return the output-token cap for `model_ref`.
+
+    Used by agent factory / runner to size agents and to detect whether a
+    response was truncated at the cap. Unknown models fall back to `default`.
+    """
+    try:
+        provider_key, model_name = resolve_model_ref(model_ref)
+    except Exception:
+        return default
+    provider = _providers.get(provider_key)
+    if provider is None:
+        return default
+    return _get_max_tokens(provider, model_name, default)
+
+
 # ---------------------------------------------------------------------------
 # Model creation — the core function
 # ---------------------------------------------------------------------------
@@ -315,7 +342,15 @@ def create_model(
         raise ValueError(f"Unknown provider '{provider_key}'. Available: {available}")
 
     model_id = _get_actual_model_id(provider, model_name)
-    effective_max_tokens = max_tokens or _get_max_tokens(provider, model_name, 4096)
+    # Provider-declared ceiling for this model (source of truth).
+    provider_cap = _get_max_tokens(provider, model_name, 4096)
+    # Clamp caller request to the provider cap — callers can request *less*
+    # (e.g. small/subagents) but never *more* than the model supports. If no
+    # override is given, use the provider cap as-is.
+    if max_tokens is None or max_tokens <= 0:
+        effective_max_tokens = provider_cap
+    else:
+        effective_max_tokens = min(max_tokens, provider_cap)
 
     # Determine the actual provider type (for custom providers with "type" field)
     provider_type = provider.options.get("_provider_type", provider_key)

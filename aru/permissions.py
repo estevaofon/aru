@@ -121,11 +121,12 @@ def reset_session() -> None:
 
 
 # Modes the user can cycle between with shift+tab in the REPL.
-_MODE_CYCLE: tuple[str, ...] = ("default", "acceptEdits")
+_MODE_CYCLE: tuple[str, ...] = ("default", "acceptEdits", "yolo")
 
 MODE_LABELS: dict[str, str] = {
     "default": "manually accept edits",
     "acceptEdits": "auto-accept edits",
+    "yolo": "DANGEROUSLY skip all permissions",
 }
 
 
@@ -138,6 +139,7 @@ def set_permission_mode(mode: str) -> str:
     if mode not in _MODE_CYCLE:
         mode = "default"
     ctx.permission_mode = mode
+    ctx.skip_permissions = (mode == "yolo")
     return mode
 
 
@@ -148,8 +150,10 @@ def cycle_permission_mode() -> str:
         idx = _MODE_CYCLE.index(ctx.permission_mode)
     except ValueError:
         idx = 0
-    ctx.permission_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-    return ctx.permission_mode
+    next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
+    ctx.permission_mode = next_mode
+    ctx.skip_permissions = (next_mode == "yolo")
+    return next_mode
 
 
 def consume_rejection_feedback() -> str:

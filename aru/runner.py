@@ -21,6 +21,91 @@ from aru.display import (
 # Categories of tools that modify files (for highlighting in history)
 _MUTATION_TOOLS = {"write_file", "edit_file", "bash"}
 
+# Max-tokens recovery loop — port of Claude Code's two-tier strategy. When the
+# provider returns stop_reason="max_tokens", inject a meta user message telling
+# the model to resume mid-thought and re-run up to N times. After N failures
+# the truncated turn is persisted as-is and the user is told explicitly.
+_MAX_TOKENS_RECOVERY_ATTEMPTS = 3
+_MAX_TOKENS_RECOVERY_PROMPT = (
+    "Output token limit hit. Resume directly — no apology, no recap of what "
+    "you were doing. Pick up mid-thought if that is where the cut happened. "
+    "Break remaining work into smaller pieces."
+)
+
+
+def _prepare_recovery_input(
+    *,
+    agent,
+    prior_history,
+    user_message: str,
+    assistant_blocks: list[dict],
+    tool_result_msgs: list[dict],
+    pending_tool_uses: dict[str, dict],
+    accumulated_text: str,
+    flush_pending_text,
+    images,
+):
+    """Build the next-attempt input after a max_tokens truncation.
+
+    The assistant was in the middle of something when the provider capped
+    the response. To resume safely we:
+
+    1. Flush any text streamed since the last tool_use into a text block.
+    2. Drop orphaned tool_use blocks (no matching tool_result yet) — the
+       Anthropic API rejects a request whose trailing assistant message has
+       a tool_use without a tool_result on the following user turn, and we
+       can't synthesize a plausible result.
+    3. Replay the conversation the agent just saw (prior history + current
+       user message), plus the truncated assistant turn we have so far,
+       plus the open tool_result round (if any), and append the meta
+       recovery user message at the very end.
+
+    Returns a list[Message] suitable for agent.arun(...).
+    """
+    from agno.models.message import Message
+    from aru.history_blocks import to_agno_messages
+
+    # Step 1: flush any text accumulated since the last tool_use into the
+    # assistant block stream so retry sees it.
+    flush_pending_text(accumulated_text)
+
+    # Step 2: strip open tool_use blocks (no tool_result landed). Without
+    # this the API rejects the next request. Best-effort removal since the
+    # block ref in `pending_tool_uses` may have been mutated.
+    for tid in list(pending_tool_uses.keys()):
+        block = pending_tool_uses.pop(tid)
+        try:
+            assistant_blocks.remove(block)
+        except ValueError:
+            pass
+
+    # Step 3: rebuild the message list. `prior_history` is the Agno
+    # Message list originally passed to agent.arun() — it already contains
+    # the current user turn as its last entry when history exists. When
+    # prior_history is empty (first turn of a session) the original input
+    # was a bare string, so we construct the user message ourselves.
+    messages = list(prior_history)  # copy so we don't mutate caller state
+    if not messages:
+        from agno.models.message import Message as _Msg
+        messages.append(_Msg(role="user", content=user_message, images=images or None))
+
+    structured = []
+    if assistant_blocks:
+        structured.append({"role": "assistant", "content": list(assistant_blocks)})
+    for tr in tool_result_msgs:
+        # Only forward *closed* rounds: open ones mean we truncated before
+        # the tool batch finished, which we can't safely resume.
+        if not tr.get("_open", True):
+            structured.append({"role": "tool", "content": tr["content"]})
+
+    if structured:
+        messages.extend(to_agno_messages(structured))
+
+    messages.append(
+        Message(role="user", content=_MAX_TOKENS_RECOVERY_PROMPT, images=images or None)
+    )
+    return messages
+
 _PLAN_STEP_ICONS = {
     "completed": "\u2713",
     "in_progress": "~",
@@ -398,136 +483,182 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             arun_kwargs = dict(stream=True, stream_events=True, yield_run_output=True)
             if isinstance(agent_input, str) and images:
                 arun_kwargs["images"] = images
-            async for event in agent.arun(agent_input, **arun_kwargs):
-                if isinstance(event, RunOutput):
-                    run_output = event
-                    break
 
-                if isinstance(event, ToolCallStartedEvent):
-                    _stall_counter = 0
-                    if hasattr(event, "tool") and event.tool:
-                        tool_name = event.tool.tool_name or "tool"
-                        tool_args = event.tool.tool_args or None
-                        tool_id = getattr(event.tool, "tool_call_id", None) or tool_name
-                    else:
-                        tool_name = getattr(event, "tool_name", "tool")
-                        tool_args = getattr(event, "tool_args", None)
-                        tool_id = getattr(event, "tool_call_id", None) or tool_name
-                    label = _format_tool_label(tool_name, tool_args)
-                    collected_tool_calls.append(label)
-                    # Structured capture: flush any text streamed so far into
-                    # a text block, then append the tool_use block. This
-                    # preserves the order text → tool call → more text.
-                    _flush_pending_text(accumulated)
-                    assistant_blocks.append(
-                        tool_use_block(tool_id, tool_name, tool_args if isinstance(tool_args, dict) else {})
-                    )
-                    pending_tool_uses[tool_id] = assistant_blocks[-1]
-                    if accumulated[display._flushed_len:]:
-                        display.content = None
-                        live.stop()
-                        display.flush()
-                        live.start()
-                        live._live_render._shape = None
-                    tracker.start(tool_id, label)
-                    status.set_text(f"{label}...")
-                    live.update(display)
-                    # Event: tool.called
-                    await _publish_event("tool.called", {
-                        "tool_name": tool_name, "tool_id": tool_id,
-                        "args": tool_args if isinstance(tool_args, dict) else {},
-                    })
+            # Max-tokens recovery loop. A single run may cycle through
+            # `agent.arun()` multiple times if the provider truncates at
+            # max_tokens — we inject a meta user message asking the model
+            # to resume and re-stream into the *same* assistant_blocks /
+            # accumulated buffers so the persisted turn reads as one
+            # continuous message. Mirrors Claude Code's query.ts loop.
+            from aru.cache_patch import get_last_stop_reason, reset_last_stop_reason
+            current_input = agent_input
+            recovery_attempts_left = _MAX_TOKENS_RECOVERY_ATTEMPTS
+            while True:
+                reset_last_stop_reason()
+                async for event in agent.arun(current_input, **arun_kwargs):
+                    if isinstance(event, RunOutput):
+                        run_output = event
+                        break
 
-                elif isinstance(event, ToolCallCompletedEvent):
-                    _stall_counter = 0
-                    if hasattr(event, "tool") and event.tool:
-                        tool_id = getattr(event.tool, "tool_call_id", None) or getattr(event.tool, "tool_name", "tool")
-                        tool_result_text = getattr(event.tool, "result", None)
-                    else:
-                        tool_id = getattr(event, "tool_call_id", None) or getattr(event, "tool_name", "tool")
-                        tool_result_text = getattr(event, "content", None)
-
-                    # Structured capture: bundle the tool_result into the
-                    # most recent tool-role message (same "round" of tool
-                    # calls) so they become a single user-side follow-up
-                    # in Anthropic's wire format.
-                    if tool_id in pending_tool_uses:
-                        result_str = str(tool_result_text) if tool_result_text is not None else ""
-                        tr_block = tool_result_block(tool_id, result_str)
-                        if tool_result_msgs and tool_result_msgs[-1]["_open"]:
-                            tool_result_msgs[-1]["content"].append(tr_block)
+                    if isinstance(event, ToolCallStartedEvent):
+                        _stall_counter = 0
+                        if hasattr(event, "tool") and event.tool:
+                            tool_name = event.tool.tool_name or "tool"
+                            tool_args = event.tool.tool_args or None
+                            tool_id = getattr(event.tool, "tool_call_id", None) or tool_name
                         else:
-                            tool_result_msgs.append({
-                                "role": "tool",
-                                "content": [tr_block],
-                                "_open": True,
-                            })
-                        pending_tool_uses.pop(tool_id, None)
+                            tool_name = getattr(event, "tool_name", "tool")
+                            tool_args = getattr(event, "tool_args", None)
+                            tool_id = getattr(event, "tool_call_id", None) or tool_name
+                        label = _format_tool_label(tool_name, tool_args)
+                        collected_tool_calls.append(label)
+                        # Structured capture: flush any text streamed so far into
+                        # a text block, then append the tool_use block. This
+                        # preserves the order text → tool call → more text.
+                        _flush_pending_text(accumulated)
+                        assistant_blocks.append(
+                            tool_use_block(tool_id, tool_name, tool_args if isinstance(tool_args, dict) else {})
+                        )
+                        pending_tool_uses[tool_id] = assistant_blocks[-1]
+                        if accumulated[display._flushed_len:]:
+                            display.content = None
+                            live.stop()
+                            display.flush()
+                            live.start()
+                            live._live_render._shape = None
+                        tracker.start(tool_id, label)
+                        status.set_text(f"{label}...")
+                        live.update(display)
+                        # Event: tool.called
+                        await _publish_event("tool.called", {
+                            "tool_name": tool_name, "tool_id": tool_id,
+                            "args": tool_args if isinstance(tool_args, dict) else {},
+                        })
 
-                    # Event: tool.completed
-                    await _publish_event("tool.completed", {
-                        "tool_id": tool_id,
-                        "result_length": len(str(tool_result_text)) if tool_result_text else 0,
-                    })
-                    result = tracker.complete(tool_id)
-                    for label, duration in tracker.pop_completed():
-                        dur_str = f" {duration:.1f}s" if duration >= 0.5 else ""
-                        live.console.print(Text.assemble(
-                            ("  ", ""),
-                            ("\u2713 ", "bold green"),
-                            (label, "dim"),
-                            (dur_str, "dim cyan"),
-                        ))
-                    if not tracker.active_labels:
-                        status.resume_cycling()
-                        # Close the current tool_result round — any further
-                        # tool calls start a new round.
-                        if tool_result_msgs and tool_result_msgs[-1]["_open"]:
-                            tool_result_msgs[-1]["_open"] = False
-                        # Flush coalesced plan-panel render. Multiple
-                        # update_plan_step calls in the same batch (and any
-                        # enter_plan_mode that replaces the plan mid-batch)
-                        # collapse into a single panel showing final state.
-                        try:
-                            from aru.tools.tasklist import flush_plan_render
-                            flush_plan_render(session)
-                        except Exception:
-                            pass
-                    live.update(display)
+                    elif isinstance(event, ToolCallCompletedEvent):
+                        _stall_counter = 0
+                        if hasattr(event, "tool") and event.tool:
+                            tool_id = getattr(event.tool, "tool_call_id", None) or getattr(event.tool, "tool_name", "tool")
+                            tool_result_text = getattr(event.tool, "result", None)
+                        else:
+                            tool_id = getattr(event, "tool_call_id", None) or getattr(event, "tool_name", "tool")
+                            tool_result_text = getattr(event, "content", None)
 
-                elif isinstance(event, RunContentEvent):
-                    _stall_counter = 0
-                    if hasattr(event, "content") and event.content:
-                        accumulated += event.content
-                        unflushed = accumulated[display._flushed_len:]
+                        # Structured capture: bundle the tool_result into the
+                        # most recent tool-role message (same "round" of tool
+                        # calls) so they become a single user-side follow-up
+                        # in Anthropic's wire format.
+                        if tool_id in pending_tool_uses:
+                            result_str = str(tool_result_text) if tool_result_text is not None else ""
+                            tr_block = tool_result_block(tool_id, result_str)
+                            if tool_result_msgs and tool_result_msgs[-1]["_open"]:
+                                tool_result_msgs[-1]["content"].append(tr_block)
+                            else:
+                                tool_result_msgs.append({
+                                    "role": "tool",
+                                    "content": [tr_block],
+                                    "_open": True,
+                                })
+                            pending_tool_uses.pop(tool_id, None)
 
-                        if unflushed.count("\n") > 15:
-                            break_point = unflushed.rfind("\n\n")
-                            if break_point == -1:
-                                break_point = unflushed.rfind("\n")
-
-                            if break_point != -1:
-                                chunk = unflushed[:break_point + 1]
-                                if chunk.count("```") % 2 == 0:
-                                    display.content = None
-                                    live.stop()
-                                    console.print(Markdown(chunk))
-                                    display._flushed_len += len(chunk)
-                                    live.start()
-                                    live._live_render._shape = None
-
-                        display.set_content(accumulated)
+                        # Event: tool.completed
+                        await _publish_event("tool.completed", {
+                            "tool_id": tool_id,
+                            "result_length": len(str(tool_result_text)) if tool_result_text else 0,
+                        })
+                        result = tracker.complete(tool_id)
+                        for label, duration in tracker.pop_completed():
+                            dur_str = f" {duration:.1f}s" if duration >= 0.5 else ""
+                            live.console.print(Text.assemble(
+                                ("  ", ""),
+                                ("\u2713 ", "bold green"),
+                                (label, "dim"),
+                                (dur_str, "dim cyan"),
+                            ))
+                        if not tracker.active_labels:
+                            status.resume_cycling()
+                            # Close the current tool_result round — any further
+                            # tool calls start a new round.
+                            if tool_result_msgs and tool_result_msgs[-1]["_open"]:
+                                tool_result_msgs[-1]["_open"] = False
+                            # Flush coalesced plan-panel render. Multiple
+                            # update_plan_step calls in the same batch (and any
+                            # enter_plan_mode that replaces the plan mid-batch)
+                            # collapse into a single panel showing final state.
+                            try:
+                                from aru.tools.tasklist import flush_plan_render
+                                flush_plan_render(session)
+                            except Exception:
+                                pass
                         live.update(display)
 
-                else:
-                    _stall_counter += 1
-                    if _stall_counter >= _STALL_LIMIT:
-                        _stalled = True
-                        live.console.print(
-                            "[yellow]Agent stalled (tool call limit likely reached). "
-                            "Moving on.[/yellow]"
-                        )
-                        break
+                    elif isinstance(event, RunContentEvent):
+                        _stall_counter = 0
+                        if hasattr(event, "content") and event.content:
+                            accumulated += event.content
+                            unflushed = accumulated[display._flushed_len:]
+
+                            if unflushed.count("\n") > 15:
+                                break_point = unflushed.rfind("\n\n")
+                                if break_point == -1:
+                                    break_point = unflushed.rfind("\n")
+
+                                if break_point != -1:
+                                    chunk = unflushed[:break_point + 1]
+                                    if chunk.count("```") % 2 == 0:
+                                        display.content = None
+                                        live.stop()
+                                        console.print(Markdown(chunk))
+                                        display._flushed_len += len(chunk)
+                                        live.start()
+                                        live._live_render._shape = None
+
+                            display.set_content(accumulated)
+                            live.update(display)
+
+                    else:
+                        _stall_counter += 1
+                        if _stall_counter >= _STALL_LIMIT:
+                            _stalled = True
+                            live.console.print(
+                                "[yellow]Agent stalled (tool call limit likely reached). "
+                                "Moving on.[/yellow]"
+                            )
+                            break
+
+                # Stream for this attempt finished. If we weren't truncated
+                # at the output cap, or we've exhausted recovery attempts,
+                # stop here. Otherwise build a recovery input and loop.
+                if get_last_stop_reason() != "max_tokens":
+                    break
+                if _stalled:
+                    break
+                if recovery_attempts_left <= 0:
+                    live.console.print(
+                        f"[yellow]Output still truncated after "
+                        f"{_MAX_TOKENS_RECOVERY_ATTEMPTS} recovery attempts. "
+                        f"Persisting the turn as-is.[/yellow]"
+                    )
+                    break
+                current_input = _prepare_recovery_input(
+                    agent=agent,
+                    prior_history=history_messages,
+                    user_message=run_message,
+                    assistant_blocks=assistant_blocks,
+                    tool_result_msgs=tool_result_msgs,
+                    pending_tool_uses=pending_tool_uses,
+                    accumulated_text=accumulated,
+                    flush_pending_text=_flush_pending_text,
+                    images=images,
+                )
+                recovery_attempts_left -= 1
+                attempt_no = _MAX_TOKENS_RECOVERY_ATTEMPTS - recovery_attempts_left
+                live.console.print(
+                    f"[dim]Output truncated at cap — resuming "
+                    f"({attempt_no}/{_MAX_TOKENS_RECOVERY_ATTEMPTS})...[/dim]"
+                )
+                # Clear run_output so the next pass repopulates it.
+                run_output = None
 
             # Clear live content before the Live context exits so its final
             # render doesn't duplicate text that we print explicitly below.

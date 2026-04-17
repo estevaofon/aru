@@ -138,10 +138,11 @@ def _wrap_tools_with_hooks(tools: list) -> list:
 
 
 async def _apply_chat_hooks(instructions: str, model_ref: str, agent_name: str,
-                            max_tokens: int = 8192) -> tuple[str, str, int]:
+                            max_tokens: int | None = None) -> tuple[str, str, int | None]:
     """Apply chat.system.transform and chat.params hooks to agent creation params.
 
     Returns (instructions, model_ref, max_tokens) — possibly modified by plugins.
+    When max_tokens is None, providers.create_model will use the model's full cap.
     """
     # chat.system.transform — plugins can modify the system prompt
     data = await _fire_hook("chat.system.transform", {
@@ -242,9 +243,9 @@ async def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
         parts.append(extra)
     instructions = "\n\n".join(parts)
 
-    # Apply chat hooks (system.transform + params)
+    # Apply chat hooks (system.transform + params). max_tokens=None → provider cap.
     instructions, model_ref, max_tokens = await _apply_chat_hooks(
-        instructions, model_ref, agent_def.name, max_tokens=8192,
+        instructions, model_ref, agent_def.name, max_tokens=None,
     )
 
     return Agent(

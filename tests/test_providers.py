@@ -66,7 +66,8 @@ class TestGetActualModelId:
 class TestGetMaxTokens:
     def test_known_model(self):
         provider = BUILTIN_PROVIDERS["anthropic"]
-        assert _get_max_tokens(provider, "claude-sonnet-4-5") == 16384
+        # claude-sonnet-4-5 supports 64k output (mirrors models.dev).
+        assert _get_max_tokens(provider, "claude-sonnet-4-5") == 64_000
 
     def test_unknown_model_uses_default(self):
         provider = BUILTIN_PROVIDERS["ollama"]
@@ -180,6 +181,23 @@ class TestCreateModel:
         create_model("anthropic/claude-sonnet-4-5", max_tokens=16384)
         call_kwargs = mock_create.call_args
         assert call_kwargs[1]["max_tokens"] == 16384
+
+    @patch("aru.providers._create_provider_model")
+    def test_max_tokens_none_uses_provider_cap(self, mock_create):
+        """None → full provider cap."""
+        mock_create.return_value = MagicMock()
+        create_model("anthropic/claude-sonnet-4-5", max_tokens=None)
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["max_tokens"] == 64_000
+
+    @patch("aru.providers._create_provider_model")
+    def test_max_tokens_clamped_to_provider_cap(self, mock_create):
+        """Requests above the cap are clamped down."""
+        mock_create.return_value = MagicMock()
+        # haiku-3-5 supports 8192; request 100000 and expect clamp.
+        create_model("anthropic/claude-haiku-3-5", max_tokens=100_000)
+        call_kwargs = mock_create.call_args
+        assert call_kwargs[1]["max_tokens"] == 8192
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown provider"):

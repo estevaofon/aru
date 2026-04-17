@@ -24,6 +24,7 @@ SLASH_COMMANDS = [
     ("/plugin", "Manage cached plugins (install/list/remove/update)", "/plugin <subcommand>"),
     ("/undo", "Undo last turn — restore files and/or conversation", "/undo"),
     ("/cost", "Show detailed token usage and cost", "/cost"),
+    ("/yolo", "Toggle DANGEROUSLY skip all permissions (YOLO mode)", "/yolo"),
     ("/quit", "Exit aru", "/quit"),
 ]
 

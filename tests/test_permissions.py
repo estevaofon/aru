@@ -783,3 +783,77 @@ class TestPermissionScope:
             # edit should be overridden
             action_edit, _ = resolve_permission("edit", "main.py")
             assert action_edit == "deny"
+
+
+# ---------------------------------------------------------------------------
+# YOLO mode (interactive skip-permissions)
+# ---------------------------------------------------------------------------
+
+
+class TestYoloMode:
+    def setup_method(self):
+        from aru.permissions import set_permission_mode
+        set_permission_mode("default")
+        set_skip_permissions(False)
+        set_config(PermissionConfig())
+        reset_session()
+
+    def teardown_method(self):
+        from aru.permissions import set_permission_mode
+        set_permission_mode("default")
+
+    def test_set_permission_mode_yolo_enables_skip(self):
+        from aru.permissions import set_permission_mode
+        set_permission_mode("yolo")
+        assert get_skip_permissions() is True
+        assert get_ctx().permission_mode == "yolo"
+
+    def test_set_permission_mode_default_disables_skip(self):
+        from aru.permissions import set_permission_mode
+        set_permission_mode("yolo")
+        set_permission_mode("default")
+        assert get_skip_permissions() is False
+        assert get_ctx().permission_mode == "default"
+
+    def test_cycle_includes_yolo(self):
+        from aru.permissions import cycle_permission_mode, set_permission_mode
+        set_permission_mode("default")
+        assert cycle_permission_mode() == "acceptEdits"
+        assert cycle_permission_mode() == "yolo"
+        assert get_skip_permissions() is True
+        assert cycle_permission_mode() == "default"
+        assert get_skip_permissions() is False
+
+    def test_yolo_allows_env_files(self):
+        """YOLO must bypass the hardcoded _SENSITIVE_FILE_RULES deny for .env."""
+        from aru.permissions import set_permission_mode
+        # Baseline: .env is denied in default mode
+        action, _ = resolve_permission("read", ".env")
+        assert action == "deny"
+        set_permission_mode("yolo")
+        action, _ = resolve_permission("read", ".env")
+        assert action == "allow"
+
+    def test_yolo_allows_arbitrary_bash(self):
+        from aru.permissions import set_permission_mode
+        # Baseline: rm -rf is not in safe bash defaults → ask
+        action, _ = resolve_permission("bash", "rm -rf /tmp/anything")
+        assert action == "ask"
+        set_permission_mode("yolo")
+        action, _ = resolve_permission("bash", "rm -rf /tmp/anything")
+        assert action == "allow"
+
+    def test_disable_yolo_restores_env_deny(self):
+        from aru.permissions import set_permission_mode
+        set_permission_mode("yolo")
+        set_permission_mode("default")
+        action, _ = resolve_permission("read", ".env")
+        assert action == "deny"
+
+    def test_init_ctx_with_skip_permissions_sets_yolo_mode(self):
+        """Starting aru with --dangerously-skip-permissions must mark mode as yolo."""
+        from rich.console import Console
+        from aru.runtime import init_ctx
+        ctx = init_ctx(console=Console(), skip_permissions=True)
+        assert ctx.permission_mode == "yolo"
+        assert ctx.skip_permissions is True

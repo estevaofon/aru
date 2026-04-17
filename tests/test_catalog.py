@@ -27,10 +27,13 @@ class TestCatalog:
         assert AGENTS["plan"].small_model is False
 
     def test_max_tokens(self):
+        # Primary agents (build/executor) take the full model cap — catalog
+        # leaves them unbounded and providers.create_model clamps to the
+        # model's ceiling. Subagents stay tight.
+        assert AGENTS["build"].max_tokens is None
+        assert AGENTS["executor"].max_tokens is None
         assert AGENTS["plan"].max_tokens == 4096
-        assert AGENTS["explorer"].max_tokens == 4096
-        assert AGENTS["build"].max_tokens == 8192
-        assert AGENTS["executor"].max_tokens == 8192
+        assert AGENTS["explorer"].max_tokens == 8192
 
 
 class TestToolFactories:

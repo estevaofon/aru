@@ -153,6 +153,8 @@ def set_ctx(ctx: RuntimeContext) -> contextvars.Token[RuntimeContext]:
 def init_ctx(console: Console | None = None, **kwargs: Any) -> RuntimeContext:
     """Create a new RuntimeContext, install it, and return it."""
     ctx = RuntimeContext(console=console or Console(), **kwargs)
+    if ctx.skip_permissions and ctx.permission_mode != "yolo":
+        ctx.permission_mode = "yolo"
     _runtime_ctx.set(ctx)
     return ctx
 

@@ -119,7 +119,7 @@ def _render_home(session, skip_permissions: bool) -> None:
     console.print(cmds)
     console.print()
 
-    mode_label = "[red]skip permissions[/red]" if skip_permissions else "[green]safe mode[/green]"
+    mode_label = "[bold red]🔥 YOLO mode — permissions bypassed[/bold red]" if skip_permissions else "[green]safe mode[/green]"
     console.print(
         Text.from_markup(
             f"  [dim]model:[/dim] [bold]{session.model_display}[/bold] [dim]({session.model_id})[/dim]"

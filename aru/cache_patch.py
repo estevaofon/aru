@@ -1,6 +1,6 @@
 """Monkey-patch Agno's model layer to reduce token consumption.
 
-Three optimizations:
+Four optimizations:
 
 1. **Tool result pruning** (ALL providers): After each tool execution, old tool
    results in the message list are truncated to a short summary. This prevents
@@ -11,6 +11,11 @@ Three optimizations:
 
 3. **Per-call metrics** (ALL providers): Captures input/output tokens of the
    last API call (context window size), exposed via get_last_call_metrics().
+
+4. **Stop-reason capture** (Anthropic + OpenAI-compatible): Captures the
+   `stop_reason` / `finish_reason` from the final message of the last API call,
+   exposed via get_last_stop_reason(). Lets the runner detect `max_tokens`
+   truncation and trigger the recovery loop.
 
 These patches intercept Agno's internal loop so they work transparently
 regardless of which provider is used.
@@ -33,10 +38,34 @@ _last_call_output_tokens: int = 0
 _last_call_cache_read: int = 0
 _last_call_cache_write: int = 0
 
+# Last API call stop reason (Anthropic uses "end_turn"/"tool_use"/"max_tokens"/
+# "stop_sequence"/"pause_turn"; OpenAI uses "stop"/"length"/"tool_calls").
+# We normalize "length" → "max_tokens" so callers can check a single value.
+_last_call_stop_reason: str | None = None
+
 
 def get_last_call_metrics() -> tuple[int, int, int, int]:
     """Return (input, output, cache_read, cache_write) from the most recent API call."""
     return _last_call_input_tokens, _last_call_output_tokens, _last_call_cache_read, _last_call_cache_write
+
+
+def get_last_stop_reason() -> str | None:
+    """Return the stop reason from the most recent API call, normalized.
+
+    Returns one of: `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`,
+    `pause_turn`, or None if no call has happened yet / the provider did not
+    expose one. OpenAI's `length` is mapped to `max_tokens` and `stop` to
+    `end_turn` so callers have a single vocabulary.
+    """
+    return _last_call_stop_reason
+
+
+def reset_last_stop_reason() -> None:
+    """Clear the cached stop reason — call before starting a new turn so a
+    stale value from a prior turn never leaks into the next one.
+    """
+    global _last_call_stop_reason
+    _last_call_stop_reason = None
 
 
 def _prune_tool_messages(messages):
@@ -97,6 +126,7 @@ def apply_cache_patch():
     _patch_tool_result_pruning()
     _patch_claude_cache_breakpoints()
     _patch_per_call_metrics()
+    _patch_stop_reason_capture()
 
 
 def _patch_tool_result_pruning():
@@ -233,5 +263,96 @@ def _patch_per_call_metrics():
     try:
         import agno.models.base as _base_module
         _base_module.accumulate_model_metrics = _patched_accumulate
+    except (ImportError, AttributeError):
+        pass
+
+
+# OpenAI "length" and Anthropic "max_tokens" mean the same thing; normalize so
+# runner logic can check a single value.
+_STOP_REASON_NORMALIZE = {
+    "length": "max_tokens",        # OpenAI
+    "stop": "end_turn",            # OpenAI
+    "tool_calls": "tool_use",      # OpenAI
+    "function_call": "tool_use",   # legacy OpenAI
+    "MAX_TOKENS": "max_tokens",    # Gemini (all-caps)
+}
+
+
+def _record_stop_reason(raw: str | None) -> None:
+    """Normalize and cache the provider's stop reason."""
+    global _last_call_stop_reason
+    if raw is None or raw == "":
+        return
+    _last_call_stop_reason = _STOP_REASON_NORMALIZE.get(raw, raw)
+
+
+def _patch_stop_reason_capture():
+    """Forward `stop_reason` from Agno's provider parsers into a module-level
+    slot readable via `get_last_stop_reason()`.
+
+    Agno's Anthropic adapter sees `response.stop_reason` (non-streaming) and
+    `response.message.stop_reason` (streaming MessageStopEvent), but discards
+    both before anything downstream can observe them. We wrap the two parsers
+    and record the value as a side effect. The OpenAI-compatible adapter
+    already exposes `response.choices[0].finish_reason`, so we hook that too
+    for completeness (Qwen, DeepSeek, Groq, OpenRouter).
+    """
+    # Anthropic (native + streaming)
+    try:
+        from agno.models.anthropic import claude as _claude_mod
+
+        _original_parse = _claude_mod.Claude._parse_provider_response
+        _original_parse_delta = _claude_mod.Claude._parse_provider_response_delta
+
+        def _patched_parse(self, response, *args, **kwargs):
+            result = _original_parse(self, response, *args, **kwargs)
+            _record_stop_reason(getattr(response, "stop_reason", None))
+            return result
+
+        def _patched_parse_delta(self, response, *args, **kwargs):
+            result = _original_parse_delta(self, response, *args, **kwargs)
+            # MessageStopEvent / ParsedBetaMessageStopEvent carry the final
+            # stop_reason on their nested `message` object.
+            msg = getattr(response, "message", None)
+            if msg is not None:
+                _record_stop_reason(getattr(msg, "stop_reason", None))
+            return result
+
+        _claude_mod.Claude._parse_provider_response = _patched_parse
+        _claude_mod.Claude._parse_provider_response_delta = _patched_parse_delta
+    except (ImportError, AttributeError):
+        pass
+
+    # OpenAI-compatible (OpenAI, Qwen/DashScope, DeepSeek, Groq, OpenRouter)
+    try:
+        from agno.models.openai import chat as _openai_chat
+
+        _original_openai_parse = _openai_chat.OpenAIChat._parse_provider_response
+
+        def _patched_openai_parse(self, response, *args, **kwargs):
+            result = _original_openai_parse(self, response, *args, **kwargs)
+            try:
+                choice = response.choices[0]
+                _record_stop_reason(getattr(choice, "finish_reason", None))
+            except (AttributeError, IndexError, TypeError):
+                pass
+            return result
+
+        _openai_chat.OpenAIChat._parse_provider_response = _patched_openai_parse
+
+        if hasattr(_openai_chat.OpenAIChat, "_parse_provider_response_delta"):
+            _original_openai_delta = _openai_chat.OpenAIChat._parse_provider_response_delta
+
+            def _patched_openai_delta(self, response, *args, **kwargs):
+                result = _original_openai_delta(self, response, *args, **kwargs)
+                try:
+                    choice = response.choices[0]
+                    # Only the final chunk sets finish_reason.
+                    _record_stop_reason(getattr(choice, "finish_reason", None))
+                except (AttributeError, IndexError, TypeError):
+                    pass
+                return result
+
+            _openai_chat.OpenAIChat._parse_provider_response_delta = _patched_openai_delta
     except (ImportError, AttributeError):
         pass

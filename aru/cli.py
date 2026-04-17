@@ -15,6 +15,7 @@ import sys
 
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 
 # ── Re-exports for backward compatibility ─────────────────────────────
 # Tests and external code import these from aru.cli; keep them accessible.
@@ -92,12 +93,45 @@ _logging.getLogger("agno").setLevel(_logging.WARNING)
 
 from aru.agents.planner import review_plan
 from aru.config import load_config, render_command_template, render_skill_template
-from aru.permissions import get_skip_permissions
+from aru.permissions import get_skip_permissions, set_permission_mode
 from aru.providers import (
     MODEL_ALIASES,
     list_providers,
     resolve_model_ref,
 )
+
+
+def _toggle_yolo_mode(ctx) -> None:
+    """Toggle YOLO (dangerously-skip-permissions) mode from the REPL.
+
+    Turning YOLO *off* is unconditional — safety is not at risk.
+    Turning YOLO *on* requires an explicit y/n confirmation with a red warning panel.
+    """
+    if ctx.permission_mode == "yolo":
+        set_permission_mode("default")
+        console.print("[bold green]✔ YOLO disabled — safe mode restored.[/bold green]")
+        return
+
+    warning = Text.from_markup(
+        "[bold red]⚠  DANGEROUSLY SKIP PERMISSIONS (YOLO)[/bold red]\n\n"
+        "[red]All permission prompts will be bypassed for this session, including:[/red]\n"
+        "  • Reading/writing [bold].env[/bold] files and other sensitive paths\n"
+        "  • Arbitrary shell commands ([bold]rm -rf[/bold], package installs, network calls)\n"
+        "  • Edits outside the working directory\n"
+        "  • All sub-agents delegated during this session\n\n"
+        "[dim]Toggle off anytime with /yolo or shift+tab.[/dim]"
+    )
+    console.print(Panel(
+        warning,
+        title="[bold red]Enable YOLO mode?[/bold red]",
+        border_style="red",
+        padding=(1, 2),
+    ))
+    if ask_yes_no("Confirm enabling YOLO mode"):
+        set_permission_mode("yolo")
+        console.print("[bold red]🔥 YOLO MODE ACTIVE — all permissions bypassed.[/bold red]")
+    else:
+        console.print("[dim]Cancelled. Remaining in safe mode.[/dim]")
 
 
 # ── Main REPL ──────────────────────────────────────────────────────────
@@ -288,7 +322,13 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                         f'  <style fg="ansigray">│</style>'
                         f'  <style fg="ansigray">{ctx.mcp_loaded_msg}</style>'
                     )
-                if ctx.permission_mode == "acceptEdits":
+                if ctx.permission_mode == "yolo":
+                    mode_part = (
+                        f'  <style fg="ansigray">│</style>'
+                        f'  <b><style fg="ansired">🔥 YOLO — permissions bypassed</style></b>'
+                        f'  <style fg="ansigray">(/yolo to toggle)</style>'
+                    )
+                elif ctx.permission_mode == "acceptEdits":
                     mode_part = (
                         f'  <style fg="ansigray">│</style>'
                         f'  <b><style fg="ansigreen">⏵⏵ auto-accept edits on</style></b>'
@@ -570,6 +610,10 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             ))
             continue
 
+        if user_input.lower() in ("/yolo", "/unsafe"):
+            _toggle_yolo_mode(ctx)
+            continue
+
         # Begin a new checkpoint turn for undo support
         _turn_counter += 1
         ctx.checkpoint_manager.begin_turn(_turn_counter)
@@ -797,7 +841,7 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
 
         agent = Agent(
             name="Aru",
-            model=create_model(session.model_ref, max_tokens=8192),
+            model=create_model(session.model_ref),  # None → provider cap
             tools=[],
             instructions=build_instructions("general", extra_instructions),
             markdown=True,
