@@ -33,6 +33,7 @@ aru/
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
+├── tool_policy.py      # Single tool-policy decision (plan mode + skill disallowed). Shared by wrapper and permissions.
 ├── plugin_cache.py     # Plugin install/cache/discovery system (/plugin command backend)
 ├── select.py           # Arrow-key option menu (permission prompt + plan approval)
 ├── agents/

@@ -29,32 +29,26 @@ async def _fire_hook(event_name: str, data: dict) -> dict:
     return data
 
 
-# Tools blocked while the session is in plan mode. Read-only tools (read,
-# glob, grep, list_directory, web_search, web_fetch, etc.) are NOT in this
-# set — the agent needs them to research and write the plan. Mutating or
-# execution-capable tools are gated: the agent must call exit_plan_mode and
-# get user approval before running any of these.
-_PLAN_MODE_BLOCKED_TOOLS: frozenset[str] = frozenset({
-    "edit_file",
-    "edit_files",
-    "write_file",
-    "write_files",
-    "bash",
-    "delegate_task",
-})
+# Backward-compat re-export. The canonical list now lives in
+# aru.tool_policy.PLAN_MODE_BLOCKED_TOOLS; external callers (tests,
+# docs) that import it from here keep working.
+from aru.tool_policy import PLAN_MODE_BLOCKED_TOOLS as _PLAN_MODE_BLOCKED_TOOLS
 
 
 def _wrap_tools_with_hooks(tools: list) -> list:
-    """Wrap tool functions to fire tool.execute.before/after plugin hooks.
+    """Wrap tool functions with a single tool-policy gate and plugin hooks.
 
-    Before hook can mutate args; after hook can mutate the result.
-    If a before hook raises, the tool is not executed and the error is returned.
+    The policy gate (plan mode + active-skill disallowed_tools) is
+    evaluated by `aru.tool_policy.evaluate_tool_policy` — a single
+    decision function shared with `aru.permissions.resolve_permission`,
+    so both the wrapper and per-tool permission checks see the same
+    answer. When a tool is denied by multiple rules at once, the policy
+    layer returns one combined BLOCKED message rather than two
+    sequential contradictory ones (this is the scenario-1 fix of the
+    combinatorial gate audit).
 
-    Also enforces the plan-mode gate: when `session.plan_mode` is True,
-    any tool in `_PLAN_MODE_BLOCKED_TOOLS` short-circuits with a structured
-    BLOCKED message telling the agent to call `exit_plan_mode` first. The
-    gate runs BEFORE plugin hooks so plan mode is the highest-priority
-    enforcement; plugins cannot accidentally bypass it.
+    Plugin hooks run AFTER the policy gate so a plugin's
+    tool.execute.before hook cannot bypass plan-mode / skill rules.
     """
 
     def _wrap_one(fn):
@@ -64,59 +58,13 @@ def _wrap_tools_with_hooks(tools: list) -> list:
         @functools.wraps(fn)
         async def wrapper(**kwargs):
             tool_name = fn.__name__
-            # Plan-mode gate — fires before any other logic so a mutating
-            # tool never reaches the permission layer or the actual executor.
-            if tool_name in _PLAN_MODE_BLOCKED_TOOLS:
-                try:
-                    from aru.runtime import get_ctx
-                    session = getattr(get_ctx(), "session", None)
-                except (LookupError, AttributeError):
-                    session = None
-                if session is not None and getattr(session, "plan_mode", False):
-                    return (
-                        f"BLOCKED: plan mode is active. Mutating tools "
-                        f"(edit/write/bash/delegate_task) are blocked until the "
-                        f"user approves the plan. Finish writing the plan as "
-                        f"your next assistant message, then call "
-                        f"exit_plan_mode(plan=<full plan text>) to request "
-                        f"approval. Do NOT retry {tool_name}."
-                    )
-            # Active-skill disallowed-tools gate — honors the `disallowed-tools`
-            # frontmatter field of the currently active skill. Mirrors the
-            # plan-mode gate pattern above; runs before plugin hooks so a skill
-            # can hard-block a tool regardless of permission/plugin state.
-            try:
-                from aru.runtime import get_ctx
-                ctx = get_ctx()
-                session = getattr(ctx, "session", None)
-                config = getattr(ctx, "config", None)
-            except (LookupError, AttributeError):
-                session = None
-                config = None
-            if session is not None and config is not None:
-                # active_skill is keyed by agent scope — a subagent (ctx with
-                # a non-None agent_id) does not inherit the parent's active
-                # skill. Primary agent sees active_skills[None].
-                agent_id = getattr(ctx, "agent_id", None)
-                get_active = getattr(session, "get_active_skill", None)
-                if callable(get_active):
-                    active = get_active(agent_id)
-                else:  # legacy Session without scoped helper
-                    active = getattr(session, "active_skill", None)
-                skills = getattr(config, "skills", None) or {}
-                active_skill_obj = skills.get(active) if active else None
-                disallowed = getattr(active_skill_obj, "disallowed_tools", None) or []
-                # exit_plan_mode is always allowed regardless of skill config —
-                # disallowing it would trap the agent in plan mode with no exit.
-                if tool_name in disallowed and tool_name != "exit_plan_mode":
-                    return (
-                        f"BLOCKED: tool `{tool_name}` is disallowed by the "
-                        f"currently active skill `{active}`. Read the skill's "
-                        f"SKILL.md for the prescribed path. Do NOT retry "
-                        f"`{tool_name}`; use the alternative the skill specifies "
-                        f"(commonly: write the output to a `.md` file via "
-                        f"`write_file` instead of using in-session state)."
-                    )
+            # Unified policy gate — one function, one decision, one
+            # message on denial (combines plan-mode + skill rules when
+            # both apply).
+            from aru.tool_policy import evaluate_tool_policy
+            decision = evaluate_tool_policy(tool_name)
+            if not decision.allowed:
+                return decision.message
             # Before hook — plugins can mutate args or raise PermissionError to block
             try:
                 before_data = await _fire_hook("tool.execute.before", {

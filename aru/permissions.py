@@ -416,6 +416,21 @@ def _most_restrictive(
     return worst
 
 
+# Mapping from permission category (what resolve_permission takes) to the
+# tool_name used by the unified tool-policy gate (what evaluate_tool_policy
+# takes). The permission system asks about *categories* (edit, write, bash),
+# while the tool-policy layer reasons about tool *names* (edit_file, bash,
+# ...). This mapping lets resolve_permission consult the tool-policy layer
+# consistently so that, e.g., a bash check in plan mode denies at the
+# permission level too — not only at the wrapper level.
+_CATEGORY_TO_REPRESENTATIVE_TOOL: dict[str, str] = {
+    "edit": "edit_file",
+    "write": "write_file",
+    "bash": "bash",
+    "delegate_task": "delegate_task",
+}
+
+
 def resolve_permission(
     category: str, subject: str = ""
 ) -> tuple[PermissionAction, str]:
@@ -425,14 +440,31 @@ def resolve_permission(
 
     Algorithm:
     1. If skip_permissions -> ("allow", "*")
-    2. Check session_allowed for matching (category, pattern) -> ("allow", pattern)
-    3. For bash: handle compound commands, then walk rules
-    4. For others: walk rules (defaults + user config), last-match-wins
-    5. Fallback: category default, then global default
+    2. Consult unified tool-policy gate (plan_mode / skill disallowed).
+       If policy denies this category's representative tool, return
+       ("deny", "tool-policy"). This is how claude-code / opencode fold
+       mode-based gates into the same decision function that handles
+       user rules, instead of stacking independent short-circuits.
+    3. Check session_allowed for matching (category, pattern)
+       -> ("allow", pattern)
+    4. For bash: handle compound commands, then walk rules
+    5. For others: walk rules (defaults + user config), last-match-wins
+    6. Fallback: category default, then global default
     """
     ctx = get_ctx()
     if ctx.skip_permissions:
         return ("allow", "*")
+
+    # Unified tool-policy gate — shared with the agent_factory wrapper so
+    # both paths agree. A tool denied by plan_mode / skill rules is denied
+    # here too; the wrapper renders the combined message for the model,
+    # and this call returns a plain "deny" for the user-prompt codepath.
+    rep_tool = _CATEGORY_TO_REPRESENTATIVE_TOOL.get(category)
+    if rep_tool:
+        from aru.tool_policy import evaluate_tool_policy
+        decision = evaluate_tool_policy(rep_tool)
+        if not decision.allowed:
+            return ("deny", "tool-policy")
 
     # "Accept edits" mode auto-allows edit/write categories for the session.
     if ctx.permission_mode == "acceptEdits" and category in ("edit", "write"):
