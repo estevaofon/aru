@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextvars
 import copy
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -104,6 +105,14 @@ class RuntimeContext:
     # -- Custom agents --
     custom_agent_defs: dict = field(default_factory=dict)
 
+    # -- Agent scope --
+    # Stable identifier for the current agent's execution scope. None means
+    # "primary agent" (the top-level conversation). Subagents forked via
+    # fork_ctx() receive a unique identifier here, used to key per-scope
+    # state such as active skills (so a subagent does not inherit the
+    # parent's skill-active state).
+    agent_id: str | None = None
+
     # -- Permissions --
     perm_config: Any = field(default_factory=_default_perm_config)
     session_allowed: set[tuple[str, str]] = field(default_factory=set)
@@ -165,6 +174,11 @@ def fork_ctx() -> RuntimeContext:
     Permission state is deep-copied to prevent interleaving when multiple
     sub-agents run concurrently via ``asyncio.gather``.  Shared resources
     (console, locks, tracked_processes) are kept by reference.
+
+    The fork receives a fresh, unique ``agent_id`` so per-scope state
+    (e.g. active skills) keyed by agent_id is isolated from the parent.
+    Callers may overwrite ``agent_id`` afterwards if they prefer a more
+    descriptive label.
     """
     original = get_ctx()
     forked = copy.copy(original)
@@ -176,4 +190,9 @@ def fork_ctx() -> RuntimeContext:
     forked.read_cache = {}
     # Fresh task store per sub-agent
     forked.task_store = TaskStore()
+    # Assign a unique agent_id so skill scope is isolated from the parent.
+    # A uuid is used rather than an incrementing counter so nested forks
+    # (fork-of-a-fork) still get distinct ids even though the counter on
+    # the intermediate ctx was shallow-copied from the root.
+    forked.agent_id = f"subagent-{uuid.uuid4().hex[:8]}"
     return forked
