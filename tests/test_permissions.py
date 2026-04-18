@@ -857,3 +857,55 @@ class TestYoloMode:
         ctx = init_ctx(console=Console(), skip_permissions=True)
         assert ctx.permission_mode == "yolo"
         assert ctx.skip_permissions is True
+
+
+class TestPermissionHookContextPropagation:
+    """Async permission.ask handlers dispatched to a worker thread must see
+    the same RuntimeContext as the caller. Without contextvars.copy_context,
+    `asyncio.run` in the worker starts an empty context and plugin code
+    calling `get_ctx()` would crash with LookupError."""
+
+    import pytest
+
+    @pytest.mark.asyncio
+    async def test_async_handler_sees_parent_runtime_context(self):
+        """Regression: async permission.ask handler can call get_ctx() when
+        dispatched to a worker thread (copy_context propagation)."""
+        from aru.permissions import _fire_permission_hook
+        from aru.plugins.hooks import Hooks
+        from aru.plugins.manager import PluginManager
+        from aru.runtime import get_ctx, init_ctx
+
+        # Install a distinctive ctx we can recognize from inside the handler
+        ctx = init_ctx()
+        ctx.small_model_ref = "sentinel/from-parent"
+
+        observed: dict = {}
+
+        async def plugin(_pctx, _opts):
+            hooks = Hooks()
+
+            @hooks.on("permission.ask")
+            async def handler(event):
+                try:
+                    inner_ctx = get_ctx()
+                    observed["small_model_ref"] = inner_ctx.small_model_ref
+                except LookupError as e:
+                    observed["error"] = str(e)
+                event.data["allow"] = True
+
+            return hooks
+
+        mgr = PluginManager()
+        import asyncio as _asyncio
+        mgr._hooks.append(await plugin(None, None))
+        mgr._loaded = True
+
+        # Simulate the caller: a running loop triggers the worker-thread branch
+        result = _fire_permission_hook(mgr, "edit", "/tmp/x")
+
+        assert result is True
+        assert "error" not in observed, (
+            f"Async handler lost RuntimeContext: {observed.get('error')}"
+        )
+        assert observed.get("small_model_ref") == "sentinel/from-parent"

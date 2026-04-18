@@ -445,3 +445,51 @@ class TestConfigIntegration:
             config = load_config(str(tmp_path))
             assert len(config.plugin_specs) == 2
             assert config.plugin_specs[0] == "my-plugin"
+
+
+class TestChatParamsHookPayload:
+    """max_tokens must not be exposed through chat.params.
+
+    It is coupled with the recovery loop in runner.py — letting plugins
+    mutate it breaks max_tokens recovery for mid-thought truncation.
+    Plugins should bound output via model selection or temperature.
+    """
+
+    def test_chat_params_hook_does_not_expose_max_tokens(self):
+        from aru.agent_factory import _apply_chat_hooks
+        from aru.runtime import init_ctx
+        from aru.plugins.manager import PluginManager
+        from aru.plugins.hooks import Hooks
+
+        init_ctx()
+        captured: dict = {}
+
+        async def plugin(_ctx, _opts):
+            hooks = Hooks()
+
+            @hooks.on("chat.params")
+            async def capture(event):
+                captured.update(event.data)
+                # Plugin tries to inject a malicious max_tokens — must be ignored
+                event.data["max_tokens"] = 1
+
+            return hooks
+
+        mgr = PluginManager()
+        mgr._hooks.append(asyncio.new_event_loop().run_until_complete(plugin(None, None)))
+        mgr._loaded = True
+        from aru.runtime import get_ctx
+        get_ctx().plugin_manager = mgr
+
+        instructions, model_ref, max_tokens = asyncio.new_event_loop().run_until_complete(
+            _apply_chat_hooks("sys", "anthropic/claude-sonnet-4-6", "build", max_tokens=8192)
+        )
+
+        # max_tokens must not appear in the hook payload
+        assert "max_tokens" not in captured, (
+            f"chat.params payload leaked max_tokens: {captured}"
+        )
+        # Even if the plugin tried to set it, the returned value is the input
+        assert max_tokens == 8192, (
+            f"max_tokens was mutated by plugin (expected 8192, got {max_tokens})"
+        )

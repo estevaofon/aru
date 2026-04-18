@@ -469,8 +469,15 @@ def _fire_permission_hook(mgr, category: str, subject: str) -> bool | None:
 
     Supports both sync and async handlers. Returns True/False if a handler
     sets event.data["allow"], or None if no handler overrode the decision.
+
+    Async handlers dispatched in a worker thread carry a copied
+    contextvars.Context so plugin code can still call `get_ctx()` and
+    other contextvar-backed helpers — without the copy, the new
+    `asyncio.run` loop would see an empty context and break handlers
+    that rely on the runtime.
     """
     import asyncio
+    import contextvars
     from aru.plugins.hooks import HookEvent
 
     evt = HookEvent(hook="permission.ask", data={"category": category, "subject": subject})
@@ -480,15 +487,21 @@ def _fire_permission_hook(mgr, category: str, subject: str) -> bool | None:
             try:
                 if asyncio.iscoroutinefunction(handler):
                     # Async handler — run via the event loop
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Schedule as a task and wait with run_until_complete
-                        # won't work, so use a new loop in a thread
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop is not None:
+                        # A loop is running in this thread; we cannot call
+                        # run_until_complete. Dispatch to a worker thread
+                        # with the current contextvars snapshot so the
+                        # handler sees the same RuntimeContext.
                         import concurrent.futures
+                        snapshot = contextvars.copy_context()
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            pool.submit(asyncio.run, handler(evt)).result(timeout=5)
+                            pool.submit(snapshot.run, asyncio.run, handler(evt)).result(timeout=5)
                     else:
-                        loop.run_until_complete(handler(evt))
+                        asyncio.run(handler(evt))
                 else:
                     handler(evt)
             except Exception:

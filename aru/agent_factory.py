@@ -98,7 +98,9 @@ def _wrap_tools_with_hooks(tools: list) -> list:
                 skills = getattr(config, "skills", None) or {}
                 active_skill_obj = skills.get(active) if active else None
                 disallowed = getattr(active_skill_obj, "disallowed_tools", None) or []
-                if tool_name in disallowed:
+                # exit_plan_mode is always allowed regardless of skill config —
+                # disallowing it would trap the agent in plan mode with no exit.
+                if tool_name in disallowed and tool_name != "exit_plan_mode":
                     return (
                         f"BLOCKED: tool `{tool_name}` is disallowed by the "
                         f"currently active skill `{active}`. Read the skill's "
@@ -151,14 +153,16 @@ async def _apply_chat_hooks(instructions: str, model_ref: str, agent_name: str,
     })
     instructions = data.get("system_prompt", instructions)
 
-    # chat.params — plugins can modify LLM parameters
+    # chat.params — plugins can modify LLM parameters. max_tokens is
+    # deliberately NOT exposed: it is coupled with the recovery loop in
+    # runner.py and mutating it from a plugin can break mid-thought
+    # recovery. Plugins that need to bound output should do so via model
+    # selection or temperature, not raw token limits.
     data = await _fire_hook("chat.params", {
         "model": model_ref,
-        "max_tokens": max_tokens,
         "temperature": None,  # let plugin set if desired
     })
     model_ref = data.get("model", model_ref)
-    max_tokens = data.get("max_tokens", max_tokens)
 
     return instructions, model_ref, max_tokens
 

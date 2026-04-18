@@ -40,7 +40,7 @@ VALID_HOOKS = frozenset({
 
     # Chat lifecycle
     "chat.message",              # Before user message is sent to LLM (can modify)
-    "chat.params",               # Before LLM call (can modify temperature, max_tokens)
+    "chat.params",               # Before LLM call (can modify model, temperature). NOT max_tokens — coupled with recovery loop.
     "chat.system.transform",     # Before LLM call (can modify system prompt)
     "chat.messages.transform",   # Before LLM call (can modify message history)
 

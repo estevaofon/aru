@@ -76,3 +76,28 @@ def test_tool_allowed_when_active_skill_missing_from_config():
     wrapped = _wrap_tools_with_hooks([enter_plan_mode])[0]
     result = _run(wrapped())
     assert result == "plan mode entered"
+
+
+def exit_plan_mode(plan: str = ""):
+    """Fake exit_plan_mode tool — name MUST match the real tool for the exemption."""
+    return "plan exited"
+
+
+def test_exit_plan_mode_is_always_allowed_even_if_disallowed_by_skill():
+    """A skill that lists exit_plan_mode in disallowed_tools must NOT trap the
+    agent. The gate hard-exempts exit_plan_mode so the agent always has a way
+    out of plan mode, regardless of skill configuration."""
+    skill = Skill(
+        name="writing-plans",
+        description="",
+        content="",
+        source_path="/fake",
+        disallowed_tools=["exit_plan_mode", "bash"],
+    )
+    _setup_ctx("writing-plans", {"writing-plans": skill})
+
+    wrapped = _wrap_tools_with_hooks([exit_plan_mode])[0]
+    result = _run(wrapped(plan="test plan"))
+
+    assert result == "plan exited"
+    assert "BLOCKED" not in result
