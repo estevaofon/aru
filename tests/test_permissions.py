@@ -6,14 +6,22 @@ from aru.permissions import (
     PermissionAction,
     PermissionConfig,
     PermissionRule,
+    Rule,
+    Ruleset,
+    TOOL_PERMISSION_NAMES,
     _build_rules,
+    _expand_pattern,
     _match_bash_rule,
     _match_rule,
     _most_restrictive,
     _normalize_cmd,
     _resolve_bash_compound,
     _shell_split,
+    _wildcard_match,
+    canonical_permission,
     check_permission,
+    evaluate,
+    from_config,
     get_skip_permissions,
     merge_configs,
     parse_permission_config,
@@ -909,3 +917,496 @@ class TestPermissionHookContextPropagation:
             f"Async handler lost RuntimeContext: {observed.get('error')}"
         )
         assert observed.get("small_model_ref") == "sentinel/from-parent"
+
+
+# ---------------------------------------------------------------------------
+# Unified rule shape (OpenCode parity) — Rule / Ruleset / evaluate / from_config
+# ---------------------------------------------------------------------------
+
+
+class TestWildcardMatch:
+    def test_star_matches_anything(self):
+        assert _wildcard_match("edit", "*") is True
+        assert _wildcard_match("", "*") is True
+
+    def test_exact_match(self):
+        assert _wildcard_match("edit", "edit") is True
+        assert _wildcard_match("edit", "write") is False
+
+    def test_glob_suffix(self):
+        assert _wildcard_match("edit_file", "edit*") is True
+        assert _wildcard_match("edit_files", "edit*") is True
+        assert _wildcard_match("write_file", "edit*") is False
+
+    def test_pattern_with_space(self):
+        # bash-style patterns: "git *" should match "git status"
+        assert _wildcard_match("git status", "git *") is True
+        assert _wildcard_match("npm install", "git *") is False
+
+
+class TestEvaluate:
+    def test_no_rules_defaults_to_ask(self):
+        rule = evaluate("edit", "main.py")
+        assert rule.action == "ask"
+        assert rule.permission == "edit"
+        assert rule.pattern == "*"
+
+    def test_single_ruleset_matching_rule(self):
+        rs: Ruleset = [Rule("edit", "*", "allow")]
+        rule = evaluate("edit", "main.py", rs)
+        assert rule.action == "allow"
+        assert rule.pattern == "*"
+
+    def test_last_match_wins_within_ruleset(self):
+        rs: Ruleset = [
+            Rule("edit", "*", "allow"),
+            Rule("edit", "*.secret", "deny"),
+        ]
+        rule = evaluate("edit", "keys.secret", rs)
+        assert rule.action == "deny"
+
+    def test_later_ruleset_overrides_earlier(self):
+        # plan_mode ruleset after user ruleset → plan_mode wins when both match
+        user_rules: Ruleset = [Rule("bash", "*", "allow")]
+        plan_rules: Ruleset = [Rule("bash", "*", "deny")]
+        rule = evaluate("bash", "ls", user_rules, plan_rules)
+        assert rule.action == "deny"
+
+    def test_wildcard_permission(self):
+        rs: Ruleset = [Rule("edit*", "*", "ask")]
+        rule = evaluate("edit_file", "main.py", rs)
+        assert rule.action == "ask"
+        rule2 = evaluate("edit_files", "main.py", rs)
+        assert rule2.action == "ask"
+
+    def test_universal_catchall(self):
+        rs: Ruleset = [Rule("*", "*", "deny")]
+        assert evaluate("anything", "else", rs).action == "deny"
+
+    def test_non_matching_rule_ignored(self):
+        rs: Ruleset = [Rule("edit", "*.env", "deny")]
+        rule = evaluate("edit", "main.py", rs)
+        # no match → default ask, not the deny rule
+        assert rule.action == "ask"
+
+
+class TestFromConfig:
+    def test_none_returns_empty(self):
+        assert from_config(None) == []
+        assert from_config({}) == []
+
+    def test_string_shorthand(self):
+        rs = from_config("allow")
+        assert rs == [Rule("*", "*", "allow")]
+
+    def test_invalid_string_becomes_ask(self):
+        rs = from_config("yolo")
+        assert rs == [Rule("*", "*", "ask")]
+
+    def test_key_string_value(self):
+        rs = from_config({"read": "allow"})
+        assert rs == [Rule("read", "*", "allow")]
+
+    def test_key_dict_value_expands(self):
+        rs = from_config({"bash": {"*": "ask", "git *": "allow"}})
+        assert rs == [
+            Rule("bash", "*", "ask"),
+            Rule("bash", "git *", "allow"),
+        ]
+
+    def test_star_top_level_becomes_universal_rule(self):
+        # OpenCode shape: {"*": "ask"} -> Rule("*", "*", "ask")
+        rs = from_config({"*": "ask"})
+        assert rs == [Rule("*", "*", "ask")]
+
+    def test_opencode_task_shape(self):
+        # Per-subagent permission (e.g. subagent_type as pattern)
+        rs = from_config({
+            "task": {"explorer": "allow", "custom_dangerous": "ask"},
+        })
+        assert rs == [
+            Rule("task", "explorer", "allow"),
+            Rule("task", "custom_dangerous", "ask"),
+        ]
+
+    def test_mixed_shape(self):
+        rs = from_config({
+            "*": "ask",
+            "read": "allow",
+            "bash": {"*": "ask", "git *": "allow"},
+        })
+        assert rs == [
+            Rule("*", "*", "ask"),
+            Rule("read", "*", "allow"),
+            Rule("bash", "*", "ask"),
+            Rule("bash", "git *", "allow"),
+        ]
+
+    def test_key_order_preserved(self):
+        # Resolution relies on last-match-wins — input order = priority order
+        rs = from_config({"edit": {"*": "allow", "*.env": "deny"}})
+        assert [r.pattern for r in rs] == ["*", "*.env"]
+
+    def test_invalid_action_becomes_ask(self):
+        rs = from_config({"read": "bogus"})
+        assert rs == [Rule("read", "*", "ask")]
+
+    def test_non_dict_non_string_returns_empty(self):
+        assert from_config(42) == []
+        assert from_config([1, 2, 3]) == []
+
+
+class TestEvaluateIntegration:
+    """End-to-end: from_config -> evaluate, mirroring how future resolve_permission
+    will compose rulesets once tool_policy is absorbed (Fase 2)."""
+
+    def test_opencode_style_edit_rules(self):
+        rs = from_config({"edit": {"*": "ask", "*.env": "deny"}})
+        assert evaluate("edit", "main.py", rs).action == "ask"
+        assert evaluate("edit", ".env", rs).action == "deny"
+
+    def test_plan_mode_as_ruleset_overrides_user(self):
+        """Preview of Fase 2: plan_mode gate is expressed as a Ruleset passed
+        after user rules. Last match wins, so plan_mode denies mutating tools
+        even when user has allowed them globally."""
+        user = from_config({"bash": "allow"})
+        plan_mode = [Rule("bash", "*", "deny")]
+        rule = evaluate("bash", "ls", user, plan_mode)
+        assert rule.action == "deny"
+
+    def test_session_approved_as_ruleset_unlocks(self):
+        """Preview of Fase 2: session 'always' approvals are a Ruleset
+        appended after user/defaults. Persists allow for the session."""
+        defaults = from_config({"edit": "ask"})
+        session_approved = [Rule("edit", "*", "allow")]
+        rule = evaluate("edit", "main.py", defaults, session_approved)
+        assert rule.action == "allow"
+
+
+# ---------------------------------------------------------------------------
+# Canonical permission names (Fase 3)
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalPermission:
+    def test_edit_family_maps_to_edit(self):
+        assert canonical_permission("edit_file") == "edit"
+        assert canonical_permission("edit_files") == "edit"
+
+    def test_write_family_maps_to_write(self):
+        assert canonical_permission("write_file") == "write"
+        assert canonical_permission("write_files") == "write"
+
+    def test_read_family_maps_to_read(self):
+        assert canonical_permission("read_file") == "read"
+        assert canonical_permission("read_files") == "read"
+
+    def test_delegate_task_maps_to_task(self):
+        """OpenCode parity: permission name is `task`, not `delegate_task`."""
+        assert canonical_permission("delegate_task") == "task"
+
+    def test_web_tools_single_word(self):
+        """OpenCode uses `webfetch`/`websearch` without underscore."""
+        assert canonical_permission("web_fetch") == "webfetch"
+        assert canonical_permission("web_search") == "websearch"
+
+    def test_bash_unchanged(self):
+        assert canonical_permission("bash") == "bash"
+        assert canonical_permission("run_command") == "bash"
+
+    def test_unknown_tool_uses_own_name(self):
+        """Custom tools without an explicit mapping become their own permission."""
+        assert canonical_permission("my_custom_tool") == "my_custom_tool"
+
+    def test_table_covers_all_core_tools(self):
+        """Sanity: the mapping table should cover every tool exposed by registry.
+        This test is informational — it lists the tools expected to have
+        canonical mappings. Failing means a new tool was added without an
+        entry."""
+        expected_in_table = {
+            "edit_file", "edit_files",
+            "write_file", "write_files",
+            "read_file", "read_files",
+            "glob_search", "grep_search", "list_directory",
+            "bash", "run_command",
+            "web_fetch", "web_search",
+            "delegate_task", "invoke_skill",
+        }
+        assert expected_in_table <= set(TOOL_PERMISSION_NAMES.keys())
+
+
+class TestExpandPattern:
+    def test_home_prefix_expanded(self):
+        home = os.path.expanduser("~")
+        assert _expand_pattern("~/project/.env") == home + "/project/.env"
+
+    def test_tilde_alone(self):
+        assert _expand_pattern("~") == os.path.expanduser("~")
+
+    def test_dollar_home_prefix(self):
+        home = os.path.expanduser("~")
+        assert _expand_pattern("$HOME/logs") == home + "/logs"
+
+    def test_dollar_home_alone(self):
+        assert _expand_pattern("$HOME") == os.path.expanduser("~")
+
+    def test_glob_unchanged(self):
+        assert _expand_pattern("*.env") == "*.env"
+
+    def test_absolute_path_unchanged(self):
+        assert _expand_pattern("/etc/hosts") == "/etc/hosts"
+
+    def test_empty_unchanged(self):
+        assert _expand_pattern("") == ""
+
+
+class TestFromConfigExpansion:
+    """from_config must apply _expand_pattern so user rules with `~/`
+    resolve correctly at parse time (OpenCode parity)."""
+
+    def test_tilde_in_pattern_expanded(self):
+        home = os.path.expanduser("~")
+        rs = from_config({"read": {"~/secrets/*": "deny"}})
+        assert rs == [Rule("read", home + "/secrets/*", "deny")]
+
+    def test_dollar_home_in_pattern_expanded(self):
+        home = os.path.expanduser("~")
+        rs = from_config({"edit": {"$HOME/.ssh/*": "deny"}})
+        assert rs == [Rule("edit", home + "/.ssh/*", "deny")]
+
+    def test_non_home_pattern_unchanged(self):
+        rs = from_config({"edit": {"*.env": "deny"}})
+        assert rs == [Rule("edit", "*.env", "deny")]
+
+
+class TestOpenCodeConfigPortability:
+    """End-to-end: an OpenCode-style permission config block should parse
+    to a valid Ruleset. Mirrors the shape users would copy from an
+    opencode.json into their aru.json."""
+
+    def test_task_permission_per_subagent(self):
+        # Convention (same as OpenCode): catch-all first, specifics after.
+        # last-match-wins picks the most-specific rule placed later.
+        rs = from_config({
+            "task": {"*": "ask", "explorer": "allow", "custom_dangerous": "ask"},
+        })
+        assert evaluate("task", "explorer", rs).action == "allow"
+        assert evaluate("task", "custom_dangerous", rs).action == "ask"
+        assert evaluate("task", "unknown_subagent", rs).action == "ask"
+
+    def test_mixed_opencode_permissions(self):
+        rs = from_config({
+            "edit": {"*": "ask", "~/.ssh/*": "deny"},
+            "bash": {"*": "ask", "git *": "allow"},
+            "webfetch": "allow",
+            "websearch": "allow",
+            "task": {"*": "ask", "explorer": "allow"},
+        })
+        home = os.path.expanduser("~")
+        # Edit with home expansion
+        assert evaluate("edit", home + "/.ssh/config", rs).action == "deny"
+        assert evaluate("edit", "main.py", rs).action == "ask"
+        # Bash
+        assert evaluate("bash", "git status", rs).action == "allow"
+        assert evaluate("bash", "pip install x", rs).action == "ask"
+        # Web
+        assert evaluate("webfetch", "https://example.com", rs).action == "allow"
+        # Task
+        assert evaluate("task", "explorer", rs).action == "allow"
+
+
+# Needed for os.path.expanduser calls in the Fase 3 tests above
+import os  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Multi-pattern check_permission (Fase 4)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPermissionMultiPattern:
+    """Batch tools (write_files/edit_files) pass a list of paths. Resolution
+    is atomic: any deny → deny whole batch; all allow → pass; any ask → one
+    prompt. Mirrors OpenCode's `ask({patterns: []})` semantics."""
+
+    def setup_method(self):
+        set_skip_permissions(False)
+        set_config(PermissionConfig())
+        reset_session()
+
+    def test_list_all_allow_returns_true(self):
+        # read defaults to allow; passing multiple readable paths should pass
+        assert check_permission("read", ["a.md", "b.md", "c.md"], "reading batch") is True
+
+    def test_list_any_deny_returns_false(self):
+        # .env is denied by default; mixing it in a batch denies the whole call
+        assert check_permission("read", ["a.md", ".env", "c.md"], "reading batch") is False
+
+    def test_list_all_deny_returns_false(self):
+        assert check_permission("read", [".env", ".env.local"], "reading") is False
+
+    def test_empty_list_treated_as_empty_subject(self):
+        # read of empty subject defaults to allow (category default)
+        assert check_permission("read", [], "nothing") is True
+
+    def test_single_path_list_equivalent_to_string(self):
+        # write of main.py → ask → with monkeypatched select returning "Yes"
+        # via separate test. Here we verify the deny path: .env write should
+        # deny for both forms.
+        assert check_permission("write", ".env", "x") is False
+        assert check_permission("write", [".env"], "x") is False
+
+    def test_list_any_ask_prompts_once(self, monkeypatch):
+        ctx = get_ctx()
+        ctx.skip_permissions = False
+        call_count = {"n": 0}
+
+        def _fake_select(*args, **kwargs):
+            call_count["n"] += 1
+            return 0  # "Yes"
+
+        monkeypatch.setattr("aru.permissions.select_option", _fake_select)
+
+        # Two "ask" subjects (write category defaults to ask) → single prompt
+        result = check_permission("write", ["a.py", "b.py", "c.py"], "batch write")
+        assert result is True
+        assert call_count["n"] == 1  # prompted exactly once, not 3 times
+
+    def test_list_deny_skips_prompt(self, monkeypatch):
+        """If any subject denies, prompt must not fire — the user shouldn't
+        be asked to approve a batch that includes a hard-deny file."""
+        ctx = get_ctx()
+        ctx.skip_permissions = False
+        prompted = {"fired": False}
+
+        def _should_not_fire(*args, **kwargs):
+            prompted["fired"] = True
+            return 0
+
+        monkeypatch.setattr("aru.permissions.select_option", _should_not_fire)
+
+        result = check_permission("write", ["a.py", ".env"], "batch")
+        assert result is False
+        assert prompted["fired"] is False
+
+
+# ---------------------------------------------------------------------------
+# Typed permission errors (Fase 5)
+# ---------------------------------------------------------------------------
+
+
+class TestTypedPermissionErrors:
+    def test_permission_denied_carries_context(self):
+        from aru.permissions import PermissionDenied
+        err = PermissionDenied("edit", ".env", "*.env")
+        assert err.category == "edit"
+        assert err.subject == ".env"
+        assert err.pattern == "*.env"
+        assert "edit" in str(err) and ".env" in str(err)
+
+    def test_permission_rejected_has_no_feedback(self):
+        from aru.permissions import PermissionRejected
+        err = PermissionRejected("bash", "rm -rf /")
+        assert err.category == "bash"
+        assert err.subject == "rm -rf /"
+        assert not hasattr(err, "feedback")
+
+    def test_permission_corrected_carries_feedback(self):
+        from aru.permissions import PermissionCorrected
+        err = PermissionCorrected("edit", "main.py", "use edit_files for batching")
+        assert err.category == "edit"
+        assert err.subject == "main.py"
+        assert err.feedback == "use edit_files for batching"
+        assert "feedback" in str(err)
+
+    def test_all_inherit_from_exception(self):
+        from aru.permissions import (
+            PermissionCorrected,
+            PermissionDenied,
+            PermissionRejected,
+        )
+        assert issubclass(PermissionDenied, Exception)
+        assert issubclass(PermissionRejected, Exception)
+        assert issubclass(PermissionCorrected, Exception)
+
+    def test_errors_are_distinct_types(self):
+        """Callers must be able to branch on type — opencode parity
+        (index.ts:83-103 uses three separate tagged error classes)."""
+        from aru.permissions import (
+            PermissionCorrected,
+            PermissionDenied,
+            PermissionRejected,
+        )
+        assert PermissionDenied is not PermissionRejected
+        assert PermissionRejected is not PermissionCorrected
+        assert PermissionDenied is not PermissionCorrected
+
+
+# ---------------------------------------------------------------------------
+# disabled(tools, ruleset) helper (Fase 6)
+# ---------------------------------------------------------------------------
+
+
+class TestDisabled:
+    def test_universal_deny_disables_tool(self):
+        from aru.permissions import disabled
+        rs = from_config({"bash": "deny"})
+        assert disabled(["bash"], rs) == {"bash"}
+
+    def test_subject_specific_deny_does_not_disable(self):
+        """{"bash": {"rm -rf *": "deny"}} is a specific call deny, not a
+        universal tool disable. The tool stays in the toolset."""
+        from aru.permissions import disabled
+        rs = from_config({"bash": {"rm -rf *": "deny"}})
+        assert disabled(["bash"], rs) == set()
+
+    def test_canonical_name_covers_tool_family(self):
+        """{"edit": "deny"} disables both edit_file and edit_files, because
+        canonical_permission maps both tools to "edit"."""
+        from aru.permissions import disabled
+        rs = from_config({"edit": "deny"})
+        assert disabled(["edit_file", "edit_files"], rs) == {"edit_file", "edit_files"}
+
+    def test_task_permission_disables_delegate_task(self):
+        """OpenCode-style {"task": "deny"} disables the delegate_task tool."""
+        from aru.permissions import disabled
+        rs = from_config({"task": "deny"})
+        assert disabled(["delegate_task"], rs) == {"delegate_task"}
+
+    def test_later_allow_unblocks(self):
+        """A later rule can override an earlier universal deny."""
+        from aru.permissions import disabled
+        # Order matters — later rule wins
+        rs = [Rule("bash", "*", "deny"), Rule("bash", "*", "allow")]
+        assert disabled(["bash"], rs) == set()
+
+    def test_last_match_across_rulesets(self):
+        """disabled considers all rulesets flattened in order — identical
+        to evaluate()'s composition."""
+        from aru.permissions import disabled
+        user = from_config({"bash": "deny"})
+        # Later ruleset overrides
+        override = [Rule("bash", "*", "allow")]
+        assert disabled(["bash"], user, override) == set()
+
+    def test_unknown_tool_passes_through(self):
+        """A tool with no matching rule is not disabled."""
+        from aru.permissions import disabled
+        rs = from_config({"bash": "deny"})
+        assert disabled(["my_custom_tool"], rs) == set()
+
+    def test_empty_ruleset_disables_nothing(self):
+        from aru.permissions import disabled
+        assert disabled(["edit_file", "bash", "delegate_task"]) == set()
+
+    def test_multiple_tools_mixed_states(self):
+        """Combine canonical mapping + some denies + some allows."""
+        from aru.permissions import disabled
+        rs = from_config({
+            "edit": "deny",       # disables edit_file, edit_files
+            "task": "deny",       # disables delegate_task
+            "bash": "ask",        # does NOT disable (ask ≠ deny)
+            "read": "allow",      # does NOT disable
+        })
+        tools = ["edit_file", "edit_files", "bash", "delegate_task", "read_file"]
+        assert disabled(tools, rs) == {"edit_file", "edit_files", "delegate_task"}

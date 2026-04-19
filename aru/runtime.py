@@ -137,6 +137,25 @@ class RuntimeContext:
     # -- Session --
     session: Any = None  # aru.session.Session (set by CLI, used for sub-agent cost tracking)
 
+    # -- Cancellation --
+    # Set by the REPL on Ctrl+C (or by any caller wanting to cancel running
+    # sub-agents). `fork_ctx()` shares this by reference so a signal on the
+    # primary propagates to every live sub-agent. Using `threading.Event`
+    # (not `asyncio.Event`) because it is loop-independent — safe to read
+    # from tool threads, worker threads, and the REPL's signal handler.
+    # `check_aborted()` helper raises a standardised error when set.
+    abort_event: threading.Event = field(default_factory=threading.Event)
+
+    # -- Sub-agent instance cache (resume support) --
+    # Keyed by the string task_id returned from a prior delegate_task call.
+    # When the LLM passes `task_id="abc123"` on a subsequent invocation, the
+    # Agno Agent instance is reused — preserving its full conversation
+    # history without a second setup pass. Lives for the duration of the
+    # primary session (in-memory only; disk persistence is feature #G).
+    # Shared across forks so a sub-agent can spawn a nested sub-agent and
+    # resume it later from the same primary — but that usage is rare.
+    subagent_instances: dict[str, Any] = field(default_factory=dict)
+
     # -- Checkpoints --
     checkpoint_manager: Any = None  # aru.checkpoints.CheckpointManager (lazy)
 
@@ -173,12 +192,16 @@ def fork_ctx() -> RuntimeContext:
 
     Permission state is deep-copied to prevent interleaving when multiple
     sub-agents run concurrently via ``asyncio.gather``.  Shared resources
-    (console, locks, tracked_processes) are kept by reference.
+    (console, locks, tracked_processes, abort_event) are kept by reference.
 
     The fork receives a fresh, unique ``agent_id`` so per-scope state
     (e.g. active skills) keyed by agent_id is isolated from the parent.
     Callers may overwrite ``agent_id`` afterwards if they prefer a more
     descriptive label.
+
+    `abort_event` is intentionally shared so a cancel signal on the primary
+    propagates to every live sub-agent (they all observe the same
+    `.is_set()` outcome).
     """
     original = get_ctx()
     forked = copy.copy(original)
@@ -195,4 +218,44 @@ def fork_ctx() -> RuntimeContext:
     # (fork-of-a-fork) still get distinct ids even though the counter on
     # the intermediate ctx was shallow-copied from the root.
     forked.agent_id = f"subagent-{uuid.uuid4().hex[:8]}"
+    # abort_event is deliberately NOT reassigned — shared reference so the
+    # primary can cancel forks it has spawned.
     return forked
+
+
+def abort_current() -> None:
+    """Signal every live sub-agent in the current ctx tree to cancel.
+
+    Called from the REPL's SIGINT handler and from any caller wanting to
+    abort in-flight delegation. Idempotent: repeated calls keep the event
+    set. Use `reset_abort()` before the next turn to clear.
+    """
+    try:
+        get_ctx().abort_event.set()
+    except LookupError:
+        pass  # no ctx installed — nothing to cancel
+
+
+def reset_abort() -> None:
+    """Clear the abort signal so the next turn starts fresh.
+
+    Called by the REPL at the top of each iteration so an old Ctrl+C does
+    not persist into a new prompt. Idempotent — safe to call even when
+    the event was never set.
+    """
+    try:
+        get_ctx().abort_event.clear()
+    except LookupError:
+        pass
+
+
+def is_aborted() -> bool:
+    """Return True if the current ctx's abort signal is set.
+
+    Thin helper so call sites don't need to import `threading` or poke
+    directly at `ctx.abort_event`. Safe to call from any thread.
+    """
+    try:
+        return get_ctx().abort_event.is_set()
+    except LookupError:
+        return False

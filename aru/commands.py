@@ -21,6 +21,9 @@ SLASH_COMMANDS = [
     ("/commands", "List custom commands", "/commands"),
     ("/skills", "List available skills", "/skills"),
     ("/agents", "List custom agents", "/agents"),
+    ("/subagents", "Show sub-agent invocation tree for this session", "/subagents"),
+    ("/subagent", "Show detailed trace for a sub-agent by task_id", "/subagent <task_id>"),
+    ("/bg", "List background sub-agent tasks (pending notifications)", "/bg"),
     ("/mcp", "List loaded MCP tools", "/mcp"),
     ("/plugin", "Manage cached plugins (install/list/remove/update)", "/plugin <subcommand>"),
     ("/undo", "Undo last turn — restore files and/or conversation", "/undo"),
@@ -70,6 +73,135 @@ def ask_yes_no(prompt: str) -> bool:
         return answer in ("y", "yes", "s", "sim")
     except (EOFError, KeyboardInterrupt):
         return False
+
+
+def handle_subagents_command(session) -> None:
+    """Render the session's sub-agent trace tree (`/subagents`).
+
+    Flat tabular output — task_id, agent name, duration, tokens in/out,
+    status, task preview. Nested delegations indent under their parent.
+    """
+    from rich.table import Table
+
+    traces = list(getattr(session, "subagent_traces", []) or [])
+    if not traces:
+        console.print("[dim]No sub-agents invoked in this session.[/dim]")
+        return
+
+    children_of: dict[str | None, list] = {}
+    for t in traces:
+        children_of.setdefault(t.parent_id, []).append(t)
+
+    status_style = {
+        "running": "yellow",
+        "completed": "green",
+        "cancelled": "dim",
+        "error": "red",
+    }
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Agent", no_wrap=True)
+    table.add_column("Duration", justify="right", no_wrap=True)
+    table.add_column("Tokens (in/out)", justify="right", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Task")
+
+    def _emit(node, depth: int = 0):
+        indent = "  " * depth + ("└ " if depth else "")
+        task_id = node.task_id[:12]
+        dur = f"{node.duration:.1f}s" if node.ended_at else "…"
+        tokens = f"{node.tokens_in:,}/{node.tokens_out:,}"
+        status = f"[{status_style.get(node.status, 'white')}]{node.status}[/]"
+        task_preview = (node.task[:60] + "…") if len(node.task) > 60 else node.task
+        table.add_row(
+            f"{indent}{task_id}", node.agent_name, dur, tokens, status, task_preview
+        )
+        for child in children_of.get(node.task_id, []):
+            _emit(child, depth + 1)
+
+    trace_ids = {t.task_id for t in traces}
+    roots = [t for t in traces if t.parent_id not in trace_ids]
+    for root in roots:
+        _emit(root)
+
+    console.print(
+        Panel(table, title=f"Sub-agent invocations ({len(traces)})",
+              border_style="cyan", padding=(0, 1))
+    )
+
+
+def handle_subagent_detail_command(session, task_id: str) -> None:
+    """Print detailed trace for one sub-agent by task_id prefix."""
+    task_id = task_id.strip()
+    if not task_id:
+        console.print("[yellow]Usage: /subagent <task_id>[/yellow]")
+        return
+
+    traces = list(getattr(session, "subagent_traces", []) or [])
+    matches = [t for t in traces if t.task_id == task_id or t.task_id.startswith(task_id)]
+    if not matches:
+        console.print(f"[yellow]No sub-agent found with task_id starting with '{task_id}'[/yellow]")
+        return
+    if len(matches) > 1:
+        console.print(
+            f"[yellow]Ambiguous: {len(matches)} traces match '{task_id}'. Showing the first.[/yellow]"
+        )
+
+    trace = matches[0]
+    lines: list[str] = [
+        f"[bold]task_id:[/bold]     {trace.task_id}",
+        f"[bold]agent:[/bold]       {trace.agent_name}",
+        f"[bold]status:[/bold]      {trace.status}",
+        f"[bold]parent:[/bold]      {trace.parent_id or '(primary)'}",
+    ]
+    if trace.ended_at:
+        lines.append(f"[bold]duration:[/bold]    {trace.duration:.2f}s")
+    else:
+        lines.append("[bold]duration:[/bold]    (running)")
+    lines.extend([
+        f"[bold]tokens:[/bold]      in={trace.tokens_in:,}  out={trace.tokens_out:,}",
+        "",
+        "[bold]task:[/bold]",
+        f"  {trace.task}",
+        "",
+    ])
+    if trace.tool_calls:
+        lines.append(f"[bold]tool calls ({len(trace.tool_calls)}):[/bold]")
+        for i, call in enumerate(trace.tool_calls, 1):
+            args = call.get("args_preview", "")
+            dur = call.get("duration", 0)
+            lines.append(f"  {i}. [cyan]{call.get('tool', '?')}[/cyan] ({dur}s)  {args}")
+        lines.append("")
+    if trace.result:
+        lines.append("[bold]result preview:[/bold]")
+        lines.append("  " + trace.result.replace("\n", "\n  "))
+
+    console.print(Panel("\n".join(lines), title="Sub-agent trace", border_style="cyan", padding=(1, 2)))
+
+
+def handle_background_command(session) -> None:
+    """List pending background-task notifications (`/bg`).
+
+    Each entry is a sub-agent spawned with `run_in_background=True` that
+    has already completed but hasn't been surfaced to the primary agent
+    yet. Notifications are drained automatically on the next turn — this
+    command just lets the user see what's queued.
+    """
+    pending = list(getattr(session, "pending_notifications", []) or [])
+    if not pending:
+        console.print("[dim]No pending background tasks.[/dim]")
+        return
+    for n in pending:
+        tid = n.get("task_id", "?")
+        result = n.get("result", "")
+        preview = (result[:200] + "…") if len(result) > 200 else result
+        console.print(Panel(
+            preview,
+            title=f"[bold]Background task: {tid}[/bold]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
 
 
 def handle_plugin_command(args: str) -> None:

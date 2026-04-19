@@ -1,0 +1,80 @@
+Launch a new sub-agent to handle a complex or independent task autonomously.
+
+Each sub-agent runs in its own isolated context (fresh task store, read cache,
+and agent scope) so noisy exploration stays out of your own conversation.
+
+{agent_list}
+
+## When to use
+
+- Complex research tasks requiring multiple file reads + searches
+- Independent subtasks that can run in parallel (fan-out pattern)
+- Tasks requiring a specialised agent (pass `agent_name` to pick a specialist)
+- Keeping your own context clean — delegate noise-heavy exploration
+
+## When NOT to use
+
+- If you want to read a specific file path, use `read_file` or `read_files`
+  directly — faster and uses less tokens than a sub-agent
+- If you are searching for a specific symbol ("class Foo", "def bar"), use
+  `grep_search` directly
+- If you are searching inside 2-3 known files, use `read_files` directly
+- One-line factual questions ("what's in README.md?") — just read it
+
+## Parallelism
+
+Launch multiple `delegate_task` calls in a single message whenever the
+subtasks are independent. The runtime fans out via `asyncio.create_task`
+so sub-agents run concurrently — the total wall time is the slowest
+sub-agent, not the sum. Example:
+
+    # Good: one turn, three parallel sub-agents
+    delegate_task(task="find auth code", agent_name="explorer")
+    delegate_task(task="find DB code", agent_name="explorer")
+    delegate_task(task="find API code", agent_name="explorer")
+
+    # Bad: three sequential turns (only do this when task 2 depends on
+    # the output of task 1)
+
+## Writing the prompt
+
+Brief the sub-agent like a colleague walking into the room — they haven't
+seen this conversation, don't know what you've tried, don't understand why
+the task matters.
+
+- Explain what you're trying to accomplish and why
+- Describe what you've already learned or ruled out
+- Give enough context for judgement calls (not just narrow instruction)
+- If you need a short response, say so ("report in under 200 words")
+- Specify exactly what information the sub-agent should return in its final
+  message — it returns ONE message and cannot be asked follow-ups without
+  a resume
+
+**Never delegate understanding.** Don't write "based on your findings, fix
+the bug" — that pushes synthesis onto the sub-agent. Include file paths,
+line numbers, and the specific changes instead.
+
+## Resume
+
+Each `delegate_task` returns a `task_id` in its header:
+
+    [SubAgent-abc123 | task_id=abc123] <result>
+
+To continue the same sub-agent session (preserving its prior context and
+tool outputs), pass that `task_id` back:
+
+    delegate_task(task="also check X", task_id="abc123")
+
+Fresh delegation (no `task_id`) starts with a blank slate — cheaper the
+first time but loses conversation history. Resume when you need iterative
+refinement on the same topic.
+
+## Expecting output
+
+The sub-agent returns ONE summary message. Its output is NOT directly
+visible to the user — you must relay the findings back. Tell the
+sub-agent exactly what information to include in that single message.
+
+The sub-agent's outputs should generally be trusted. If they look wrong,
+prefer resuming (`task_id=...`) with a correction over dispatching a
+fresh sub-agent from scratch.

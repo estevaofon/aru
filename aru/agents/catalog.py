@@ -26,6 +26,15 @@ class AgentSpec:
     An explicit int caps the agent below that ceiling — providers.py always
     clamps the final value to min(requested, model_cap) so specs can never
     ask for more than the model supports.
+
+    `description` is the LLM-facing summary rendered into `delegate_task`'s
+    docstring. Only subagent specs need a meaningful description (primary
+    agents are never picked via `agent_name`). Keep it short (1-3 sentences)
+    and directive — the model uses it to decide when this agent fits.
+
+    `extra_instructions` is appended to the base role instructions when the
+    agent is built. Use it for agent-specific policy ("you are read-only,
+    never call write tools") that shouldn't leak into other roles.
     """
 
     name: str                            # display name passed to Agno
@@ -35,6 +44,8 @@ class AgentSpec:
     max_tokens: int | None
     small_model: bool = False            # if True, factory uses ctx.small_model_ref
     use_reasoning: bool = True           # False skips thinking params (e.g. explorer)
+    description: str = ""                # LLM-facing summary for `delegate_task` docstring
+    extra_instructions: str = ""         # appended to base role instructions on build
 
 
 def _build_tools() -> list:
@@ -90,5 +101,57 @@ AGENTS: dict[str, AgentSpec] = {
         max_tokens=8192,
         small_model=True,
         use_reasoning=False,  # fast read-only subagent — no thinking overhead
+        description=(
+            "Fast read-only codebase exploration agent. Use for searching "
+            "files, finding patterns, reading code, and understanding "
+            "structure. Specify thoroughness in the task text: \"quick\" "
+            "(basic searches), \"medium\" (moderate exploration), or "
+            "\"very thorough\" (comprehensive analysis)."
+        ),
+    ),
+    "verification": AgentSpec(
+        name="Verifier",
+        role="verifier",
+        mode="subagent",
+        tools_factory=_explore_tools,  # read-only
+        max_tokens=4096,
+        small_model=True,
+        use_reasoning=False,
+        description=(
+            "Double-check a recent batch of edits for correctness. Reads "
+            "changed files, searches for call sites, reports inconsistencies "
+            "and missing follow-up edits. Read-only — never edits. Use after "
+            "non-trivial multi-file edits to catch issues before the user sees them."
+        ),
+    ),
+    "reviewer": AgentSpec(
+        name="Reviewer",
+        role="reviewer",
+        mode="subagent",
+        tools_factory=_explore_tools,  # read-only
+        max_tokens=4096,
+        small_model=True,
+        use_reasoning=False,
+        description=(
+            "Code review against naming, error handling, test coverage, and "
+            "security heuristics. Read-only; produces bulleted findings with "
+            "file:line refs and severity tags. Use when you want a second "
+            "pair of eyes before finalising changes."
+        ),
+    ),
+    "guide": AgentSpec(
+        name="Guide",
+        role="guide",
+        mode="subagent",
+        tools_factory=_explore_tools,  # read-only
+        max_tokens=4096,
+        small_model=True,
+        use_reasoning=False,
+        description=(
+            "Answer questions about using Aru itself — slash commands, "
+            "permission config, skills, plugins, tool catalog. Reads "
+            "AGENTS.md and docs/ to ground answers. Use when the user's "
+            "question is about Aru's features, not their own codebase."
+        ),
     ),
 }

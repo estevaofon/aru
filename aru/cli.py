@@ -634,6 +634,25 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             ))
             continue
 
+        if user_input.lower() == "/subagents":
+            from aru.commands import handle_subagents_command
+            handle_subagents_command(session)
+            continue
+
+        if user_input.lower().startswith("/subagent "):
+            from aru.commands import handle_subagent_detail_command
+            handle_subagent_detail_command(session, user_input[10:].strip())
+            continue
+        if user_input.lower() == "/subagent":
+            from aru.commands import handle_subagent_detail_command
+            handle_subagent_detail_command(session, "")
+            continue
+
+        if user_input.lower() == "/bg":
+            from aru.commands import handle_background_command
+            handle_background_command(session)
+            continue
+
         if user_input.lower() in ("/yolo", "/unsafe"):
             _toggle_yolo_mode(ctx)
             continue
@@ -776,6 +795,16 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                         console.print(f"[dim]Agents: {', '.join(f'/{k}' for k in primary)}[/dim]")
 
         else:
+            # Drain any background sub-agent notifications that completed
+            # during the previous turn. Prepend them to the user prompt so
+            # the model sees the results before processing the new message.
+            # Parity with claude-code's <task-notification> routing.
+            from aru.tools.delegate import drain_pending_notifications
+            bg_notifications = drain_pending_notifications(session)
+            effective_prompt = user_input
+            if bg_notifications:
+                effective_prompt = f"{bg_notifications}\n\n{user_input}"
+
             # Check for @agent mention anywhere in message
             agent_mention = _extract_agent_mention(user_input, config.custom_agents)
             if agent_mention:
@@ -785,12 +814,14 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                 console.print(f"[bold magenta]Routing to @{agent_name}...[/bold magenta]")
                 agent = await create_custom_agent_instance(agent_def, session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
+                if bg_notifications:
+                    message_text = f"{bg_notifications}\n\n{message_text}"
                 with permission_scope(agent_def.permission):
                     await run_agent_capture(agent, message_text, session, images=attached_images or None)
             else:
                 agent = await create_general_agent(session, config, env_context=_build_env_ctx())
                 session.add_message("user", user_input)
-                await run_agent_capture(agent, user_input, session, images=attached_images or None)
+                await run_agent_capture(agent, effective_prompt, session, images=attached_images or None)
 
         # Show token usage and auto-save
         if session.token_summary:

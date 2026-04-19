@@ -206,7 +206,7 @@ def write_files(file_list: list[dict]) -> str:
             existing = ""
         parts.append(_format_unified_diff(existing, content, p))
         parts.append(Text())
-    if not check_permission("write", ", ".join(e.get("path", "") for e in file_list), Group(*parts)):
+    if not check_permission("write", [e.get("path", "") for e in file_list], Group(*parts)):
         return _denied(f"batch write of {len(file_list)} files")
 
     results = []
@@ -339,7 +339,7 @@ def edit_files(edits: list[dict]) -> str:
         parts.append(Text())
     for err in preview_errors:
         parts.append(Text(err, style="red"))
-    if not check_permission("edit", ", ".join(e.get("path", "") for e in edits), Group(*parts)):
+    if not check_permission("edit", [e.get("path", "") for e in edits], Group(*parts)):
         return _denied(f"batch edit of {len(edits)} files")
 
     errors = list(preview_errors)

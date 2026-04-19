@@ -13,7 +13,14 @@ from aru.agents.catalog import AGENTS
 
 class TestCatalog:
     def test_native_agents_present(self):
-        assert set(AGENTS.keys()) == {"build", "plan", "executor", "explorer"}
+        # Primary roles + subagent catalog (explorer is the original subagent,
+        # verification/reviewer/guide were added for the multi-agent parity
+        # work — all read-only and spawn-only, never selected by name at
+        # session start).
+        assert set(AGENTS.keys()) == {
+            "build", "plan", "executor",
+            "explorer", "verification", "reviewer", "guide",
+        }
 
     def test_modes(self):
         assert AGENTS["build"].mode == "primary"

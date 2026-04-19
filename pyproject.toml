@@ -64,6 +64,9 @@ aru = "aru.cli:main"
 include = ["aru*"]
 exclude = ["tests*", "site*", "docs*", "docs-site*"]
 
+[tool.setuptools.package-data]
+"aru.tools" = ["*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

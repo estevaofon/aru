@@ -1,37 +1,33 @@
 """Unified tool-policy evaluation.
 
-Single decision point for whether a tool call may proceed. Consolidates
-gates that were previously scattered across the agent_factory wrapper
-(plan mode, active-skill disallowed_tools). The same function is called
-by the tool wrapper *and* by per-tool permission checks inside
-`resolve_permission`, so both paths see a consistent answer and one
-coherent message.
+Single decision point for whether a tool call may proceed. Plan-mode
+and active-skill `disallowed_tools` are expressed as `Ruleset`s and
+composed through the same `evaluate()` function used by user/config
+rules. Reason collection wraps `evaluate()` per source so the combined
+BLOCKED message can name each gate that fired — one coherent block
+instead of two contradictory BLOCKED strings in sequence.
 
-Opencode parity: mirrors the single-function `Permission.evaluate(...)`
-pattern (permission/index.ts:133) where multiple rule sources are
-composed into one decision instead of independent short-circuit gates.
-Claude-code parity: `PolicyDecision` carries a tagged `reason` so
-diagnostics name which rule fired — analogous to `PermissionDecision`'s
-`decisionReason` in claude-code/permissions.ts.
+Opencode parity: `plan_mode_rules()` and `skill_rules()` return
+`Ruleset` — identical shape to user config rules. `evaluate_tool_policy`
+is a thin wrapper that attributes each deny to its source.
+Claude-code parity: `PolicyDecision.reasons` is a tagged list so
+diagnostics name which rule fired — analogous to
+`PermissionDecision.decisionReason` in claude-code/permissions.ts.
 
 Contract:
     evaluate_tool_policy(tool_name) -> PolicyDecision
         .allowed: True when the call may proceed.
         .reasons: ordered list of PolicyReason objects when denied.
         .message: LLM-facing explanation combining all reasons into one
-                  coherent block (never two contradictory BLOCKED strings
-                  in a row on the wire).
-
-This module reads the current `RuntimeContext`, `Session`, and
-`AgentConfig` via `aru.runtime.get_ctx()` — callers don't pass them
-explicitly so the surface stays small and the same function can be
-invoked from the wrapper and from the permission layer without wiring.
+                  coherent block.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
+
+from aru.permissions import Rule, Ruleset, evaluate
 
 # Tool names whose execution is blocked while a plan-mode session is
 # awaiting user approval. Read-only tools (read/glob/grep/list/...) are
@@ -133,15 +129,63 @@ def _render_message(tool_name: str, reasons: tuple[PolicyReason, ...]) -> str:
     )
 
 
+def plan_mode_rules(session) -> Ruleset:
+    """Ruleset expressing plan-mode denials. Empty when plan mode is off.
+
+    Every mutating tool in `PLAN_MODE_BLOCKED_TOOLS` becomes a `deny`
+    rule — composed alongside user rules via `evaluate()`. Read-only
+    tools are deliberately absent so the planning agent can research.
+    """
+    if session is None or not getattr(session, "plan_mode", False):
+        return []
+    return [Rule(tool, "*", "deny") for tool in PLAN_MODE_BLOCKED_TOOLS]
+
+
+def _active_skill_name(session, agent_id) -> str | None:
+    """Resolve the current scope's active skill.
+
+    `session.get_active_skill(agent_id)` is the authoritative form when
+    present (supports per-subagent scope via C3). Falls back to the
+    module-level `active_skill` attribute for older session shapes.
+    """
+    if session is None:
+        return None
+    getter = getattr(session, "get_active_skill", None)
+    if callable(getter):
+        return getter(agent_id)
+    return getattr(session, "active_skill", None)
+
+
+def skill_rules(session, config, agent_id) -> Ruleset:
+    """Ruleset derived from the active skill's `disallowed_tools` list.
+
+    Returns `[]` when no skill is active or no tools are disallowed.
+    Otherwise produces one `deny` rule per tool so the decision path
+    matches plan mode and user rules.
+    """
+    if session is None or config is None:
+        return []
+    active = _active_skill_name(session, agent_id)
+    if not active:
+        return []
+    skills = getattr(config, "skills", None) or {}
+    skill_obj = skills.get(active)
+    if skill_obj is None:
+        return []
+    disallowed = getattr(skill_obj, "disallowed_tools", None) or []
+    return [Rule(tool, "*", "deny") for tool in disallowed]
+
+
 def evaluate_tool_policy(tool_name: str) -> PolicyDecision:
     """Evaluate whether `tool_name` may be called in the current context.
 
-    Inspects the active `RuntimeContext`, its `Session`, and `AgentConfig`
-    and returns a single decision. When no `RuntimeContext` is installed
-    (e.g. unit tests that construct the wrapper directly without
-    `init_ctx`), returns `allowed=True` — the ctx-less environment is
-    equivalent to "no policy configured", matching the wrapper's prior
-    defensive behavior.
+    Each gate is evaluated against its own `Ruleset` via the same
+    `evaluate()` function that resolves user rules — unifying the
+    decision primitive. When multiple gates fire, each contributes a
+    `PolicyReason` so the combined message names every blocker.
+
+    When no `RuntimeContext` is installed (e.g. unit tests that construct
+    the wrapper directly without `init_ctx`), returns `allowed=True`.
     """
     # Always-allowed tools bypass all policy — exit_plan_mode must never
     # be denied or plan mode becomes a trap.
@@ -160,31 +204,13 @@ def evaluate_tool_policy(tool_name: str) -> PolicyDecision:
 
     reasons: list[PolicyReason] = []
 
-    # Plan-mode gate. Reads from session.plan_mode (authoritative flag).
-    # Only mutating tools in PLAN_MODE_BLOCKED_TOOLS are affected; the
-    # planning agent still needs read/search tools freely.
-    if (
-        session is not None
-        and getattr(session, "plan_mode", False)
-        and tool_name in PLAN_MODE_BLOCKED_TOOLS
-    ):
+    if evaluate(tool_name, "*", plan_mode_rules(session)).action == "deny":
         reasons.append(_plan_mode_reason(tool_name))
 
-    # Active-skill gate. Each agent scope carries its own active_skill slot
-    # (C3) — a subagent with its own ctx.agent_id does not inherit the
-    # parent's. The gate consults that scope's skill and its
-    # `disallowed_tools` frontmatter.
-    if session is not None and config is not None:
-        getter = getattr(session, "get_active_skill", None)
-        if callable(getter):
-            active = getter(agent_id)
-        else:
-            active = getattr(session, "active_skill", None)
-        skills = getattr(config, "skills", None) or {}
-        skill_obj = skills.get(active) if active else None
-        disallowed = getattr(skill_obj, "disallowed_tools", None) or []
-        if tool_name in disallowed:
-            reasons.append(_skill_disallowed_reason(tool_name, active))
+    skill_rs = skill_rules(session, config, agent_id)
+    if evaluate(tool_name, "*", skill_rs).action == "deny":
+        active = _active_skill_name(session, agent_id)
+        reasons.append(_skill_disallowed_reason(tool_name, active))
 
     if not reasons:
         return PolicyDecision(allowed=True)

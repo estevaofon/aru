@@ -9,7 +9,9 @@ import random
 import re
 import subprocess
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from aru.providers import MODEL_ALIASES, get_model_display, resolve_model_ref
 
@@ -110,6 +112,76 @@ class InvokedSkill:
             source_path=str(data.get("source_path", "")),
             invoked_at=float(data.get("invoked_at") or time.time()),
             agent_id=str(raw_agent) if raw_agent else None,
+        )
+
+
+@dataclass
+class SubagentTrace:
+    """Structured record of one sub-agent invocation.
+
+    Populated by `delegate_task._execute_with_streaming` as events flow in.
+    Stored on the session's `subagent_traces` list so the `/subagents` and
+    `/subagent <id>` slash commands can render the invocation tree.
+
+    `parent_id` links sub-agents spawned from another sub-agent (nested
+    delegations) — mirrors claude-code's Perfetto agent hierarchy
+    (runAgent.ts:355-359 registers `parentId` per agent).
+
+    Fields like `tool_calls` are truncated previews (args/result capped) so
+    long sessions don't accumulate gigabytes of trace data. Full tool
+    outputs remain in the Agno message history.
+    """
+
+    task_id: str
+    parent_id: str | None
+    agent_name: str
+    task: str  # truncated to 200 chars at write time
+    started_at: float
+    ended_at: float | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tool_calls: list[dict] = field(default_factory=list)
+    # status: running while the agent is emitting events; completed on
+    # normal exit; cancelled when abort_event fired; error on exception.
+    status: Literal["running", "completed", "cancelled", "error"] = "running"
+    result: str = ""  # truncated to 500 chars — full content lives in messages
+
+    @property
+    def duration(self) -> float:
+        """Wall-clock duration in seconds (0 if still running)."""
+        if self.ended_at is None:
+            return 0.0
+        return max(0.0, self.ended_at - self.started_at)
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "parent_id": self.parent_id,
+            "agent_name": self.agent_name,
+            "task": self.task,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "tool_calls": self.tool_calls,
+            "status": self.status,
+            "result": self.result,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SubagentTrace":
+        return cls(
+            task_id=str(data.get("task_id", "")),
+            parent_id=data.get("parent_id"),
+            agent_name=str(data.get("agent_name", "")),
+            task=str(data.get("task", "")),
+            started_at=float(data.get("started_at") or 0.0),
+            ended_at=data.get("ended_at"),
+            tokens_in=int(data.get("tokens_in") or 0),
+            tokens_out=int(data.get("tokens_out") or 0),
+            tool_calls=list(data.get("tool_calls") or []),
+            status=data.get("status", "running"),
+            result=str(data.get("result", "")),
         )
 
 
@@ -291,6 +363,21 @@ class Session:
         #   "off"            → disable thinking entirely
         # Set via /reasoning slash command; persists across `aru resume`.
         self.reasoning_override: str | None = None
+        # Structured sub-agent trace log, populated by delegate_task. Each
+        # entry records one delegation (task, duration, tokens, tool calls,
+        # result preview). Consumed by `/subagents` / `/subagent <id>` slash
+        # commands for observability. Not persisted in `to_dict()` by default
+        # to keep session JSON small — persistence to a separate subagents/
+        # subdir is feature #G.
+        self.subagent_traces: list[SubagentTrace] = []
+        # Background sub-agent results waiting to be surfaced to the primary
+        # agent on its next turn. `delegate_task(run_in_background=True)`
+        # dispatches the sub-agent in an asyncio task and appends the result
+        # here when it finishes. The REPL drains this list before each
+        # prompt so the model sees a `<task-notification>` message.
+        # Mirrors claude-code's LocalAgentTask async notification pattern
+        # (LocalAgentTask.tsx:466-500).
+        self.pending_notifications: list[dict] = []
 
     @property
     def model_id(self) -> str:

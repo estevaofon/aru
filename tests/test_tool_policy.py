@@ -144,3 +144,91 @@ def test_no_ctx_returns_allow():
     ctx.session = None
     ctx.config = None
     assert evaluate_tool_policy("bash").allowed is True
+
+
+# ---------------------------------------------------------------------------
+# plan_mode_rules / skill_rules — Ruleset-producing helpers (Fase 2)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_mode_rules_empty_when_plan_mode_off():
+    from aru.tool_policy import plan_mode_rules
+    session = Session()
+    session.plan_mode = False
+    assert plan_mode_rules(session) == []
+
+
+def test_plan_mode_rules_denies_all_blocked_tools():
+    from aru.tool_policy import PLAN_MODE_BLOCKED_TOOLS, plan_mode_rules
+    session = Session()
+    session.plan_mode = True
+    rules = plan_mode_rules(session)
+    denied = {r.permission for r in rules if r.action == "deny" and r.pattern == "*"}
+    assert denied == set(PLAN_MODE_BLOCKED_TOOLS)
+
+
+def test_plan_mode_rules_none_session():
+    from aru.tool_policy import plan_mode_rules
+    assert plan_mode_rules(None) == []
+
+
+def test_skill_rules_empty_without_active_skill():
+    from aru.tool_policy import skill_rules
+    session = Session()
+    cfg = AgentConfig()
+    assert skill_rules(session, cfg, None) == []
+
+
+def test_skill_rules_denies_disallowed_tools():
+    from aru.tool_policy import skill_rules
+    session = Session()
+    session.set_active_skill(None, "writing-plans")
+    cfg = AgentConfig()
+    cfg.skills = {
+        "writing-plans": Skill(
+            name="writing-plans",
+            description="",
+            content="",
+            source_path="/fake",
+            disallowed_tools=["bash", "enter_plan_mode"],
+        ),
+    }
+    rules = skill_rules(session, cfg, None)
+    assert {r.permission for r in rules} == {"bash", "enter_plan_mode"}
+    assert all(r.action == "deny" and r.pattern == "*" for r in rules)
+
+
+def test_skill_rules_scoped_by_agent_id():
+    """Subagent with its own agent_id sees the empty slot, not the parent's."""
+    from aru.tool_policy import skill_rules
+    session = Session()
+    session.set_active_skill(None, "writing-plans")  # primary scope
+    cfg = AgentConfig()
+    cfg.skills = {
+        "writing-plans": Skill(
+            name="writing-plans",
+            description="",
+            content="",
+            source_path="/fake",
+            disallowed_tools=["bash"],
+        ),
+    }
+    # Subagent scope — no skill active
+    assert skill_rules(session, cfg, "subagent-x") == []
+
+
+def test_tool_policy_composes_through_evaluate():
+    """Fase 2 invariant: evaluate_tool_policy uses the same `evaluate()`
+    function that resolves user rules. The rulesets are just more sources
+    of Rule, not a separate machine."""
+    from aru.permissions import evaluate
+    from aru.tool_policy import plan_mode_rules
+
+    session = Session()
+    session.plan_mode = True
+    # Direct composition — what evaluate_tool_policy does internally
+    rule = evaluate("bash", "*", plan_mode_rules(session))
+    assert rule.action == "deny"
+    # Read-only tool: no deny rule exists in the ruleset
+    rule2 = evaluate("read_file", "*", plan_mode_rules(session))
+    assert rule2.action == "ask"  # synthetic default, not denied

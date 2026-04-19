@@ -150,7 +150,15 @@ async def create_agent_from_spec(
         resolved_model = model_ref or session.model_ref
 
     tools = _wrap_tools_with_hooks(spec.tools_factory())
-    instructions = _build_instructions(spec.role, extra_instructions)
+    # Merge spec-level extra instructions (static, agent-specific policy like
+    # "you are read-only, never call write tools") with caller-provided extras
+    # (dynamic, session-specific context like cwd or AGENTS.md). Spec text
+    # comes first so the agent's baseline policy is established before any
+    # session-specific text that might try to override it.
+    combined_extra = "\n\n".join(
+        part for part in (spec.extra_instructions, extra_instructions) if part
+    )
+    instructions = _build_instructions(spec.role, combined_extra)
 
     instructions, resolved_model, max_tokens = await _apply_chat_hooks(
         instructions, resolved_model, spec.name, max_tokens=spec.max_tokens,

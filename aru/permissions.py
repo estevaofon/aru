@@ -35,6 +35,63 @@ PermissionAction = Literal["allow", "ask", "deny"]
 VALID_ACTIONS: set[str] = {"allow", "ask", "deny"}
 
 
+# ---------------------------------------------------------------------------
+# Typed permission errors (OpenCode parity)
+# ---------------------------------------------------------------------------
+#
+# Three distinct outcomes that all collapse to "deny the tool call" in the
+# bool-returning `check_permission`, but carry different meaning:
+#
+#   PermissionDenied   — a rule said no (config, plan mode, skill).
+#                        Not user-visible; the agent sees the blocker string.
+#   PermissionRejected — the user pressed "No" on the prompt. No feedback.
+#   PermissionCorrected — the user pressed "No" and typed guidance for the
+#                        agent. The `feedback` field carries what to say.
+#
+# Mirrors opencode/permission/index.ts:83-103 `DeniedError/RejectedError/
+# CorrectedError`. Defined here so future wrappers can switch from the
+# bool + `last_rejection_feedback` singleton pattern to per-call exceptions
+# (race-free under concurrent tool calls).
+
+
+class PermissionDenied(Exception):
+    """A permission rule denied the call (config, plan mode, skill, etc.)."""
+
+    def __init__(self, category: str, subject: str, pattern: str = "*") -> None:
+        self.category = category
+        self.subject = subject
+        self.pattern = pattern
+        super().__init__(f"permission denied for {category}: {subject} (rule: {pattern})")
+
+
+class PermissionRejected(Exception):
+    """User pressed No on the interactive permission prompt, no feedback."""
+
+    def __init__(self, category: str, subject: str) -> None:
+        self.category = category
+        self.subject = subject
+        super().__init__(f"user rejected {category}: {subject}")
+
+
+class PermissionCorrected(Exception):
+    """User pressed No on the prompt and typed guidance for the agent.
+
+    `feedback` carries the free-text message the agent should consider
+    before retrying with a different approach.
+    """
+
+    def __init__(self, category: str, subject: str, feedback: str) -> None:
+        self.category = category
+        self.subject = subject
+        self.feedback = feedback
+        super().__init__(
+            f"user rejected {category}: {subject} with feedback: {feedback}"
+        )
+
+
+PermissionError_ = PermissionDenied  # alias for type hints in unions
+
+
 @dataclass
 class PermissionRule:
     pattern: str
@@ -45,6 +102,202 @@ class PermissionRule:
 class PermissionConfig:
     default: PermissionAction = "ask"
     categories: dict[str, list[PermissionRule]] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Unified rule shape (OpenCode parity)
+# ---------------------------------------------------------------------------
+#
+# Flat Ruleset model. A single `Rule` shape for every source: user config,
+# category defaults, sensitive-file defaults, safe-bash defaults, plan-mode
+# and skill-disallowed gates, session "always" approvals. Every gate
+# produces `Ruleset`; a single `evaluate()` composes them. Mirrors
+# opencode/permission/index.ts:133 (`Permission.evaluate`).
+#
+# Coexists with `PermissionConfig`/`PermissionRule` during the migration —
+# `parse_permission_config` and `resolve_permission` still produce/consume
+# the legacy shape. `from_config`/`evaluate` are the v2 entry points used
+# by subsequent phases.
+
+
+@dataclass(frozen=True)
+class Rule:
+    """Single uniform rule: who (permission), what (pattern), how (action).
+
+    `permission` and `pattern` are both matched via fnmatch — wildcards
+    work in either field. `Rule("edit*", "*", "ask")` asks on any permission
+    starting with "edit"; `Rule("*", "*", "deny")` is a universal catch-all.
+    """
+    permission: str
+    pattern: str
+    action: PermissionAction
+
+
+Ruleset = list[Rule]
+
+
+# ---------------------------------------------------------------------------
+# Canonical permission names (OpenCode parity)
+# ---------------------------------------------------------------------------
+#
+# The tool name seen by the LLM (e.g. `delegate_task`, `web_fetch`) differs
+# from the canonical permission name used in config and rules
+# (`task`, `webfetch`). Mirrors OpenCode's `EDIT_TOOLS = ["edit", "write",
+# "apply_patch", "multiedit"]` convention where multiple tool names share
+# one permission. Enables:
+#   1. aru.json shape portable with opencode.json
+#   2. Grouping: one rule `{"edit": "ask"}` covers edit_file and edit_files
+#   3. Wildcard at the permission level: `{"edit*": "allow"}` is expressible
+
+TOOL_PERMISSION_NAMES: dict[str, str] = {
+    # Edit family — all mutations to existing files
+    "edit_file": "edit",
+    "edit_files": "edit",
+    # Write family — all creations
+    "write_file": "write",
+    "write_files": "write",
+    # Read family
+    "read_file": "read",
+    "read_files": "read",
+    # Search family
+    "glob_search": "glob",
+    "grep_search": "grep",
+    "list_directory": "list",
+    # Shell
+    "bash": "bash",
+    "run_command": "bash",
+    # Web — OpenCode uses single-word permission names
+    "web_fetch": "webfetch",
+    "web_search": "websearch",
+    # Subagent delegation — OpenCode permission is "task"
+    "delegate_task": "task",
+    # Skill invocation
+    "invoke_skill": "skill",
+}
+
+
+def canonical_permission(tool_name: str) -> str:
+    """Map a tool name to its canonical permission name.
+
+    Tools without an explicit mapping use their own name as the permission
+    (common case for custom tools). Callers pass the canonical name to
+    `evaluate()` so rules in `aru.json` keyed by canonical names apply
+    uniformly regardless of which specific tool in a family was invoked.
+    """
+    return TOOL_PERMISSION_NAMES.get(tool_name, tool_name)
+
+
+# ---------------------------------------------------------------------------
+# Pattern expansion (OpenCode parity)
+# ---------------------------------------------------------------------------
+
+def _expand_pattern(pattern: str) -> str:
+    """Expand `~/` and `$HOME/` prefixes to the user's home directory.
+
+    Mirrors opencode/permission/index.ts:271-277. Applied at parse time
+    (inside `from_config`) so rules see absolute paths. Non-home prefixes
+    pass through unchanged; this keeps glob patterns like `*.env` intact.
+    """
+    if not pattern:
+        return pattern
+    home = os.path.expanduser("~")
+    if pattern.startswith("~/"):
+        return home + pattern[1:]
+    if pattern == "~":
+        return home
+    if pattern.startswith("$HOME/"):
+        return home + pattern[5:]
+    if pattern == "$HOME":
+        return home
+    return pattern
+
+
+def _wildcard_match(subject: str, pattern: str) -> bool:
+    """OpenCode-parity wildcard. Pure fnmatch — no path basename fallback.
+
+    Callers that need basename matching (file-path rules) normalize the
+    subject before calling `evaluate` and pass candidate strings explicitly,
+    keeping this function shape-agnostic.
+    """
+    if pattern == "*" or pattern == subject:
+        return True
+    return fnmatch.fnmatch(subject, pattern)
+
+
+def evaluate(permission: str, pattern: str, *rulesets: Ruleset) -> Rule:
+    """Last-match-wins across all rulesets flattened in order.
+
+    Returns the matching `Rule` so callers can inspect which source fired
+    (used by the multi-reason BLOCKED message helper). If nothing matches,
+    returns a synthetic `Rule(permission, "*", "ask")` — same default as
+    OpenCode's `evaluate()`.
+    """
+    for ruleset in reversed(rulesets):
+        for rule in reversed(ruleset):
+            if _wildcard_match(permission, rule.permission) and _wildcard_match(pattern, rule.pattern):
+                return rule
+    return Rule(permission, "*", "ask")
+
+
+def disabled(tools: list[str] | tuple[str, ...], *rulesets: Ruleset) -> set[str]:
+    """Tools disabled by a universal deny rule — safe to exclude from the
+    toolset exposed to the model.
+
+    A tool is "disabled" when the last rule matching its canonical permission
+    has `pattern="*"` and `action="deny"`. Subject-specific rules (e.g.
+    `{"bash": {"rm -rf *": "deny"}}`) do NOT disable the tool — they only
+    deny specific calls, and the model may still usefully call the tool
+    for other subjects.
+
+    Mirrors opencode/permission/index.ts:299. Used by the tool-registry
+    composer at session start: a disabled tool is omitted from the toolset,
+    saving tokens and preventing the model from attempting calls that
+    would always fail.
+    """
+    result: set[str] = set()
+    rules = [r for rs in rulesets for r in rs]
+    for tool in tools:
+        permission = canonical_permission(tool)
+        last_match: Rule | None = None
+        for rule in rules:
+            if _wildcard_match(permission, rule.permission):
+                last_match = rule
+        if last_match and last_match.pattern == "*" and last_match.action == "deny":
+            result.add(tool)
+    return result
+
+
+def from_config(raw: Any) -> Ruleset:
+    """Parse aru.json/opencode.json-style permission config into a Ruleset.
+
+    Accepts every shape the OpenCode schema accepts:
+
+        "allow"                                       -> [Rule("*", "*", "allow")]
+        {"*": "ask"}                                  -> [Rule("*", "*", "ask")]
+        {"read": "allow"}                             -> [Rule("read", "*", "allow")]
+        {"bash": {"*": "ask", "git *": "allow"}}      -> [Rule("bash", "*", "ask"),
+                                                          Rule("bash", "git *", "allow")]
+        {"task": {"explorer": "allow"}}               -> [Rule("task", "explorer", "allow")]
+
+    Key order in the input dict is preserved in the output ruleset —
+    `evaluate` iterates in reverse and returns the last match, so the
+    written order is the resolution order (top = weakest, bottom = strongest).
+    """
+    if raw is None or raw == {}:
+        return []
+    if isinstance(raw, str):
+        return [Rule("*", "*", _validate_action(raw))]
+    if not isinstance(raw, dict):
+        return []
+
+    ruleset: Ruleset = []
+    for key, value in raw.items():
+        if isinstance(value, str):
+            ruleset.append(Rule(key, "*", _validate_action(value)))
+        elif isinstance(value, dict):
+            for pattern, action in value.items():
+                ruleset.append(Rule(key, _expand_pattern(pattern), _validate_action(action)))
+    return ruleset
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +312,15 @@ CATEGORY_DEFAULTS: dict[str, PermissionAction] = {
     "edit": "ask",
     "write": "ask",
     "bash": "ask",
-    "web_search": "allow",
-    "web_fetch": "allow",
-    "delegate_task": "allow",
+    # Canonical permission names (OpenCode parity). Tool names like
+    # `web_search`, `web_fetch`, `delegate_task` get canonicalised at
+    # resolve time via `canonical_permission` so legacy callers (and old
+    # tests) continue to work — they look up the same rule by a different
+    # name.
+    "websearch": "allow",
+    "webfetch": "allow",
+    "task": "allow",
+    "skill": "allow",
 }
 
 SAFE_COMMAND_PREFIXES = (
@@ -466,22 +725,31 @@ def resolve_permission(
         if not decision.allowed:
             return ("deny", "tool-policy")
 
+    # Canonical permission name (OpenCode parity). Tool names map to their
+    # canonical permission (edit_file → "edit", delegate_task → "task",
+    # web_fetch → "webfetch"); canonical names pass through unchanged. The
+    # user's aru.json keys by the canonical name, so this mapping is what
+    # makes `{"task": {"explorer": "allow"}}` work for `delegate_task` and
+    # `{"edit": "ask"}` cover both edit_file and edit_files.
+    canonical = canonical_permission(category)
+
     # "Accept edits" mode auto-allows edit/write categories for the session.
-    if ctx.permission_mode == "acceptEdits" and category in ("edit", "write"):
+    if ctx.permission_mode == "acceptEdits" and canonical in ("edit", "write"):
         return ("allow", "*")
 
-    # Check session memory
+    # Check session memory (also keyed by canonical name so "always allow"
+    # granted for one tool in a family covers the whole family).
     for cat, pattern in ctx.session_allowed:
-        if cat == category and _match_rule(pattern, subject):
+        if cat == canonical and _match_rule(pattern, subject):
             return ("allow", pattern)
 
     # Bash has special compound command handling
-    if category == "bash":
+    if canonical == "bash":
         return _resolve_bash_compound(subject)
 
     # All other categories
-    rules = _build_rules(category)
-    result: PermissionAction = CATEGORY_DEFAULTS.get(category, ctx.perm_config.default)
+    rules = _build_rules(canonical)
+    result: PermissionAction = CATEGORY_DEFAULTS.get(canonical, ctx.perm_config.default)
     matched_pattern = "*"
 
     for rule in rules:
@@ -545,22 +813,51 @@ def _fire_permission_hook(mgr, category: str, subject: str) -> bool | None:
     return None  # no handler overrode
 
 
+def _resolve_many(category: str, subjects: list[str]) -> list[tuple[PermissionAction, str]]:
+    """Resolve permission for each subject independently.
+
+    Returns list of (action, pattern) — one per input subject, in the same
+    order. Callers combine via any-deny-wins / any-ask-prompts semantics.
+    """
+    return [resolve_permission(category, s) for s in subjects]
+
+
 def check_permission(
     category: str,
-    subject: str,
+    subject: str | list[str],
     display_details: str | Text | Group,
 ) -> bool:
     """Check permission and prompt user if needed.
 
+    `subject` may be a single string (legacy path) or a list of subjects
+    (multi-pattern check for batch tools like `write_files`/`edit_files`).
+    For the list form: any deny → return False; all allow → return True;
+    any ask → one prompt covering the whole batch. Mirrors OpenCode's
+    `ask({patterns: string[]})` atomic semantics — one tool call, one
+    decision, covering every affected pattern.
+
     Returns True if allowed, False if denied.
     """
-    action, matched_pattern = resolve_permission(category, subject)
+    # Normalise to list; track whether caller used the legacy single-subject
+    # form for title rendering later.
+    if isinstance(subject, list):
+        subjects = list(subject) if subject else [""]
+        display_subject = ", ".join(s for s in subjects if s) or ""
+    else:
+        subjects = [subject]
+        display_subject = subject
 
-    if action == "allow":
-        return True
-    if action == "deny":
+    results = _resolve_many(category, subjects)
+
+    # any-deny — stop immediately, do not prompt. Honor the most restrictive
+    # decision across the batch so batch tools can't smuggle a denied path
+    # through by mixing it with allowed ones.
+    if any(action == "deny" for action, _ in results):
         return False
+    if all(action == "allow" for action, _ in results):
+        return True
 
+    # At least one subject is "ask" — prompt once, covering the whole batch.
     # Fire permission.ask hook — plugins can override the decision.
     # check_permission runs in a sync context (called from tool threads),
     # so we fire sync handlers directly and async handlers via the event loop.
@@ -568,7 +865,7 @@ def check_permission(
     mgr = getattr(ctx, "plugin_manager", None)
     if mgr is not None and getattr(mgr, "loaded", False):
         try:
-            override = _fire_permission_hook(mgr, category, subject)
+            override = _fire_permission_hook(mgr, category, display_subject)
             if override is not None:
                 return override
         except Exception:
@@ -577,11 +874,11 @@ def check_permission(
     # action == "ask" -> prompt user
     with ctx.permission_lock:
         # Re-check after acquiring lock (another thread may have resolved it)
-        action2, pattern2 = resolve_permission(category, subject)
-        if action2 == "allow":
-            return True
-        if action2 == "deny":
+        results2 = _resolve_many(category, subjects)
+        if any(action == "deny" for action, _ in results2):
             return False
+        if all(action == "allow" for action, _ in results2):
+            return True
 
         # Pause Live and flush already-streamed content
         if ctx.live:
@@ -589,7 +886,7 @@ def check_permission(
         if ctx.display:
             ctx.display.flush()
 
-        title = f"{category}: {subject}" if subject else category
+        title = f"{category}: {display_subject}" if display_subject else category
         ctx.console.print()
         ctx.console.print(Panel(
             display_details,
