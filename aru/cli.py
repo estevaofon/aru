@@ -529,6 +529,30 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     console.print(f"[yellow]Error: {e}[/yellow]")
             continue
 
+        if user_input == "/reasoning" or user_input.startswith("/reasoning "):
+            arg = user_input[len("/reasoning"):].strip().lower()
+            valid_efforts = {"low", "medium", "high", "max"}
+            if not arg:
+                current = session.reasoning_override or "[dim](config default)[/dim]"
+                console.print(f"[bold]Reasoning effort:[/bold] {current}")
+                console.print()
+                console.print("[dim]Usage:[/dim]")
+                console.print("[dim]  /reasoning <low|medium|high|max>  — override effort for this session[/dim]")
+                console.print("[dim]  /reasoning off                    — disable thinking entirely[/dim]")
+                console.print("[dim]  /reasoning clear                  — revert to provider/model config[/dim]")
+            elif arg in ("clear", "default", "none"):
+                session.reasoning_override = None
+                console.print("[bold green]Reasoning override cleared[/bold green] — using provider/model config.")
+            elif arg == "off":
+                session.reasoning_override = "off"
+                console.print("[bold yellow]Reasoning disabled[/bold yellow] for this session.")
+            elif arg in valid_efforts:
+                session.reasoning_override = arg
+                console.print(f"[bold green]Reasoning effort set to '{arg}'[/bold green] for this session.")
+            else:
+                console.print(f"[yellow]Unknown value '{arg}'. Use low/medium/high/max/off/clear.[/yellow]")
+            continue
+
         if user_input.lower() in ("/sessions", "/list"):
             sessions = store.list_sessions()
             if not sessions:
@@ -844,7 +868,7 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
 
         agent = Agent(
             name="Aru",
-            model=create_model(session.model_ref),  # None → provider cap
+            model=create_model(session.model_ref, reasoning_override=session.reasoning_override),
             tools=[],
             instructions=build_instructions("general", extra_instructions),
             markdown=True,

@@ -156,9 +156,16 @@ async def create_agent_from_spec(
         instructions, resolved_model, spec.name, max_tokens=spec.max_tokens,
     )
 
+    reasoning_override = session.reasoning_override if session is not None else None
+
     return Agent(
         name=spec.name,
-        model=create_model(resolved_model, max_tokens=max_tokens),
+        model=create_model(
+            resolved_model,
+            max_tokens=max_tokens,
+            use_reasoning=spec.use_reasoning,
+            reasoning_override=reasoning_override,
+        ),
         tools=tools,
         instructions=instructions,
         markdown=True,
@@ -210,7 +217,11 @@ async def create_custom_agent_instance(agent_def: CustomAgent, session: Session,
 
     return Agent(
         name=agent_def.name,
-        model=create_model(model_ref, max_tokens=max_tokens),
+        model=create_model(
+            model_ref,
+            max_tokens=max_tokens,
+            reasoning_override=session.reasoning_override,
+        ),
         tools=tools,
         instructions=instructions,
         markdown=True,

@@ -889,7 +889,8 @@ async def compact_conversation(
                 "if a file was central to the work (being debugged, actively edited, or referenced "
                 "in a decision), include the critical lines verbatim; if a file was only briefly "
                 "read for context, just list the path. Do not mechanically copy everything. "
-                "Drop: greetings, reasoning chains, redundant tool output, transient status messages."
+                "Drop: greetings, reasoning chains from older turns, redundant tool output, transient status messages. "
+                "Preserve thinking/reasoning content from the most recent assistant turn if present."
             ),
             markdown=True,
         )

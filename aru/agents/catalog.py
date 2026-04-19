@@ -34,6 +34,7 @@ class AgentSpec:
     tools_factory: Callable[[], list]    # lazy resolver — invoked at agent creation
     max_tokens: int | None
     small_model: bool = False            # if True, factory uses ctx.small_model_ref
+    use_reasoning: bool = True           # False skips thinking params (e.g. explorer)
 
 
 def _build_tools() -> list:
@@ -88,5 +89,6 @@ AGENTS: dict[str, AgentSpec] = {
         tools_factory=_explore_tools,
         max_tokens=8192,
         small_model=True,
+        use_reasoning=False,  # fast read-only subagent — no thinking overhead
     ),
 }

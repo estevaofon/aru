@@ -16,6 +16,7 @@ SLASH_COMMANDS = [
     ("/help", "Show help and available commands", "/help"),
     ("/plan", "Create an implementation plan", "/plan <task>"),
     ("/model", "Switch model/provider", "/model [provider/model]"),
+    ("/reasoning", "Set reasoning effort for this session", "/reasoning [low|medium|high|max|off|clear]"),
     ("/sessions", "List recent sessions", "/sessions"),
     ("/commands", "List custom commands", "/commands"),
     ("/skills", "List available skills", "/skills"),

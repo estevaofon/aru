@@ -284,6 +284,13 @@ class Session:
         self._tree_max_depth: int = 2
         # Token budget (0 = unlimited)
         self.token_budget: int = 0
+        # Per-session reasoning effort override. When set, takes precedence
+        # over the provider/model's `reasoning` config. Values:
+        #   None             → use config (default)
+        #   "low"/"medium"/"high"/"max" → force that effort level
+        #   "off"            → disable thinking entirely
+        # Set via /reasoning slash command; persists across `aru resume`.
+        self.reasoning_override: str | None = None
 
     @property
     def model_id(self) -> str:
@@ -645,6 +652,7 @@ class Session:
             "cwd": self.cwd,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "reasoning_override": self.reasoning_override,
         }
 
     @classmethod
@@ -699,6 +707,8 @@ class Session:
         session.cwd = data.get("cwd", os.getcwd())
         session.created_at = data.get("created_at", "")
         session.updated_at = data.get("updated_at", "")
+        override = data.get("reasoning_override")
+        session.reasoning_override = str(override) if override else None
         return session
 
     def get_context_summary(self) -> str:

@@ -14,6 +14,19 @@ from typing import Any
 logger = logging.getLogger("aru.providers")
 
 
+@dataclass
+class ReasoningConfig:
+    """Abstract reasoning/thinking config — provider-neutral.
+
+    Resolved by _get_reasoning_config from the model registry or provider
+    default, then translated to provider-specific API params by
+    _resolve_reasoning_params.
+    """
+    effort: str | None = None        # "low" | "medium" | "high" | "max"
+    budget_tokens: int | None = None # explicit cap; overrides effort table when set
+    enabled: bool = True             # False disables thinking regardless of model config
+
+
 # ---------------------------------------------------------------------------
 # Built-in provider definitions
 # ---------------------------------------------------------------------------
@@ -27,6 +40,7 @@ class ProviderConfig:
     default_model: str | None = None
     models: dict[str, dict[str, Any]] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
+    reasoning_effort: str | None = None  # provider-level default effort
 
 
 # Built-in providers with sensible defaults
@@ -131,6 +145,138 @@ def _init_providers():
 _init_providers()
 
 
+# ---------------------------------------------------------------------------
+# Reasoning / thinking support
+# ---------------------------------------------------------------------------
+
+# Effort level → default thinking-budget tokens (for providers that need a cap).
+_EFFORT_TO_BUDGET: dict[str, int] = {
+    "low":    4_000,
+    "medium": 8_000,
+    "high":   16_000,
+    "max":    32_000,
+}
+
+# Claude model IDs that do NOT support any form of extended thinking.
+# Mirrors Agno's Claude.NON_THINKING_MODELS. All other Claude models
+# (Sonnet 4+, Opus 4+, Haiku 4.5+) are assumed to support adaptive thinking.
+_NON_THINKING_IDS: frozenset[str] = frozenset({
+    "claude-3-haiku-20240307",
+    "claude-3-5-haiku-20241022",   # canonical Anthropic ID
+    "claude-3-5-haiku-latest",
+    "claude-haiku-3-5-20241022",   # Aru's internal alias
+})
+
+# Claude model IDs that support thinking in budget mode only (not adaptive).
+# The original extended-thinking Sonnet 3.7 falls here.
+_BUDGET_THINKING_IDS: frozenset[str] = frozenset({
+    "claude-3-7-sonnet-20250219",
+})
+
+
+def _resolve_reasoning_params(
+    provider_type: str,
+    provider: "ProviderConfig",
+    model_id: str,
+    config: "ReasoningConfig",
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Map an abstract ReasoningConfig to provider-specific constructor kwargs.
+
+    Returns a dict suitable for merging into the Agno model params. Returns {}
+    when the provider/model does not support configurable reasoning.
+
+    Routing table (mirrors OpenCode's transform.ts variants() logic):
+      anthropic     → thinking + interleaved-thinking beta (adaptive or budget)
+      openrouter    → extra_body {"reasoning": {"effort": ...}}
+      deepseek      → {} (DeepSeek-Reasoner always thinks server-side)
+      openai/compat with DashScope base_url → extra_body {"enable_thinking": ...}
+      openai/compat generic → reasoning_effort=effort (Agno native field)
+    """
+    if not config.enabled:
+        return {}
+
+    effort = config.effort or "medium"
+
+    if provider_type == "anthropic":
+        if model_id in _NON_THINKING_IDS:
+            return {}
+        if model_id in _BUDGET_THINKING_IDS:
+            budget = config.budget_tokens or _EFFORT_TO_BUDGET.get(effort, 8_000)
+            budget = min(budget, max_tokens - 1)
+            return {
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+                "betas": ["interleaved-thinking-2025-05-14"],
+            }
+        # Sonnet 4+, Opus 4+, Haiku 4.5+ — model decides its own depth
+        return {
+            "thinking": {"type": "adaptive"},
+            "betas": ["interleaved-thinking-2025-05-14"],
+        }
+
+    if provider_type == "openrouter":
+        return {"extra_body": {"reasoning": {"effort": effort}}}
+
+    if provider_type == "deepseek":
+        return {}  # DeepSeek-Reasoner thinks unconditionally server-side
+
+    # openai provider type (direct or OpenAI-compat) — distinguish DashScope
+    is_dashscope = bool(
+        provider.base_url and "dashscope" in provider.base_url.lower()
+    )
+    if is_dashscope:
+        thinking_budget = config.budget_tokens or _EFFORT_TO_BUDGET.get(effort, 8_000)
+        return {
+            "extra_body": {
+                "enable_thinking": True,
+                "thinking_budget": thinking_budget,
+                "preserve_thinking": True,   # retains reasoning across tool calls
+            }
+        }
+
+    # Generic OpenAI-compatible endpoint
+    return {"reasoning_effort": effort}
+
+
+def _get_reasoning_config(
+    provider: "ProviderConfig",
+    model_name: str,
+) -> "ReasoningConfig | None":
+    """Extract ReasoningConfig from the model registry, then the provider default.
+
+    Returns None when no reasoning is configured — _create_provider_model
+    skips the reasoning merge entirely in that case.
+    """
+    model_data = provider.models.get(model_name, {})
+    r = model_data.get("reasoning")
+    if r is not None:
+        if r is False or (isinstance(r, dict) and r.get("enabled") is False):
+            return ReasoningConfig(enabled=False)
+        if isinstance(r, dict):
+            return ReasoningConfig(
+                effort=r.get("effort"),
+                budget_tokens=r.get("budget_tokens"),
+            )
+
+    if provider.reasoning_effort:
+        return ReasoningConfig(effort=provider.reasoning_effort)
+
+    return None
+
+
+def _merge_reasoning(params: dict[str, Any], reasoning_params: dict[str, Any]) -> None:
+    """Merge reasoning_params into model params in-place.
+
+    extra_body dicts are shallow-merged so pre-existing extra_body keys
+    (e.g. OpenRouter fallback models) are preserved alongside thinking params.
+    """
+    for k, v in reasoning_params.items():
+        if k == "extra_body" and isinstance(params.get(k), dict) and isinstance(v, dict):
+            params[k] = {**params[k], **v}
+        else:
+            params[k] = v
+
+
 def register_provider(key: str, config: ProviderConfig):
     """Register or override a provider configuration."""
     _providers[key] = config
@@ -176,6 +322,26 @@ def load_providers_from_config(config_data: dict[str, Any]):
           "models": {
             "my-model": {"id": "my-model-v1", "context_limit": 64000}
           }
+        },
+        "dashscope": {
+          "type": "openai",
+          "name": "DashScope",
+          "api_key_env": "DASHSCOPE_API_KEY",
+          "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          "default_model": "qwen3.6-plus",
+          "models": {
+            "qwen3.6-plus": {
+              "id": "qwen3.6-plus",
+              "max_tokens": 16384,
+              "context_limit": 1000000,
+              "reasoning": {"effort": "high", "budget_tokens": 8000}
+            },
+            "qwen3-plus": {
+              "id": "qwen3-plus",
+              "max_tokens": 16384,
+              "reasoning": {"effort": "medium"}
+            }
+          }
         }
       }
     }
@@ -210,6 +376,8 @@ def load_providers_from_config(config_data: dict[str, Any]):
                 existing.models.update(pdata["models"])
             if "options" in pdata:
                 existing.options.update(pdata["options"])
+            if "reasoning_effort" in pdata:
+                existing.reasoning_effort = pdata["reasoning_effort"]
         else:
             # New provider - "type" field tells us which Agno class to use
             _providers[key] = ProviderConfig(
@@ -219,6 +387,7 @@ def load_providers_from_config(config_data: dict[str, Any]):
                 default_model=pdata.get("default_model"),
                 models=pdata.get("models", {}),
                 options=pdata.get("options", {}),
+                reasoning_effort=pdata.get("reasoning_effort"),
             )
             # Store the type hint for model creation
             if "type" in pdata:
@@ -318,6 +487,8 @@ def create_model(
     model_ref: str,
     max_tokens: int | None = None,
     cache_system_prompt: bool = True,
+    use_reasoning: bool = True,
+    reasoning_override: str | None = None,
     **kwargs,
 ):
     """Create an Agno model instance from a provider/model reference.
@@ -326,7 +497,14 @@ def create_model(
         model_ref: Provider/model string (e.g., "anthropic/claude-sonnet-4-5", "ollama/llama3.1")
         max_tokens: Override max tokens (uses provider default if None)
         cache_system_prompt: Whether to cache system prompt (Anthropic-specific)
-        **kwargs: Extra provider-specific parameters
+        use_reasoning: Apply reasoning/thinking params from the model's config.
+            Set False for lightweight subagents (e.g. explorer) that should skip
+            thinking overhead. Defaults True — params are only applied when the
+            model/provider has a reasoning config; absence of config is a no-op.
+        reasoning_override: Session-level effort override. When not None, wins
+            over the provider/model config. Accepts "low"/"medium"/"high"/"max"
+            or "off" (disables thinking entirely).
+        **kwargs: Extra provider-specific parameters (override everything)
 
     Returns:
         An Agno model instance ready for use with Agent()
@@ -355,12 +533,29 @@ def create_model(
     # Determine the actual provider type (for custom providers with "type" field)
     provider_type = provider.options.get("_provider_type", provider_key)
 
+    # Compute reasoning params once here — _create_provider_model merges them
+    reasoning_params: dict[str, Any] = {}
+    if use_reasoning:
+        # Session override wins over model/provider config
+        if reasoning_override is not None:
+            if reasoning_override.lower() == "off":
+                r_cfg = ReasoningConfig(enabled=False)
+            else:
+                r_cfg = ReasoningConfig(effort=reasoning_override.lower())
+        else:
+            r_cfg = _get_reasoning_config(provider, model_name)
+        if r_cfg:
+            reasoning_params = _resolve_reasoning_params(
+                provider_type, provider, model_id, r_cfg, effective_max_tokens
+            )
+
     return _create_provider_model(
         provider_type=provider_type,
         provider=provider,
         model_id=model_id,
         max_tokens=effective_max_tokens,
         cache_system_prompt=cache_system_prompt,
+        reasoning_params=reasoning_params,
         **kwargs,
     )
 
@@ -530,18 +725,26 @@ def _create_provider_model(
     model_id: str,
     max_tokens: int,
     cache_system_prompt: bool,
+    reasoning_params: dict[str, Any] | None = None,
     **kwargs,
 ):
-    """Instantiate the correct Agno model class based on provider type."""
+    """Instantiate the correct Agno model class based on provider type.
+
+    `reasoning_params` is a pre-computed dict from _resolve_reasoning_params
+    (or {} when reasoning is disabled/unconfigured). It is merged into model
+    params before kwargs so explicit caller kwargs can still override.
+    """
+    r_params = reasoning_params or {}
 
     if provider_type == "anthropic":
         from agno.models.anthropic import Claude
         api_key = _resolve_api_key(provider)
-        params = {"id": model_id, "max_tokens": max_tokens}
+        params: dict[str, Any] = {"id": model_id, "max_tokens": max_tokens}
         if cache_system_prompt:
             params["cache_system_prompt"] = True
         if api_key:
             params["api_key"] = api_key
+        _merge_reasoning(params, r_params)
         params.update(kwargs)
         return Claude(**params)
 
@@ -560,6 +763,7 @@ def _create_provider_model(
                 "tool": "tool",
                 "model": "assistant",
             }
+        _merge_reasoning(params, r_params)
         params.update(kwargs)
         if cache_system_prompt:
             # Only mark recent messages with cache_control when the provider
@@ -584,6 +788,7 @@ def _create_provider_model(
             ollama_opts = {k: v for k, v in provider.options.items() if not k.startswith("_")}
             if ollama_opts:
                 params["options"] = ollama_opts
+        # Ollama doesn't support reasoning params — skip merge
         params.update(kwargs)
         return Ollama(**params)
 
@@ -593,6 +798,7 @@ def _create_provider_model(
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
             params["api_key"] = api_key
+        # Groq doesn't expose reasoning params yet — skip merge
         params.update(kwargs)
         return Groq(**params)
 
@@ -602,6 +808,7 @@ def _create_provider_model(
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
             params["api_key"] = api_key
+        _merge_reasoning(params, r_params)
         params.update(kwargs)
         return OpenRouter(**params)
 
@@ -611,6 +818,9 @@ def _create_provider_model(
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
             params["api_key"] = api_key
+        # DeepSeek-Reasoner thinks unconditionally server-side; _resolve already
+        # returns {} for deepseek, so merging is a safe no-op here.
+        _merge_reasoning(params, r_params)
         params.update(kwargs)
         return DeepSeek(**params)
 
@@ -630,6 +840,7 @@ def _create_provider_model(
                 "tool": "tool",
                 "model": "assistant",
             }
+        _merge_reasoning(params, r_params)
         params.update(kwargs)
         if cache_system_prompt:
             # Fallback branch always means "unknown OpenAI-compat provider"
