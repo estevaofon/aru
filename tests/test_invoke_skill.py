@@ -328,11 +328,11 @@ class TestRegistryIntegration:
         assert invoke_skill in GENERAL_TOOLS
 
     def test_invoke_skill_excluded_from_subagent_tools(self):
-        # Import after registry is constructed so _SUBAGENT_TOOLS is populated
-        from aru.tools.delegate import _SUBAGENT_TOOLS
-        import aru.tools.registry  # noqa: F401 — ensures _SUBAGENT_TOOLS was set
+        # Import after registry is constructed so _DEFAULT_SUBAGENT_TOOLS is populated
+        from aru.tools.delegate import _DEFAULT_SUBAGENT_TOOLS
+        import aru.tools.registry  # noqa: F401 — ensures _DEFAULT_SUBAGENT_TOOLS was set
 
-        assert invoke_skill not in _SUBAGENT_TOOLS
+        assert invoke_skill not in _DEFAULT_SUBAGENT_TOOLS
 
     def test_invoke_skill_excluded_from_planner_and_explorer(self):
         from aru.tools.registry import PLANNER_TOOLS, EXPLORER_TOOLS

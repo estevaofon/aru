@@ -9,8 +9,9 @@ for name-based lookups.
 from __future__ import annotations
 
 from aru.runtime import get_ctx
+from aru.tools import delegate as _delegate_module
 from aru.tools._shared import _thread_tool
-from aru.tools.delegate import _SUBAGENT_TOOLS, delegate_task
+from aru.tools.delegate import delegate_task
 from aru.tools.file_ops import (
     _edit_file_tool,
     _edit_files_tool,
@@ -78,10 +79,14 @@ PLANNER_TOOLS = list(_READ_ONLY_TOOLS)
 # Explorer tools — read-only with bash and ranker (subagent for fast research)
 EXPLORER_TOOLS = _READ_ONLY_TOOLS + [bash, _rank_files_tool]
 
-# Populate the subagent tool list defined in delegate.py. delegate_task reads
-# the list at call time, so this in-place update takes effect for every
-# future sub-agent run. Excludes delegate_task to prevent recursive spawning.
-_SUBAGENT_TOOLS[:] = (
+# Set the subagent default tool list on the delegate module. We assign
+# the attribute via the module reference (not via an imported symbol) so
+# there is a single authoritative binding at
+# `aru.tools.delegate._DEFAULT_SUBAGENT_TOOLS`. Using `from ... import` +
+# in-place `[:]=` created TWO bindings in separate module namespaces
+# that could diverge under `monkeypatch.setattr` (the teardown restored
+# only one of them). Assignment-through-module keeps test semantics clean.
+_delegate_module._DEFAULT_SUBAGENT_TOOLS = (
     _READ_ONLY_TOOLS + _WRITE_TOOLS + [bash] + _NET_TOOLS + [_rank_files_tool]
 )
 

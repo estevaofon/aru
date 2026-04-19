@@ -32,7 +32,7 @@ from aru.tools._shared import (
 )
 from aru.tools.delegate import (
     _next_subagent_id,
-    _SUBAGENT_TOOLS,
+    _DEFAULT_SUBAGENT_TOOLS,
     _update_delegate_task_docstring,
     delegate_task,
     set_custom_agents,

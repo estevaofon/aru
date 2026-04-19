@@ -1,9 +1,9 @@
 """delegate_task tool and sub-agent lifecycle.
 
-Spawns sub-agents (explorer / custom / generic) with their own RuntimeContext
-fork so permission state and task store are isolated. `_SUBAGENT_TOOLS` lives
-here because delegate_task reads it at call time; the registry populates it
-once tool wrappers exist.
+Spawns sub-agents (built-in / custom / generic) with their own RuntimeContext
+fork so permission state and task store are isolated. The registry populates
+`_DEFAULT_SUBAGENT_TOOLS` once tool wrappers exist; delegate_task reads it at
+call time so late population is safe.
 """
 
 from __future__ import annotations
@@ -14,6 +14,15 @@ import threading
 
 from aru.runtime import get_ctx
 from aru.tools._shared import _get_small_model_ref, _truncate_output
+
+
+# Maximum subagent-fork depth before delegate_task refuses a new spawn.
+# Each `fork_ctx()` increments `ctx.subagent_depth`; primary session is 0.
+# Safety net: a custom agent whose YAML includes `delegate_task` in its
+# `tools` list can legitimately recurse — but a prompt bug shouldn't let
+# it chain 100 levels deep and exhaust the budget. Five levels are more
+# than enough for realistic workflows (orchestrator → worker → verifier).
+MAX_SUBAGENT_DEPTH = 5
 
 
 _subagent_counter = 0
@@ -27,10 +36,16 @@ def _next_subagent_id() -> int:
         return _subagent_counter
 
 
-# Populated by the registry once wrappers exist; delegate_task reads this at
-# call time so late population is safe. Excludes delegate_task itself to
-# prevent infinite recursion.
-_SUBAGENT_TOOLS: list = []
+# Conservative toolset used for the generic sub-agent path (when the caller
+# provides no `agent_name` and no custom AgentDef). Populated by the registry
+# once tool wrappers are constructed. Default-deny on `delegate_task` — a
+# nameless sub-agent has no authorised recursion path, so recursion is
+# blocked. Built-in specs with their own `tools_factory` and custom YAML
+# agents with an explicit `tools` list bypass this default entirely; their
+# toolset is whatever they declared. Rename parity: `_SUBAGENT_TOOLS` →
+# `_DEFAULT_SUBAGENT_TOOLS` makes the default-deny semantics visible at
+# the call site.
+_DEFAULT_SUBAGENT_TOOLS: list = []
 
 
 def _session_dir(session) -> str | None:
@@ -166,6 +181,21 @@ async def delegate_task(
     """
 
     async def _run() -> str:
+        # Depth safety net — runs in PARENT ctx so the bound is measured
+        # against the caller's depth, not the fork's. A custom agent whose
+        # YAML authorises `delegate_task` is still subject to this cap.
+        try:
+            _parent_depth = get_ctx().subagent_depth
+        except LookupError:
+            _parent_depth = 0
+        if _parent_depth >= MAX_SUBAGENT_DEPTH:
+            return (
+                f"[DELEGATE] Max sub-agent recursion depth "
+                f"({MAX_SUBAGENT_DEPTH}) reached. Refusing to spawn a nested "
+                f"sub-agent from depth={_parent_depth}. Complete the current "
+                f"line of work and resurface results to the primary agent."
+            )
+
         # Permission check runs in the PARENT ctx so a deny is surfaced to
         # the parent agent without spawning anything (saves a subagent
         # setup cost). After the check, we fork into the subagent ctx.
@@ -246,8 +276,13 @@ async def delegate_task(
         elif _agent_name and _agent_name in custom_agent_defs:
             agent_def = custom_agent_defs[_agent_name]
             agent_perm = agent_def.permission
-            tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_SUBAGENT_TOOLS)
-            tools = [t for t in tools if t is not delegate_task]
+            # Honour the YAML's `tools` list verbatim — including
+            # `delegate_task` if the author opted in for recursion. The old
+            # hardcoded `[t for t in tools if t is not delegate_task]` filter
+            # contradicted the YAML contract and blocked legitimate
+            # orchestrator patterns. Runaway recursion is capped by
+            # MAX_SUBAGENT_DEPTH instead.
+            tools = resolve_tools(agent_def.tools) if agent_def.tools else list(_DEFAULT_SUBAGENT_TOOLS)
             instructions = agent_def.system_prompt + f"\nThe current working directory is: {cwd}\n"
             if context:
                 instructions += f"\nAdditional context:\n{context}\n"
@@ -272,7 +307,7 @@ Do not create documentation files unless explicitly asked.
             sub = Agent(
                 name=f"SubAgent-{agent_id}",
                 model=create_model(small_model_ref, max_tokens=4096),
-                tools=_SUBAGENT_TOOLS,
+                tools=_DEFAULT_SUBAGENT_TOOLS,
                 instructions=instructions,
                 markdown=True,
             )

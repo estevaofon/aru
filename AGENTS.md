@@ -126,8 +126,8 @@ One-shot scope check run after the plan agent produces a draft. No tools, no loo
 - `tools/search.py` — `glob_search`, `grep_search` with ripgrep fast path and pure-Python fallback; exposes `_glob_search_tool` / `_grep_search_tool` async wrappers
 - `tools/shell.py` — `bash`, `run_command`, background-process tracking, long-running-command detection, Windows `taskkill /T` cleanup
 - `tools/web.py` — `web_search` (DuckDuckGo Lite → HTML fallback), `web_fetch` (Jina Reader → direct), local HTML-to-text
-- `tools/delegate.py` — `delegate_task`, subagent id counter, `_SUBAGENT_TOOLS` list, `set_custom_agents`, dynamic docstring updater
-- `tools/registry.py` — composes `CORE_TOOLS`, `ALL_TOOLS`, `GENERAL_TOOLS`, `EXECUTOR_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, `_SUBAGENT_TOOLS`, builds `TOOL_REGISTRY`, `resolve_tools`, `load_mcp_tools`, `_build_mcp_gateway`
+- `tools/delegate.py` — `delegate_task`, subagent id counter, `_DEFAULT_SUBAGENT_TOOLS` list, `set_custom_agents`, dynamic docstring updater
+- `tools/registry.py` — composes `CORE_TOOLS`, `ALL_TOOLS`, `GENERAL_TOOLS`, `EXECUTOR_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, `_DEFAULT_SUBAGENT_TOOLS`, builds `TOOL_REGISTRY`, `resolve_tools`, `load_mcp_tools`, `_build_mcp_gateway`
 - `tools/_shared.py` — `_notify_file_mutation`, `_checkpoint_file`, `_get_small_model_ref`, `_truncate_output`, `_thread_tool`
 - `tools/_diff.py` — `_format_unified_diff`, `_compact_diff`, colour styles for the permission-prompt diff panel
 
@@ -141,7 +141,7 @@ Composed tool sets (single source of truth — see `CORE_TOOLS`, `_READ_ONLY_TOO
 | `EXECUTOR_TOOLS` | 19 | alias for `ALL_TOOLS` (executor agent) |
 | `PLANNER_TOOLS` | 5 | read-only subset: `read_file`, `read_files`, `glob_search`, `grep_search`, `list_directory` |
 | `EXPLORER_TOOLS` | 7 | `PLANNER_TOOLS` + `bash` + `rank_files` |
-| `_SUBAGENT_TOOLS` | 13 | tools passed to delegated sub-agents; excludes `delegate_task` and `invoke_skill` (controller pre-bakes skill content into subagent context) |
+| `_DEFAULT_SUBAGENT_TOOLS` | 13 | tools passed to delegated sub-agents; excludes `delegate_task` and `invoke_skill` (controller pre-bakes skill content into subagent context) |
 
 Tool categories in the file:
 
@@ -163,7 +163,7 @@ This is the primary mechanism for **multi-skill workflows** where one skill need
 
 `invoke_skill.__doc__` is updated at startup via `_update_invoke_skill_docstring(config.skills)` (called from `cli.py:run_cli` and `run_oneshot`) so the LLM-facing schema lists available skill names + descriptions. Skills with `disable_model_invocation: true` in their frontmatter are hidden and refused by the tool.
 
-The tool is part of `GENERAL_TOOLS` / `EXECUTOR_TOOLS` but intentionally excluded from `_SUBAGENT_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, and `_PLAN_MODE_BLOCKED_TOOLS` (loading text is side-effect-free; mutating tools stay blocked in plan mode independently).
+The tool is part of `GENERAL_TOOLS` / `EXECUTOR_TOOLS` but intentionally excluded from `_DEFAULT_SUBAGENT_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, and `_PLAN_MODE_BLOCKED_TOOLS` (loading text is side-effect-free; mutating tools stay blocked in plan mode independently).
 
 ### `tools/tasklist.py` / `tools/plan_mode.py`
 

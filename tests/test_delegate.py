@@ -6,6 +6,12 @@ from dataclasses import dataclass
 
 import pytest
 
+# Eager registry import so `_DEFAULT_SUBAGENT_TOOLS` is assigned to the
+# delegate module BEFORE any test runs. Without this, the first test to
+# touch delegate would trigger registry load inside its body, and a
+# monkeypatch.setattr captured earlier could leave a stale binding after
+# teardown (see commit history for #I for full diagnosis).
+import aru.tools.registry  # noqa: F401
 from aru.runtime import init_ctx
 
 
@@ -500,7 +506,6 @@ class TestDelegateResume:
             "aru.agent_factory.create_agent_from_spec", _fake_create_from_spec
         )
         # Disable subagent progress rendering (no console in test ctx)
-        monkeypatch.setattr(delegate_mod, "_SUBAGENT_TOOLS", [])
 
         result = await delegate_mod.delegate_task("find auth", agent_name="explorer")
         assert "task_id=" in result
@@ -527,7 +532,6 @@ class TestDelegateResume:
         monkeypatch.setattr(
             "aru.agent_factory.create_agent_from_spec", _fake_create_from_spec
         )
-        monkeypatch.setattr(delegate_mod, "_SUBAGENT_TOOLS", [])
 
         # First call — fresh
         r1 = await delegate_mod.delegate_task("first", agent_name="explorer")
@@ -558,7 +562,6 @@ class TestDelegateResume:
         monkeypatch.setattr(
             "aru.agent_factory.create_agent_from_spec", _fake_create_from_spec
         )
-        monkeypatch.setattr(delegate_mod, "_SUBAGENT_TOOLS", [])
 
         result = await delegate_mod.delegate_task(
             "x", agent_name="explorer", task_id="nonexistent-xyz"
@@ -768,7 +771,6 @@ class TestBackgroundMode:
         monkeypatch.setattr(
             "aru.agent_factory.create_agent_from_spec", _fake_create_from_spec
         )
-        monkeypatch.setattr(delegate_mod, "_SUBAGENT_TOOLS", [])
 
         import time
         t0 = time.monotonic()
@@ -795,7 +797,6 @@ class TestBackgroundMode:
         monkeypatch.setattr(
             "aru.agent_factory.create_agent_from_spec", _fake_create_from_spec
         )
-        monkeypatch.setattr(delegate_mod, "_SUBAGENT_TOOLS", [])
 
         session = get_ctx().session
         assert session.pending_notifications == []
@@ -867,3 +868,196 @@ class TestBackgroundMode:
         captured = capsys.readouterr()
         assert "bg-xyz" in captured.out
         assert "some result text" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# #I — Configurable sub-agent recursion
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentRecursion:
+    """Recursion is gated by two mechanisms:
+
+    1. Toolset — the sub-agent's tool list must include `delegate_task` for
+       the model to call it. Generic (nameless) sub-agents default-deny via
+       `_DEFAULT_SUBAGENT_TOOLS` which excludes delegate_task. Custom YAML
+       agents with explicit `tools: [..., delegate_task]` opt in.
+
+    2. Depth — `ctx.subagent_depth` increments on each `fork_ctx()`.
+       `delegate_task` refuses to spawn when depth >= `MAX_SUBAGENT_DEPTH`
+       as a safety net against a prompt bug triggering unbounded chains.
+    """
+
+    def setup_method(self):
+        from aru.permissions import PermissionConfig, reset_session, set_config, set_skip_permissions
+        from aru.runtime import init_ctx, reset_abort
+        from aru.session import Session
+        init_ctx()
+        from aru.runtime import get_ctx
+        get_ctx().session = Session(session_id="rectest")
+        set_config(PermissionConfig())
+        reset_session()
+        set_skip_permissions(True)
+        reset_abort()
+
+    # ----- subagent_depth ctx field -----
+
+    def test_primary_ctx_has_depth_zero(self):
+        from aru.runtime import init_ctx
+        ctx = init_ctx()
+        assert ctx.subagent_depth == 0
+
+    def test_fork_increments_depth(self):
+        from aru.runtime import fork_ctx, init_ctx
+        init_ctx()
+        child = fork_ctx()
+        assert child.subagent_depth == 1
+
+    def test_fork_of_fork_gets_depth_two(self):
+        """Nested delegation — child of a child has depth=2."""
+        from aru.runtime import fork_ctx, init_ctx, set_ctx
+        init_ctx()
+        child = fork_ctx()
+        set_ctx(child)
+        grandchild = fork_ctx()
+        assert grandchild.subagent_depth == 2
+
+    def test_depth_survives_three_levels(self):
+        """Safety net arithmetic — depth compounds correctly over 5 forks."""
+        from aru.runtime import fork_ctx, init_ctx, set_ctx
+        init_ctx()
+        current = fork_ctx()
+        for expected_depth in range(2, 6):
+            set_ctx(current)
+            current = fork_ctx()
+            assert current.subagent_depth == expected_depth
+
+    # ----- MAX_SUBAGENT_DEPTH gate -----
+
+    @pytest.mark.asyncio
+    async def test_delegate_refuses_at_max_depth(self):
+        """At the cap, delegate_task returns a deny marker without spawning."""
+        from aru.runtime import get_ctx
+        from aru.tools import delegate as delegate_mod
+
+        get_ctx().subagent_depth = delegate_mod.MAX_SUBAGENT_DEPTH
+        result = await delegate_mod.delegate_task("x", agent_name="explorer")
+        assert "Max sub-agent recursion depth" in result
+        assert str(delegate_mod.MAX_SUBAGENT_DEPTH) in result
+
+    @pytest.mark.asyncio
+    async def test_delegate_refuses_above_max_depth(self):
+        """Defensive — a stale deep ctx can't bypass the cap."""
+        from aru.runtime import get_ctx
+        from aru.tools import delegate as delegate_mod
+
+        get_ctx().subagent_depth = delegate_mod.MAX_SUBAGENT_DEPTH + 3
+        result = await delegate_mod.delegate_task("x", agent_name="explorer")
+        assert "Max sub-agent recursion depth" in result
+
+    @pytest.mark.asyncio
+    async def test_delegate_allowed_below_max_depth(self, monkeypatch):
+        """At depth 4 (cap is 5), a spawn still proceeds."""
+        from aru.runtime import get_ctx
+        from aru.tools import delegate as delegate_mod
+
+        get_ctx().subagent_depth = delegate_mod.MAX_SUBAGENT_DEPTH - 1
+
+        fake = _FakeAgent(name="Explorer-1", reply="ok")
+
+        async def _fake_create(*a, **kw):
+            return fake
+
+        monkeypatch.setattr("aru.agent_factory.create_agent_from_spec", _fake_create)
+
+        result = await delegate_mod.delegate_task("x", agent_name="explorer")
+        assert "Max sub-agent recursion depth" not in result
+        assert "task_id=" in result
+
+    # ----- toolset: hardcoded filter removed -----
+
+    @pytest.mark.asyncio
+    async def test_custom_agent_yaml_tools_honoured_verbatim(self, monkeypatch):
+        """The old `tools = [t for t in tools if t is not delegate_task]`
+        filter contradicted the YAML contract. After removal, a custom
+        agent with `tools: [delegate_task, ...]` receives delegate_task in
+        its toolset."""
+        from aru.runtime import get_ctx
+        from aru.tools import delegate as delegate_mod
+        from aru.tools.delegate import delegate_task
+
+        # Register a custom agent whose YAML opts into recursion
+        @dataclass
+        class _CustomDef:
+            name: str = "orchestrator"
+            mode: str = "subagent"
+            description: str = "delegates"
+            tools: list = None
+            system_prompt: str = "you orchestrate"
+            model: str = None
+            permission: dict = None
+
+        custom = _CustomDef(tools=["read_file", "delegate_task"])
+        get_ctx().custom_agent_defs = {"orchestrator": custom}
+
+        captured_tools = {}
+
+        # Patch Agent constructor to capture the tools it received
+        import agno.agent
+        original_init = agno.agent.Agent.__init__
+
+        def _capturing_init(self, *args, **kwargs):
+            captured_tools["tools"] = kwargs.get("tools", [])
+            # Minimum viable agent so execution doesn't blow up
+            self.name = kwargs.get("name", "captured")
+            self.model = kwargs.get("model")
+            self.tools = captured_tools["tools"]
+            self.instructions = kwargs.get("instructions", "")
+
+            async def _arun(task, **_):
+                from agno.run.agent import RunOutput
+                yield RunOutput(content=f"ok: {task}")
+
+            self.arun = _arun
+
+        monkeypatch.setattr(agno.agent.Agent, "__init__", _capturing_init)
+
+        await delegate_mod.delegate_task("dispatch", agent_name="orchestrator")
+
+        # Verify delegate_task is in the captured toolset — the post-resolve
+        # filter is gone, YAML intent is respected.
+        tool_names = [getattr(t, "__name__", str(t)) for t in captured_tools["tools"]]
+        assert "delegate_task" in tool_names
+        assert "read_file" in tool_names
+
+    def test_default_toolset_still_excludes_delegate(self):
+        """Default conservative: a nameless sub-agent's toolset does NOT
+        include delegate_task (no explicit authorisation path)."""
+        import aru.tools.registry  # noqa: F401 — ensures registry populated
+        from aru.tools.delegate import _DEFAULT_SUBAGENT_TOOLS, delegate_task
+
+        assert delegate_task not in _DEFAULT_SUBAGENT_TOOLS
+
+    def test_default_toolset_has_reasonable_size(self):
+        """Sanity — the default set must have enough tools to be useful
+        even without delegation (read, grep, bash, etc.). 13 tools before
+        the rename; floor at 10 leaves room for future additions/removals."""
+        from aru.tools.delegate import _DEFAULT_SUBAGENT_TOOLS
+        assert len(_DEFAULT_SUBAGENT_TOOLS) >= 10
+
+    def test_delegate_module_and_registry_bindings_coincide(self):
+        """Regression guard for the binding-divergence bug. Registry used
+        to do `from aru.tools.delegate import _DEFAULT_SUBAGENT_TOOLS`
+        (creates a separate binding in registry's namespace) and mutate
+        the list in-place via `[:]=`. Under `monkeypatch.setattr`, the two
+        bindings would diverge — registry's binding kept the populated
+        list, delegate's binding got restored to the empty placeholder.
+
+        Fix: registry now imports the module (`import aru.tools.delegate
+        as _delegate_module`) and assigns the attribute
+        (`_delegate_module._DEFAULT_SUBAGENT_TOOLS = [...]`). Single
+        authoritative binding. This test asserts the invariant.
+        """
+        import aru.tools.delegate as delegate_mod
+        from aru.tools.delegate import _DEFAULT_SUBAGENT_TOOLS as symbol_ref
+        assert symbol_ref is delegate_mod._DEFAULT_SUBAGENT_TOOLS

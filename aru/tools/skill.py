@@ -21,7 +21,7 @@ Flow:
 
 Scope:
   - Included in ALL_TOOLS / GENERAL_TOOLS / EXECUTOR_TOOLS for primary agents.
-  - Excluded from _SUBAGENT_TOOLS / PLANNER_TOOLS / EXPLORER_TOOLS.
+  - Excluded from _DEFAULT_SUBAGENT_TOOLS / PLANNER_TOOLS / EXPLORER_TOOLS.
   - Excluded from _PLAN_MODE_BLOCKED_TOOLS (loads text only; mutating tools
     stay blocked independently).
 """

@@ -156,6 +156,15 @@ class RuntimeContext:
     # resume it later from the same primary — but that usage is rare.
     subagent_instances: dict[str, Any] = field(default_factory=dict)
 
+    # -- Recursion depth --
+    # Incremented by `fork_ctx()`. Primary ctx has depth=0; a sub-agent
+    # spawned from primary has depth=1; a sub-agent spawned from THAT
+    # sub-agent has depth=2; etc. Consulted at the start of `delegate_task`
+    # to bound recursion (see `MAX_SUBAGENT_DEPTH`). Prevents a custom
+    # agent with `tools: [..., delegate_task]` from triggering a runaway
+    # chain through a bug in its own prompt.
+    subagent_depth: int = 0
+
     # -- Checkpoints --
     checkpoint_manager: Any = None  # aru.checkpoints.CheckpointManager (lazy)
 
@@ -218,6 +227,11 @@ def fork_ctx() -> RuntimeContext:
     # (fork-of-a-fork) still get distinct ids even though the counter on
     # the intermediate ctx was shallow-copied from the root.
     forked.agent_id = f"subagent-{uuid.uuid4().hex[:8]}"
+    # Increment recursion depth. Shallow-copy captured the parent's depth
+    # value; bumping it here means a fork-of-a-fork sees depth+2. Read by
+    # `delegate_task` (MAX_SUBAGENT_DEPTH gate) as a safety net against a
+    # custom agent with `tools: [..., delegate_task]` recursing unchecked.
+    forked.subagent_depth = getattr(original, "subagent_depth", 0) + 1
     # abort_event is deliberately NOT reassigned — shared reference so the
     # primary can cancel forks it has spawned.
     return forked
