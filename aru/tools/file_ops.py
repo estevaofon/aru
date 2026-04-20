@@ -446,12 +446,12 @@ def get_project_tree(root_dir: str, max_depth: int = 3, max_files_per_dir: int =
 # Agents see these as the actual tools. Each wrapper offloads the blocking
 # sync implementation to a worker thread so the event loop stays responsive.
 
-_read_file_tool = _thread_tool(read_file)
-_write_file_tool = _thread_tool(write_file)
-_write_files_tool = _thread_tool(write_files)
-_edit_file_tool = _thread_tool(edit_file)
-_edit_files_tool = _thread_tool(edit_files)
-_list_directory_tool = _thread_tool(list_directory)
+_read_file_tool = _thread_tool(read_file, timeout=60)
+_write_file_tool = _thread_tool(write_file, timeout=60)
+_write_files_tool = _thread_tool(write_files, timeout=60)
+_edit_file_tool = _thread_tool(edit_file, timeout=60)
+_edit_files_tool = _thread_tool(edit_files, timeout=60)
+_list_directory_tool = _thread_tool(list_directory, timeout=45)
 
 
 async def read_files(paths: list[str], max_size: int = 12_000) -> str:

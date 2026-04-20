@@ -347,12 +347,25 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
     return _grep_search_python(pattern, directory, file_glob, context_lines)
 
 
+_SEARCH_FALLBACK_TIMEOUT = 45.0  # pure-Python fallback cap; rg fast path has its own 30s
+
+
 @functools.wraps(glob_search)
 async def _glob_search_tool(pattern: str, directory: str = ".") -> str:
     rg_result = await _glob_search_rg(pattern, directory)
     if rg_result is not None:
         return rg_result
-    return await asyncio.to_thread(_glob_search_python, pattern, directory)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_glob_search_python, pattern, directory),
+            timeout=_SEARCH_FALLBACK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"[Tool timeout: glob_search exceeded {_SEARCH_FALLBACK_TIMEOUT:g}s "
+            f"on the pure-Python fallback. Narrow the pattern or install "
+            f"ripgrep for the faster path.]"
+        )
 
 
 @functools.wraps(grep_search)
@@ -365,6 +378,16 @@ async def _grep_search_tool(
     rg_result = await _grep_search_rg(pattern, directory, file_glob, context_lines)
     if rg_result is not None:
         return rg_result
-    return await asyncio.to_thread(
-        _grep_search_python, pattern, directory, file_glob, context_lines
-    )
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _grep_search_python, pattern, directory, file_glob, context_lines
+            ),
+            timeout=_SEARCH_FALLBACK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"[Tool timeout: grep_search exceeded {_SEARCH_FALLBACK_TIMEOUT:g}s "
+            f"on the pure-Python fallback. Narrow the pattern/file_glob or "
+            f"install ripgrep for the faster path.]"
+        )

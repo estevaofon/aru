@@ -30,7 +30,7 @@ from aru.tools.tasklist import create_task_list, update_plan_step, update_task
 from aru.tools.web import web_fetch, web_search
 
 
-_rank_files_tool = _thread_tool(rank_files)
+_rank_files_tool = _thread_tool(rank_files, timeout=45)
 
 
 # Tool sets composed from a single core set — avoid duplication and drift.

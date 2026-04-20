@@ -48,16 +48,37 @@ def _truncate_output(text: str, source_file: str = "", source_tool: str = "") ->
     return truncate_output(text, source_file=source_file, source_tool=source_tool)
 
 
-def _thread_tool(sync_fn):
+def _thread_tool(sync_fn, *, timeout: float | None = None):
     """Wrap *sync_fn* as an async tool that runs on a worker thread.
 
     ``functools.wraps`` copies ``__name__``/``__doc__`` so Agno introspects
     the wrapper as if it were the original sync function — tool name and
     signature match what the LLM already knows.
+
+    Args:
+        sync_fn: The synchronous implementation to offload to a worker.
+        timeout: Optional wall-clock cap (seconds). ``None`` (default) keeps
+            the historical behaviour of unbounded wait — callers opt into a
+            cap explicitly. Required because ``asyncio.to_thread`` cannot
+            actually abort the underlying worker thread (Python limitation):
+            on timeout, the REPL regains control but the thread may keep
+            running until its sync work finishes. Applying a blanket
+            default would break custom plugin tools that legitimately take
+            longer than the cap.
     """
 
     @functools.wraps(sync_fn)
     async def wrapper(*args, **kwargs):
-        return await asyncio.to_thread(sync_fn, *args, **kwargs)
+        coro = asyncio.to_thread(sync_fn, *args, **kwargs)
+        if timeout is None:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            return (
+                f"[Tool timeout: {sync_fn.__name__} exceeded {timeout:g}s. "
+                f"The worker thread may still be running in the background; "
+                f"narrow the query or raise the timeout explicitly.]"
+            )
 
     return wrapper
