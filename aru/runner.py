@@ -798,6 +798,23 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             "session_id": getattr(session, "id", None),
         })
 
+        # Tier 2 #4: auto-memory extraction (opt-in, fire-and-forget).
+        try:
+            from aru.memory.extractor import schedule_extraction_task
+            from aru.runtime import get_ctx as _get_ctx
+            _cfg = getattr(_get_ctx(), "config", None)
+            _cfg_memory = getattr(_cfg, "memory", None) or {}
+            _project_root = getattr(session, "project_root", None) or os.getcwd()
+            schedule_extraction_task(
+                project_root=_project_root,
+                user_msg=run_message or "",
+                assistant_msg=final_content or "",
+                config_memory=_cfg_memory,
+                turn_tokens=_turn_tokens_in + _turn_tokens_out,
+            )
+        except Exception:
+            pass  # extractor guards internally; swallow any unexpected raise
+
         remaining = (final_content or "")[display._flushed_len:]
         if remaining:
             console.print(Markdown(remaining))

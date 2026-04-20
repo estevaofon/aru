@@ -46,6 +46,11 @@ aru/
 │   ├── custom_tools.py # Discovery, loading, and registration of custom tool files
 │   ├── hooks.py        # Hook system: Hooks, HookEvent, PluginInput
 │   └── manager.py      # PluginManager — loads plugins, fires hooks
+├── memory/
+│   ├── __init__.py     # Public API: write/read/list/delete + loader section
+│   ├── store.py        # Per-project storage, MEMORY.md index, slug generation
+│   ├── extractor.py    # Async extraction on turn.end via small-model sub-agent
+│   └── loader.py       # Inject MEMORY.md index into agent system prompt
 └── tools/
     ├── codebase.py     # Compat shim — re-exports from the modules below
     ├── _shared.py      # Cross-cutting helpers (notify mutation, thread_tool, truncate_output)

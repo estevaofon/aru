@@ -660,6 +660,12 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             handle_worktree_command(rest)
             continue
 
+        if user_input.lower() == "/memory" or user_input.lower().startswith("/memory "):
+            from aru.commands import handle_memory_command
+            rest = user_input[len("/memory"):].strip()
+            handle_memory_command(rest, session)
+            continue
+
         if user_input.lower() == "/debug" or user_input.lower().startswith("/debug "):
             from aru.commands import handle_debug_command
             rest = user_input[len("/debug"):].strip()

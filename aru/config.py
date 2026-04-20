@@ -170,6 +170,9 @@ class AgentConfig:
     tree_depth: int = 2  # max depth for directory tree in system prompt
     disabled_tools: list[str] = field(default_factory=list)  # tools to skip loading
     plugin_specs: list = field(default_factory=list)  # plugin specs from aru.json
+    # Auto-memory extraction (Tier 2 #4). Opt-in — off by default to avoid
+    # invisible token spend in new projects.
+    memory: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_instructions(self) -> bool:
@@ -209,6 +212,19 @@ class AgentConfig:
         # MCP tool catalog is NOT included in the system prompt to save ~1-1.5K
         # tokens per turn. The model discovers available tools on-demand when it
         # calls use_mcp_tool — the gateway returns the catalog on first use.
+
+        # Auto-memory index (Tier 2 #4). Always injected when a MEMORY.md
+        # exists for the current project — the file only populates if the
+        # user opted into memory.auto_extract, so a clean project stays silent.
+        if not lightweight:
+            try:
+                from aru.memory.loader import memory_section_for_prompt
+                import os
+                section = memory_section_for_prompt(os.getcwd())
+                if section:
+                    parts.append(section.strip())
+            except Exception:  # pragma: no cover — memory module failure mustn't break prompts
+                pass
 
         return "\n\n".join(parts)
 
@@ -503,6 +519,8 @@ def _apply_config_data(config: AgentConfig, data: dict, root: Path) -> None:
         tools_cfg = data["tools"]
         if "disabled" in tools_cfg and isinstance(tools_cfg["disabled"], list):
             config.disabled_tools = [str(t) for t in tools_cfg["disabled"]]
+    if "memory" in data and isinstance(data["memory"], dict):
+        config.memory = data["memory"]
     if "instructions" in data and isinstance(data["instructions"], list):
         entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
         config.rules_instructions = _resolve_instructions(entries, root)

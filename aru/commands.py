@@ -27,6 +27,7 @@ SLASH_COMMANDS = [
     ("/mcp", "List loaded MCP tools", "/mcp"),
     ("/plugin", "Manage cached plugins (install/list/remove/update)", "/plugin <subcommand>"),
     ("/worktree", "Manage git worktrees (list/create/enter/exit/remove)", "/worktree <subcommand>"),
+    ("/memory", "Inspect/manage auto-extracted project memory", "/memory <subcommand>"),
     ("/debug", "Debug utilities (plugin-errors)", "/debug <subcommand>"),
     ("/undo", "Undo last turn — restore files and/or conversation", "/undo"),
     ("/cost", "Show detailed token usage and cost", "/cost"),
@@ -204,6 +205,92 @@ def handle_background_command(session) -> None:
             border_style="cyan",
             padding=(0, 1),
         ))
+
+
+def handle_memory_command(args: str, session) -> None:
+    """``/memory <subcommand>`` — inspect auto-extracted project memories.
+
+    Subcommands:
+        (no args) or "list"   Show MEMORY.md index.
+        "show <slug>"         Cat the body of a specific memory.
+        "delete <slug>"       Remove a specific memory.
+        "clear"               Wipe all memory for this project (prompts y/n).
+    """
+    from rich.markup import escape
+
+    from aru.memory.store import (
+        clear_memory,
+        delete_memory,
+        list_memories,
+        memory_dir_for_project,
+        read_memory,
+    )
+
+    project_root = getattr(session, "project_root", None) or os.getcwd()
+    parts = args.strip().split(None, 1)
+    sub = (parts[0].lower() if parts else "list")
+
+    try:
+        if sub == "list":
+            entries = list_memories(project_root)
+            if not entries:
+                console.print(
+                    "[dim]No memories. Enable auto-extraction via "
+                    "\"memory\": {\"auto_extract\": true} in aru.json.[/dim]"
+                )
+                return
+            console.print(f"[bold]Project memories ({len(entries)}):[/bold]\n")
+            for e in entries:
+                console.print(
+                    f"  [cyan]{e.slug}[/cyan]  [dim]{e.type}[/dim]  "
+                    f"{escape(e.description or e.name)}"
+                )
+            mem_dir = memory_dir_for_project(project_root)
+            console.print(f"\n[dim]{mem_dir}[/dim]")
+            return
+
+        if sub == "show":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /memory show <slug>[/yellow]")
+                return
+            slug = parts[1].strip()
+            entry = read_memory(project_root, slug)
+            if entry is None:
+                console.print(f"[yellow]No memory found with slug: {escape(slug)}[/yellow]")
+                return
+            console.print(Panel(
+                f"[bold]name:[/bold]        {escape(entry.name)}\n"
+                f"[bold]description:[/bold] {escape(entry.description)}\n"
+                f"[bold]type:[/bold]        {entry.type}\n\n"
+                f"{escape(entry.body)}",
+                title=f"[bold]{slug}[/bold]",
+                border_style="cyan",
+                padding=(0, 1),
+            ))
+            return
+
+        if sub == "delete":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /memory delete <slug>[/yellow]")
+                return
+            slug = parts[1].strip()
+            if delete_memory(project_root, slug):
+                console.print(f"[green]Deleted memory:[/green] {escape(slug)}")
+            else:
+                console.print(f"[yellow]No memory with slug: {escape(slug)}[/yellow]")
+            return
+
+        if sub == "clear":
+            if not ask_yes_no("Delete all project memory? (cannot be undone)"):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            count = clear_memory(project_root)
+            console.print(f"[green]Cleared {count} memory file(s).[/green]")
+            return
+
+        console.print(f"[yellow]Unknown /memory subcommand: {sub}[/yellow]")
+    except Exception as exc:  # pragma: no cover — defensive UX
+        console.print(f"[red]Memory error:[/red] {escape(str(exc))}")
 
 
 def handle_worktree_command(args: str) -> None:
