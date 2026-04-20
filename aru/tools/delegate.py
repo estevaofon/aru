@@ -251,11 +251,16 @@ async def delegate_task(
         else:
             _sub_cache = get_ctx().subagent_instances
 
+        from aru.runtime import (
+            get_subagent_instance as _get_sub,
+            register_subagent_instance as _register_sub,
+        )
+
         resumed = False
         existing_sub = None
         resumed_task_id: str | None = None
         if task_id and _sub_cache is not None:
-            existing_sub = _sub_cache.get(task_id)
+            existing_sub = _get_sub(_sub_cache, task_id)
             if existing_sub is not None:
                 resumed = True
                 resumed_task_id = task_id
@@ -327,7 +332,7 @@ Do not create documentation files unless explicitly asked.
         # nested delegations spawned by this sub-agent can reference its
         # own id (unlikely but possible). The store is idempotent on resume.
         if not resumed and _sub_cache is not None:
-            _sub_cache[task_id_for_output] = sub
+            _register_sub(_sub_cache, task_id_for_output, sub)
 
         async def _execute_with_streaming(agent_instance) -> str:
             """Run a sub-agent with streaming events for live progress display.

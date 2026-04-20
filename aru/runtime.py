@@ -98,7 +98,12 @@ class RuntimeContext:
     read_cache: dict[tuple, str] = field(default_factory=dict)
 
     # -- Process tracking --
+    # `list.append` is atomic via the GIL, so single writes to `tracked_processes`
+    # do NOT require the lock. The lock is acquired around **iteration/snapshot**
+    # (see `snapshot_tracked_processes`) to avoid ``list changed size during
+    # iteration`` when cleanup runs concurrently with new shell invocations.
     tracked_processes: list = field(default_factory=list)
+    tracked_processes_lock: threading.Lock = field(default_factory=threading.Lock)
     subagent_counter: int = 0
     subagent_counter_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -154,7 +159,13 @@ class RuntimeContext:
     # primary session (in-memory only; disk persistence is feature #G).
     # Shared across forks so a sub-agent can spawn a nested sub-agent and
     # resume it later from the same primary — but that usage is rare.
+    #
+    # Individual ``dict[k] = v`` / ``dict.get(k)`` operations are atomic via
+    # the GIL; the lock protects **iteration/snapshot** (e.g. cleanup that
+    # walks ``.items()``) against concurrent writes from sibling sub-agents.
+    # Shared by reference across forks so nested delegations see the same map.
     subagent_instances: dict[str, Any] = field(default_factory=dict)
+    subagent_instances_lock: threading.Lock = field(default_factory=threading.Lock)
 
     # -- Recursion depth --
     # Incremented by `fork_ctx()`. Primary ctx has depth=0; a sub-agent
@@ -199,18 +210,36 @@ def init_ctx(console: Console | None = None, **kwargs: Any) -> RuntimeContext:
 def fork_ctx() -> RuntimeContext:
     """Create an isolated copy of the current RuntimeContext for sub-agent use.
 
-    Permission state is deep-copied to prevent interleaving when multiple
-    sub-agents run concurrently via ``asyncio.gather``.  Shared resources
-    (console, locks, tracked_processes, abort_event) are kept by reference.
+    Sharing model — what is isolated vs shared between parent and fork:
 
-    The fork receives a fresh, unique ``agent_id`` so per-scope state
-    (e.g. active skills) keyed by agent_id is isolated from the parent.
-    Callers may overwrite ``agent_id`` afterwards if they prefer a more
-    descriptive label.
+    | Field                         | After fork    | Rationale                              |
+    |-------------------------------|---------------|----------------------------------------|
+    | ``config_stack``              | **copy**      | permission scopes must not leak sideways |
+    | ``session_stack``             | **copy**      | idem                                   |
+    | ``session_allowed``           | **copy**      | idem                                   |
+    | ``read_cache``                | **fresh**     | sub-agent exploration stays out of parent's cache |
+    | ``task_store``                | **fresh**     | sub-agent's subtasks are its own       |
+    | ``agent_id``                  | **fresh uuid**| used to key per-scope state (skills etc) |
+    | ``subagent_depth``            | **parent+1**  | bounds recursion                       |
+    | ``subagent_instances``        | shared ref    | resume lookup across the tree          |
+    | ``subagent_instances_lock``   | shared ref    | must match the dict it guards          |
+    | ``tracked_processes``         | shared ref    | cleanup() walks the single global list |
+    | ``tracked_processes_lock``    | shared ref    | guards iteration of that list          |
+    | ``abort_event``               | shared ref    | ``ctx.abort_event.set()`` propagates   |
+    | ``custom_agent_defs``         | shared ref    | reassigned once at startup; read-only  |
+    | ``console`` / ``display``     | shared ref    | Rich handles its own synchronization   |
+    | ``subagent_counter_lock``     | shared ref    | already protected by its own lock      |
 
-    `abort_event` is intentionally shared so a cancel signal on the primary
-    propagates to every live sub-agent (they all observe the same
-    `.is_set()` outcome).
+    **Atomicity note.** In CPython, a single ``list.append`` or ``dict[k] = v``
+    is atomic thanks to the GIL, so individual writes don't need the locks.
+    The locks (``subagent_instances_lock``, ``tracked_processes_lock``) exist
+    for **iteration/snapshot** — e.g. cleanup that walks ``.items()`` or
+    ``for p in tracked_processes`` concurrently with a sibling sub-agent's
+    write. Without them we risk
+    ``RuntimeError: dictionary changed size during iteration``.
+
+    ``custom_agent_defs`` is reassigned once in delegate.set_custom_agents()
+    during startup and read-only afterwards, so no lock is needed.
     """
     original = get_ctx()
     forked = copy.copy(original)
@@ -273,3 +302,77 @@ def is_aborted() -> bool:
         return get_ctx().abort_event.is_set()
     except LookupError:
         return False
+
+
+# ── Shared-state helpers (Stage 4) ───────────────────────────────────
+#
+# Individual ``dict[k] = v``, ``dict.get(k)``, and ``list.append`` are atomic
+# via the GIL, so the lock is acquired only where callers need a consistent
+# view (snapshot for iteration, compound pop-and-return). These helpers also
+# let delegate.py / shell.py avoid importing ``threading`` directly.
+
+
+def register_subagent_instance(cache: dict[str, Any] | None, task_id: str, agent: Any) -> None:
+    """Register a sub-agent under ``task_id`` for later resume.
+
+    ``cache`` may be ``ctx.subagent_instances`` or a session-scoped dict
+    (``session._subagent_instances``) — either path uses the ctx lock.
+    """
+    if cache is None:
+        return
+    try:
+        lock = get_ctx().subagent_instances_lock
+    except LookupError:
+        cache[task_id] = agent
+        return
+    with lock:
+        cache[task_id] = agent
+
+
+def get_subagent_instance(cache: dict[str, Any] | None, task_id: str) -> Any | None:
+    """Look up a previously-registered sub-agent. Returns ``None`` if absent."""
+    if cache is None or not task_id:
+        return None
+    try:
+        lock = get_ctx().subagent_instances_lock
+    except LookupError:
+        return cache.get(task_id)
+    with lock:
+        return cache.get(task_id)
+
+
+def snapshot_subagent_instances(cache: dict[str, Any] | None) -> dict[str, Any]:
+    """Return an immutable copy for iteration without racing concurrent writes."""
+    if cache is None:
+        return {}
+    try:
+        lock = get_ctx().subagent_instances_lock
+    except LookupError:
+        return dict(cache)
+    with lock:
+        return dict(cache)
+
+
+def append_tracked_process(process: Any) -> None:
+    """Register a subprocess for atexit / Ctrl+C cleanup.
+
+    ``list.append`` is atomic via the GIL, so this does not itself need the
+    lock — but we hold it for the brief scope anyway to keep all mutations
+    to ``tracked_processes`` serialised against readers.
+    """
+    try:
+        ctx = get_ctx()
+    except LookupError:
+        return
+    with ctx.tracked_processes_lock:
+        ctx.tracked_processes.append(process)
+
+
+def snapshot_tracked_processes() -> list[Any]:
+    """Immutable copy of the tracked-processes list for safe iteration."""
+    try:
+        ctx = get_ctx()
+    except LookupError:
+        return []
+    with ctx.tracked_processes_lock:
+        return list(ctx.tracked_processes)

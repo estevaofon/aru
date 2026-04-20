@@ -31,16 +31,24 @@ BACKGROUND_PATTERNS = (
 
 def _register_process(process):
     """Track a background process for cleanup on exit."""
-    get_ctx().tracked_processes.append(process)
+    from aru.runtime import append_tracked_process
+    append_tracked_process(process)
 
 
 def cleanup_processes(processes: list | None = None):
     """Kill all tracked background processes on exit.
 
     Args:
-        processes: Explicit list to clean up. If None, reads from RuntimeContext.
+        processes: Explicit list to clean up. If None, snapshots the
+            RuntimeContext tracked-processes list under a lock so a
+            concurrent ``_register_process`` call cannot cause
+            ``RuntimeError: list changed size during iteration``.
     """
-    procs = processes if processes is not None else get_ctx().tracked_processes
+    if processes is not None:
+        procs = list(processes)
+    else:
+        from aru.runtime import snapshot_tracked_processes
+        procs = snapshot_tracked_processes()
     for proc in procs:
         still_running = proc.poll() is None if hasattr(proc, "poll") else proc.returncode is None
         if still_running:
