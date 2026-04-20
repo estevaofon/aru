@@ -177,6 +177,9 @@ class AgentConfig:
     # typescript, rust, go, ...); values are {"command": "...", "args": [...], "env": {...}}.
     # Empty ⇒ LSP tools report "not configured" without spawning anything.
     lsp: dict[str, Any] = field(default_factory=dict)
+    # Formatter config per language (Tier 3 #1). Same shape as `lsp`, plus
+    # an `enabled` top-level boolean to flip auto-format on/off in aggregate.
+    format: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_instructions(self) -> bool:
@@ -527,6 +530,8 @@ def _apply_config_data(config: AgentConfig, data: dict, root: Path) -> None:
         config.memory = data["memory"]
     if "lsp" in data and isinstance(data["lsp"], dict):
         config.lsp = data["lsp"]
+    if "format" in data and isinstance(data["format"], dict):
+        config.format = data["format"]
     if "instructions" in data and isinstance(data["instructions"], list):
         entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
         config.rules_instructions = _resolve_instructions(entries, root)

@@ -315,6 +315,16 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
     except Exception as exc:
         console.print(f"[dim yellow]Warning: plugin loading failed: {exc}[/dim yellow]")
 
+    # Install auto-formatter (Tier 3 #1) and subscribe to file.changed.
+    # No-op when config.format is empty or `enabled: false`.
+    try:
+        from aru.format.manager import install_format_from_config
+        _fmt_mgr = install_format_from_config(getattr(config, "format", None))
+        if _fmt_mgr is not None and _fmt_mgr.enabled() and _plugin_mgr is not None:
+            _plugin_mgr.subscribe("file.changed", _fmt_mgr.handle_file_changed)
+    except Exception as exc:
+        console.print(f"[dim yellow]Warning: formatter install failed: {exc}[/dim yellow]")
+
     # Startup: load MCP tools in background (don't block REPL)
     async def _load_mcp_background():
         from aru.tools.codebase import load_mcp_tools

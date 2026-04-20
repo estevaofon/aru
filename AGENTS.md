@@ -56,6 +56,10 @@ aru/
 │   ├── protocol.py     # LSP types (Position, Range, Location) + JSON-RPC framing
 │   ├── client.py       # stdio LSP client (async JSON-RPC)
 │   └── manager.py      # Per-language singleton + health tracking + lazy spawn
+├── format/
+│   ├── __init__.py     # Public API: FormatManager, install_format_from_config
+│   ├── manager.py      # file.changed subscriber; byte-match idempotence
+│   └── runner.py       # subprocess pipe (stdin content -> stdout formatted)
 └── tools/
     ├── codebase.py     # Compat shim — re-exports from the modules below
     ├── _shared.py      # Cross-cutting helpers (notify mutation, thread_tool, truncate_output)
