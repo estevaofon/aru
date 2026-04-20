@@ -336,6 +336,10 @@ class Session:
         self._plan_render_pending: bool = False
         self.model_ref: str = DEFAULT_MODEL  # provider/model format
         self.cwd: str = os.getcwd()
+        # Project root captured at session creation — canonical return point
+        # when the REPL leaves a git worktree (``/worktree exit``). Stable for
+        # the lifetime of the session regardless of chdir operations.
+        self.project_root: str = os.getcwd()
         self.created_at: str = datetime.now().isoformat(timespec="milliseconds")
         self.updated_at: str = self.created_at
         self.total_input_tokens: int = 0

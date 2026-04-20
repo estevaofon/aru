@@ -26,6 +26,7 @@ SLASH_COMMANDS = [
     ("/bg", "List background sub-agent tasks (pending notifications)", "/bg"),
     ("/mcp", "List loaded MCP tools", "/mcp"),
     ("/plugin", "Manage cached plugins (install/list/remove/update)", "/plugin <subcommand>"),
+    ("/worktree", "Manage git worktrees (list/create/enter/exit/remove)", "/worktree <subcommand>"),
     ("/debug", "Debug utilities (plugin-errors)", "/debug <subcommand>"),
     ("/undo", "Undo last turn — restore files and/or conversation", "/undo"),
     ("/cost", "Show detailed token usage and cost", "/cost"),
@@ -203,6 +204,101 @@ def handle_background_command(session) -> None:
             border_style="cyan",
             padding=(0, 1),
         ))
+
+
+def handle_worktree_command(args: str) -> None:
+    """Handle ``/worktree <subcommand>`` — manage git worktrees for the session.
+
+    Subcommands:
+        (no args) or "list"   List all worktrees for this repo.
+        "create <branch> [from <base>]"   git worktree add — optionally from a base branch.
+        "enter <branch>"      chdir into the worktree (creates on the fly if missing).
+        "exit"                Return to the project root.
+        "remove <branch>"     git worktree remove (force if dirty).
+    """
+    from rich.table import Table
+    from rich.markup import escape
+
+    from aru.tools.worktree import (
+        WorktreeError,
+        create_worktree,
+        list_worktrees,
+        remove_worktree,
+    )
+    from aru.runtime import enter_worktree, exit_worktree, get_ctx
+
+    parts = args.strip().split()
+    sub = (parts[0].lower() if parts else "list")
+
+    try:
+        if sub == "list":
+            entries = list_worktrees()
+            if not entries:
+                console.print("[dim]No worktrees (are you inside a git repo?)[/dim]")
+                return
+            table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+            table.add_column("Branch", style="cyan")
+            table.add_column("Path")
+            table.add_column("Head", style="dim")
+            table.add_column("Active", justify="center")
+            ctx = get_ctx()
+            for e in entries:
+                is_here = (ctx.worktree_path and
+                           os.path.abspath(ctx.worktree_path) == os.path.abspath(e.path))
+                active_mark = "[bold green]*[/]" if is_here else ""
+                tag = "[dim](main)[/dim]" if e.is_main else ""
+                table.add_row(
+                    f"{e.branch or '-'} {tag}".strip(),
+                    e.path,
+                    e.head[:8],
+                    active_mark,
+                )
+            console.print(table)
+            return
+
+        if sub == "create":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /worktree create <branch> [from <base>][/yellow]")
+                return
+            branch = parts[1]
+            from_branch = None
+            if len(parts) >= 4 and parts[2].lower() == "from":
+                from_branch = parts[3]
+            path = create_worktree(branch, from_branch=from_branch)
+            console.print(f"[green]Worktree created:[/green] {escape(branch)} at {path}")
+            return
+
+        if sub == "enter":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /worktree enter <branch>[/yellow]")
+                return
+            branch = parts[1]
+            # Create on the fly if it doesn't exist yet
+            path = create_worktree(branch)
+            enter_worktree(path, branch)
+            console.print(f"[green]Entered worktree:[/green] {escape(branch)} ({path})")
+            return
+
+        if sub == "exit":
+            if exit_worktree():
+                console.print("[green]Left worktree — back at project root.[/green]")
+            else:
+                console.print("[dim]Not inside a worktree.[/dim]")
+            return
+
+        if sub == "remove":
+            if len(parts) < 2:
+                console.print("[yellow]Usage: /worktree remove <branch> [--force][/yellow]")
+                return
+            branch = parts[1]
+            force = "--force" in parts[2:]
+            path = remove_worktree(branch, force=force)
+            console.print(f"[green]Worktree removed:[/green] {escape(branch)} ({path})")
+            return
+
+        console.print(f"[yellow]Unknown /worktree subcommand: {sub}[/yellow]")
+    except WorktreeError as exc:
+        console.print(f"[red]Worktree error:[/red] {escape(str(exc))}")
 
 
 async def handle_mcp_command(args: str) -> None:

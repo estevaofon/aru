@@ -142,6 +142,15 @@ class RuntimeContext:
     # -- Session --
     session: Any = None  # aru.session.Session (set by CLI, used for sub-agent cost tracking)
 
+    # -- Worktree (Stage 1 of Tier 2) --
+    # When the REPL is operating inside a git worktree via ``/worktree enter``,
+    # these hold the absolute path and the branch name. ``None`` means the
+    # session is at its original project root. ``enter_worktree`` / ``exit_worktree``
+    # helpers in this module are the only sanctioned mutators — they also
+    # ``os.chdir`` so file tools pick up the new working directory implicitly.
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
+
     # -- Cancellation --
     # Set by the REPL on Ctrl+C (or by any caller wanting to cancel running
     # sub-agents). `fork_ctx()` shares this by reference so a signal on the
@@ -376,3 +385,54 @@ def snapshot_tracked_processes() -> list[Any]:
         return []
     with ctx.tracked_processes_lock:
         return list(ctx.tracked_processes)
+
+
+# ── Worktree helpers (Tier 2 Stage 1) ────────────────────────────────
+#
+# Centralised chdir + state mutation. The tool invocations, slash command
+# handler, and tests all funnel through these two functions so the REPL's
+# conception of "active worktree" stays in sync with the OS cwd.
+
+
+def enter_worktree(path: str, branch: str | None = None) -> None:
+    """Make *path* the active worktree for the current session.
+
+    Chdir to *path*, bookkeeping the branch name, and invalidate caches
+    keyed on cwd (read cache + directory walk cache). Safe to call from
+    any thread that has a ctx installed.
+    """
+    import os
+    from aru.tools.gitignore import invalidate_walk_cache
+
+    ctx = get_ctx()
+    abs_path = os.path.abspath(path)
+    os.chdir(abs_path)
+    ctx.worktree_path = abs_path
+    ctx.worktree_branch = branch
+    ctx.read_cache.clear()
+    invalidate_walk_cache()
+    if ctx.session is not None:
+        ctx.session.cwd = abs_path
+
+
+def exit_worktree() -> bool:
+    """Return the REPL to the session's project_root.
+
+    Returns True if a worktree was active (and we exited), False if the
+    session was already at its project root.
+    """
+    import os
+    from aru.tools.gitignore import invalidate_walk_cache
+
+    ctx = get_ctx()
+    if ctx.worktree_path is None:
+        return False
+    target = getattr(ctx.session, "project_root", None) or os.getcwd()
+    os.chdir(target)
+    ctx.worktree_path = None
+    ctx.worktree_branch = None
+    ctx.read_cache.clear()
+    invalidate_walk_cache()
+    if ctx.session is not None:
+        ctx.session.cwd = target
+    return True

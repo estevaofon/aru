@@ -62,6 +62,7 @@ aru/
     ├── mcp_client.py   # MCP server gateway for external tool integration
     ├── ast_tools.py    # Tree-sitter Python AST analysis (classes, functions, imports)
     ├── ranker.py       # Multi-factor file relevance scoring
+    ├── worktree.py     # Git worktree primitives (list/create/remove + worktree_info tool)
     └── gitignore.py    # .gitignore-aware file filtering with caching
 ```
 

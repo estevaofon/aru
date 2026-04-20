@@ -28,6 +28,7 @@ from aru.tools.shell import bash
 from aru.tools.skill import invoke_skill
 from aru.tools.tasklist import create_task_list, update_plan_step, update_task
 from aru.tools.web import web_fetch, web_search
+from aru.tools.worktree import worktree_info
 
 
 _rank_files_tool = _thread_tool(rank_files, timeout=45)
@@ -40,6 +41,7 @@ _READ_ONLY_TOOLS = [
     _glob_search_tool,
     _grep_search_tool,
     _list_directory_tool,
+    worktree_info,
 ]
 
 _WRITE_TOOLS = [

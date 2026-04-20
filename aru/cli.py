@@ -350,6 +350,13 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                         f'  <style fg="ansigray">│</style>'
                         f'  <style fg="ansigray">{ctx.mcp_loaded_msg}</style>'
                     )
+                worktree_part = ""
+                if ctx.worktree_path:
+                    branch_label = ctx.worktree_branch or "(detached)"
+                    worktree_part = (
+                        f'  <style fg="ansigray">│</style>'
+                        f'  <b><style fg="ansiyellow">🌿 {branch_label}</style></b>'
+                    )
                 if ctx.permission_mode == "yolo":
                     mode_part = (
                         f'  <style fg="ansigray">│</style>'
@@ -374,6 +381,7 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
                     f'  <style fg="ansigray">│</style>'
                     f'  <style fg="ansigray">Esc+Enter newline</style>'
                     f'{mode_part}'
+                    f'{worktree_part}'
                     f'{mcp_part}'
                 )
 
@@ -644,6 +652,12 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
             from aru.commands import handle_plugin_command
             rest = user_input[len("/plugin"):].strip()
             handle_plugin_command(rest)
+            continue
+
+        if user_input.lower() == "/worktree" or user_input.lower().startswith("/worktree "):
+            from aru.commands import handle_worktree_command
+            rest = user_input[len("/worktree"):].strip()
+            handle_worktree_command(rest)
             continue
 
         if user_input.lower() == "/debug" or user_input.lower().startswith("/debug "):
