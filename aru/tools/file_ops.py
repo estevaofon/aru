@@ -59,7 +59,8 @@ def read_file(file_path: str, start_line: int = 0, end_line: int = 0, max_size: 
             with start_line to get the next chunk.
     """
     try:
-        resolved = os.path.abspath(file_path)
+        from aru.runtime import resolve_path as _resolve_path
+        resolved = os.path.abspath(_resolve_path(file_path))
         cache_key = (resolved, start_line, end_line, max_size)
         _read_cache = get_ctx().read_cache
         if cache_key in _read_cache and (start_line > 0 or end_line > 0):
@@ -166,6 +167,8 @@ def write_file(file_path: str, content: str) -> str:
         file_path: Path to the file to write.
         content: The content to write to the file.
     """
+    from aru.runtime import resolve_path as _resolve_path
+    file_path = _resolve_path(file_path)
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             existing = f.read()
@@ -179,7 +182,7 @@ def write_file(file_path: str, content: str) -> str:
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
-        _notify_file_mutation()
+        _notify_file_mutation(path=file_path, mutation_type="write")
         return f"Successfully wrote to {file_path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -195,9 +198,10 @@ def write_files(file_list: list[dict]) -> str:
         file_list: List of dicts with 'path' (file path) and 'content' (file content) keys.
                    Example: [{"path": "src/main.py", "content": "print('hello')"}, {"path": "src/utils.py", "content": "..."}]
     """
+    from aru.runtime import resolve_path as _resolve_path
     parts = [Text(f"Write {len(file_list)} files:", style="bold"), Text()]
     for e in file_list:
-        p = e.get("path", "<missing>")
+        p = _resolve_path(e.get("path", "<missing>"))
         content = e.get("content", "")
         try:
             with open(p, "r", encoding="utf-8") as f:
@@ -206,13 +210,13 @@ def write_files(file_list: list[dict]) -> str:
             existing = ""
         parts.append(_format_unified_diff(existing, content, p))
         parts.append(Text())
-    if not check_permission("write", [e.get("path", "") for e in file_list], Group(*parts)):
+    if not check_permission("write", [_resolve_path(e.get("path", "")) for e in file_list], Group(*parts)):
         return _denied(f"batch write of {len(file_list)} files")
 
     results = []
     errors = []
     for entry in file_list:
-        path = entry.get("path", "")
+        path = _resolve_path(entry.get("path", ""))
         content = entry.get("content", "")
         if not path:
             errors.append("Error: missing 'path' in entry")
@@ -228,7 +232,8 @@ def write_files(file_list: list[dict]) -> str:
 
     parts = []
     if results:
-        _notify_file_mutation()
+        _notify_file_mutation(path=results[0] if len(results) == 1 else None,
+                               mutation_type="write")
         parts.append(f"Successfully wrote {len(results)} files: {', '.join(results)}")
     if errors:
         parts.append("\n".join(errors))
@@ -243,6 +248,8 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         old_string: The exact text to find and replace. Must be unique in the file.
         new_string: The replacement text.
     """
+    from aru.runtime import resolve_path as _resolve_path
+    file_path = _resolve_path(file_path)
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -282,7 +289,7 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         _checkpoint_file(file_path)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        _notify_file_mutation()
+        _notify_file_mutation(path=file_path, mutation_type="edit")
 
         diff_text = _compact_diff(old_string, new_string, file_path)
         if diff_text:
@@ -303,6 +310,7 @@ def edit_files(edits: list[dict]) -> str:
         edits: List of dicts with 'path' (file path), 'old_string' (text to find), and 'new_string' (replacement).
                Example: [{"path": "src/main.py", "old_string": "foo", "new_string": "bar"}]
     """
+    from aru.runtime import resolve_path as _resolve_path
     original: dict[str, str] = {}
     preview: dict[str, str] = {}
     preview_errors: list[str] = []
@@ -313,6 +321,8 @@ def edit_files(edits: list[dict]) -> str:
         if not path or not old:
             preview_errors.append(f"{path or '<missing>'}: missing 'path' or 'old_string'")
             continue
+        path = _resolve_path(path)
+        entry["path"] = path  # normalise so later stages see the absolute form
         if path not in preview:
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -386,7 +396,8 @@ def list_directory(directory: str = ".") -> str:
         directory: Directory to list. Defaults to current directory.
     """
     try:
-        abs_dir = os.path.abspath(directory)
+        from aru.runtime import resolve_path as _resolve_path
+        abs_dir = os.path.abspath(_resolve_path(directory))
         entries = os.listdir(abs_dir)
         result = []
         for entry in sorted(entries):

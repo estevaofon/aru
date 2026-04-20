@@ -297,3 +297,22 @@ The project uses a local `.venv` virtual environment. When using the `bash` tool
 - `.gitignore` respected in all file discovery
 - Sessions persisted as JSON in `.aru/sessions/`
 - Project language: Portuguese comments in some places; code in English
+
+## Plugin migration — cwd-aware tools (Tier 3 #2)
+
+After the cwd-aware refactor, the process cwd (``os.getcwd()``) stays pinned at
+the session's ``project_root`` for the lifetime of the REPL — even when the user
+runs ``/worktree enter`` or a sub-agent is spawned via
+``delegate_task(worktree=...)``. The per-scope working directory lives on
+``ctx.cwd`` and is isolated across ``fork_ctx()``.
+
+**What this means for custom plugin tools:**
+- ``os.getcwd()`` keeps returning the project root. Existing plugins that use it
+  will NOT crash, but they will also NOT respect the agent's active worktree —
+  a silent correctness bug when the plugin is used from a sub-agent inside a
+  different worktree.
+- New code should call ``aru.runtime.get_cwd()`` (falls back to the process cwd
+  when no ctx is installed) or resolve relative paths via
+  ``aru.runtime.resolve_path(p)``.
+- ``subprocess`` calls that want worktree-aware behaviour should pass
+  ``cwd=get_cwd()`` explicitly.

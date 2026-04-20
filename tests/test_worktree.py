@@ -91,20 +91,28 @@ def test_create_worktree_is_idempotent_on_existing_branch(git_project):
 
 
 def test_enter_and_exit_worktree_roundtrip(git_project):
+    """Tier 3 #2: enter/exit updates ctx.cwd, NOT process cwd."""
+    process_cwd_before = os.getcwd()
     path = create_worktree("feat-enter")
     enter_worktree(path, "feat-enter")
     ctx = get_ctx()
     assert ctx.worktree_path == os.path.abspath(path)
     assert ctx.worktree_branch == "feat-enter"
-    assert os.path.abspath(os.getcwd()) == os.path.abspath(path)
-    # session.cwd tracks
+    # ctx.cwd points into the worktree (Tier 3 #2)
+    assert os.path.abspath(ctx.cwd) == os.path.abspath(path)
+    # Process cwd is UNCHANGED — that's the whole point of the cwd-aware refactor
+    assert os.getcwd() == process_cwd_before
+    # session.cwd mirrors ctx.cwd
     assert os.path.abspath(ctx.session.cwd) == os.path.abspath(path)
 
     left = exit_worktree()
     assert left is True
     assert ctx.worktree_path is None
     assert ctx.worktree_branch is None
-    assert os.path.abspath(os.getcwd()) == os.path.abspath(ctx.session.project_root)
+    # ctx.cwd back at project root
+    assert os.path.abspath(ctx.cwd) == os.path.abspath(ctx.session.project_root)
+    # Process cwd still unchanged
+    assert os.getcwd() == process_cwd_before
 
 
 def test_exit_worktree_noop_when_not_inside(git_project):

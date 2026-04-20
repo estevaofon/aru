@@ -160,6 +160,7 @@ async def delegate_task(
     agent_name: str = "",
     task_id: str = "",
     run_in_background: bool = False,
+    worktree: str = "",
 ) -> str:
     """Delegate a task to a sub-agent that runs autonomously. Multiple calls run concurrently.
     Use for independent research or subtasks to keep your own context clean.
@@ -178,6 +179,12 @@ async def delegate_task(
             Useful for long-running research that can overlap with your
             other work. Foreground mode (default) blocks until the sub-agent
             returns, appropriate when you need the result before continuing.
+        worktree: Git branch name to isolate the sub-agent in. Branch names
+            only — paths are not accepted. If the worktree for this branch
+            doesn't exist yet it's created (from the current branch). Two
+            concurrent delegates asking for the same branch serialise on a
+            lock so both see the same worktree. Worktrees persist until
+            removed via /worktree remove.
     """
 
     async def _run() -> str:
@@ -208,15 +215,36 @@ async def delegate_task(
         ):
             return f"[DELEGATE] Permission denied for sub-agent: {_agent_name_pre}"
 
-        from aru.runtime import fork_ctx, set_ctx
-        set_ctx(fork_ctx())
+        from aru.runtime import fork_ctx, get_or_create_worktree_lock, set_ctx
+
+        # Tier 3 #2: optional per-sub-agent worktree. Serialise concurrent
+        # delegates on the same branch so the first one creates and the
+        # second one observes it already present — create_worktree itself
+        # is idempotent, but the find+add pair isn't atomic.
+        _worktree_path: str | None = None
+        _worktree_branch = (worktree or "").strip()
+        if _worktree_branch:
+            from aru.tools.worktree import create_worktree as _create_wt
+            _wt_lock = get_or_create_worktree_lock(_worktree_branch)
+            async with _wt_lock:
+                try:
+                    _worktree_path = _create_wt(_worktree_branch)
+                except Exception as _wt_exc:
+                    return f"[DELEGATE] Worktree create failed for {_worktree_branch!r}: {_wt_exc}"
+
+        _forked = fork_ctx()
+        if _worktree_path is not None:
+            _forked.cwd = _worktree_path
+            _forked.worktree_path = _worktree_path
+            _forked.worktree_branch = _worktree_branch
+        set_ctx(_forked)
 
         from agno.agent import Agent
         from aru.providers import create_model
         from aru.tools.registry import resolve_tools
 
         agent_id = _next_subagent_id()
-        cwd = os.getcwd()
+        cwd = _forked.cwd
         small_model_ref = _get_small_model_ref()
 
         agent_perm = None

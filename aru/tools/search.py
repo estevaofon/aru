@@ -350,8 +350,15 @@ def grep_search(pattern: str, directory: str = ".", file_glob: str = "", context
 _SEARCH_FALLBACK_TIMEOUT = 45.0  # pure-Python fallback cap; rg fast path has its own 30s
 
 
+def _resolve_search_dir(directory: str) -> str:
+    """Interpret ``.`` / relative paths against ``ctx.cwd`` (Tier 3 #2)."""
+    from aru.runtime import resolve_path as _resolve_path
+    return _resolve_path(directory or ".")
+
+
 @functools.wraps(glob_search)
 async def _glob_search_tool(pattern: str, directory: str = ".") -> str:
+    directory = _resolve_search_dir(directory)
     rg_result = await _glob_search_rg(pattern, directory)
     if rg_result is not None:
         return rg_result
@@ -375,6 +382,7 @@ async def _grep_search_tool(
     file_glob: str = "",
     context_lines: int = 10,
 ) -> str:
+    directory = _resolve_search_dir(directory)
     rg_result = await _grep_search_rg(pattern, directory, file_glob, context_lines)
     if rg_result is not None:
         return rg_result

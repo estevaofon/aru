@@ -250,7 +250,9 @@ def validate(patch: Patch, root: str | None = None) -> None:
     Runs purely against the filesystem as it currently stands — no mutation.
     Context (` `) and removal (`-`) lines in hunks must match the file verbatim.
     """
-    root = root or os.getcwd()
+    if root is None:
+        from aru.runtime import get_cwd as _get_cwd
+        root = _get_cwd()
 
     for idx, op in enumerate(patch.operations):
         abs_path = os.path.abspath(os.path.join(root, op.target_path))
@@ -387,7 +389,9 @@ def apply_patch_text(patch_text: str, root: str | None = None) -> str:
     patch = parse_patch(patch_text)
     validate(patch, root=root)
 
-    root = root or os.getcwd()
+    if root is None:
+        from aru.runtime import get_cwd as _get_cwd
+        root = _get_cwd()
     applied: list[_RollbackAction] = []
 
     try:

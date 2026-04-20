@@ -262,6 +262,23 @@ async def run_cli(skip_permissions: bool = False, resume_id: str | None = None):
 
     # Wire session and file-mutation callback
     ctx.session = session
+
+    # Tier 3 #2 R11: if this session was saved while inside a worktree,
+    # re-enter it so ctx.cwd matches the previous run. If the worktree was
+    # deleted on disk between runs, silently fall back to project_root.
+    _saved_wt = getattr(session, "worktree_path", None)
+    _saved_branch = getattr(session, "worktree_branch", None)
+    if _saved_wt and os.path.isdir(_saved_wt):
+        from aru.runtime import enter_worktree as _re_enter
+        try:
+            _re_enter(_saved_wt, _saved_branch)
+            console.print(f"[dim]Resumed inside worktree: {_saved_branch} ({_saved_wt})[/dim]")
+        except Exception as exc:
+            console.print(f"[yellow]Could not re-enter worktree {_saved_wt}: {exc}[/yellow]")
+    elif _saved_wt:
+        console.print(f"[yellow]Saved worktree path no longer exists: {_saved_wt} — using project root[/yellow]")
+        session.worktree_path = None
+        session.worktree_branch = None
     ctx.on_file_mutation = session.invalidate_context_cache
     atexit.register(lambda: cleanup_processes(ctx.tracked_processes))
 

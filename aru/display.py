@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 import time
 
@@ -126,8 +127,15 @@ def _render_home(session, skip_permissions: bool) -> None:
             f"  [dim]|[/dim]  {mode_label}"
         )
     )
+    # Prefer ctx.cwd so the "cwd:" line reflects the active worktree (Tier 3 #2).
+    # Falls back to os.getcwd() when no ctx is installed (pre-init, tests).
+    try:
+        from aru.runtime import get_cwd as _get_cwd
+        _cwd_display = _get_cwd()
+    except Exception:
+        _cwd_display = os.getcwd()
     console.print(
-        Text.from_markup(f"  [dim]cwd:[/dim]   {os.getcwd()}")
+        Text.from_markup(f"  [dim]cwd:[/dim]   {_cwd_display}")
     )
     console.print()
 

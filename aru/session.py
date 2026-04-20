@@ -340,6 +340,11 @@ class Session:
         # when the REPL leaves a git worktree (``/worktree exit``). Stable for
         # the lifetime of the session regardless of chdir operations.
         self.project_root: str = os.getcwd()
+        # Worktree state persisted across session save/restore (Tier 3 #2 R11).
+        # Set by ``runtime.enter_worktree`` so ``aru --resume`` can re-enter
+        # the same worktree on startup. ``None`` = session lives at project_root.
+        self.worktree_path: str | None = None
+        self.worktree_branch: str | None = None
         self.created_at: str = datetime.now().isoformat(timespec="milliseconds")
         self.updated_at: str = self.created_at
         self.total_input_tokens: int = 0
@@ -759,6 +764,9 @@ class Session:
             "invoked_skills": {k: v.to_dict() for k, v in self.invoked_skills.items()},
             "model_ref": self.model_ref,
             "cwd": self.cwd,
+            "project_root": self.project_root,
+            "worktree_path": getattr(self, "worktree_path", None),
+            "worktree_branch": getattr(self, "worktree_branch", None),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "reasoning_override": self.reasoning_override,
@@ -814,6 +822,9 @@ class Session:
             model_ref = MODEL_ALIASES.get(legacy_key, DEFAULT_MODEL)
         session.model_ref = model_ref
         session.cwd = data.get("cwd", os.getcwd())
+        session.project_root = data.get("project_root", session.cwd)
+        session.worktree_path = data.get("worktree_path")
+        session.worktree_branch = data.get("worktree_branch")
         session.created_at = data.get("created_at", "")
         session.updated_at = data.get("updated_at", "")
         override = data.get("reasoning_override")

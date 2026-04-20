@@ -104,10 +104,17 @@ async def run_command(command: str, timeout: int = 60, working_directory: str = 
     Args:
         command: The command to execute.
         timeout: Max seconds. Default 60.
-        working_directory: Directory to run in. Default: cwd.
+        working_directory: Directory to run in. Default: ctx.cwd.
         extra_env: Extra environment variables to inject (from plugins).
     """
-    cwd = working_directory or os.getcwd()
+    # Tier 3 #2: default to ctx.cwd so sub-agents in different worktrees
+    # see isolated working directories. Explicit working_directory still
+    # wins (agent passed it deliberately).
+    if working_directory:
+        cwd = working_directory
+    else:
+        from aru.runtime import get_cwd as _get_cwd
+        cwd = _get_cwd()
 
     env = None
     if extra_env and isinstance(extra_env, dict) and any(extra_env.values()):
@@ -211,9 +218,13 @@ async def bash(command: str, timeout: int = 60, working_directory: str = "") -> 
     Args:
         command: The command to execute.
         timeout: Max seconds to wait. Default 60.
-        working_directory: Directory to run in. Default: cwd.
+        working_directory: Directory to run in. Default: ctx.cwd (worktree-aware).
     """
-    cwd = working_directory or os.getcwd()
+    if working_directory:
+        cwd = working_directory
+    else:
+        from aru.runtime import get_cwd as _get_cwd
+        cwd = _get_cwd()
     cmd_display = Group(
         Syntax(command, "bash", theme="monokai"),
         Text(f"cwd: {cwd}", style="dim"),

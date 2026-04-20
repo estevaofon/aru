@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -142,14 +143,34 @@ class RuntimeContext:
     # -- Session --
     session: Any = None  # aru.session.Session (set by CLI, used for sub-agent cost tracking)
 
-    # -- Worktree (Stage 1 of Tier 2) --
-    # When the REPL is operating inside a git worktree via ``/worktree enter``,
-    # these hold the absolute path and the branch name. ``None`` means the
-    # session is at its original project root. ``enter_worktree`` / ``exit_worktree``
-    # helpers in this module are the only sanctioned mutators — they also
-    # ``os.chdir`` so file tools pick up the new working directory implicitly.
+    # -- Worktree (Tier 2 #1) --
+    # When the REPL (or a sub-agent) is operating inside a git worktree via
+    # ``/worktree enter`` or ``delegate_task(worktree=...)``, these hold the
+    # absolute path and branch name. ``None`` means the session is at its
+    # original project root.
     worktree_path: str | None = None
     worktree_branch: str | None = None
+
+    # -- Per-scope working directory (Tier 3 #2) --
+    # All file-touching tools resolve relative paths against this field
+    # instead of ``os.getcwd()``. ``None`` means "follow the process cwd"
+    # (``os.getcwd()``) — the default so the REPL tracks ``monkeypatch.chdir``
+    # in tests and legacy code that expects ``os.getcwd`` semantics.
+    # ``enter_worktree`` / ``delegate_task(worktree=...)`` SET this to an
+    # absolute path which detaches ctx.cwd from the process cwd. Inherited
+    # (by value — immutable str) through ``fork_ctx`` so concurrent sub-agents
+    # can live in different worktrees without touching the process-global cwd.
+    cwd: str | None = None
+
+    # -- Concurrent worktree-create serialization (Tier 3 #2) --
+    # Keyed by branch name: dict of asyncio.Lock. Acquired by
+    # ``delegate_task(worktree=...)`` before calling ``create_worktree`` so
+    # two parallel delegates asking for the same branch serialise and the
+    # second one reuses the existing worktree rather than racing the
+    # non-atomic ``_find_worktree_by_branch + git worktree add`` pair.
+    # Populated lazily; lives for the session.
+    worktree_create_locks: dict[str, Any] = field(default_factory=dict)
+    worktree_create_locks_mutex: threading.Lock = field(default_factory=threading.Lock)
 
     # -- Cancellation --
     # Set by the REPL on Ctrl+C (or by any caller wanting to cancel running
@@ -417,28 +438,62 @@ def _schedule_publish(event_type: str, data: dict[str, Any]) -> None:
     loop.create_task(mgr.publish(event_type, data))
 
 
+def resolve_path(path: str) -> str:
+    """Resolve *path* against the ctx's worktree-aware cwd.
+
+    Absolute paths are returned unchanged. Relative paths are joined onto
+    ``get_cwd()`` — which is either ``ctx.cwd`` (set by enter_worktree /
+    delegate worktree) or the process cwd as fallback.
+    """
+    if os.path.isabs(path):
+        return path
+    return os.path.join(get_cwd(), path)
+
+
+def get_cwd() -> str:
+    """Return the active ctx's cwd, or the process cwd as fallback.
+
+    When ``ctx.cwd`` is ``None`` (the default) we track ``os.getcwd()`` so
+    tests that rely on ``monkeypatch.chdir`` and legacy code that assumes
+    process-cwd semantics keep working. Only ``enter_worktree`` and
+    ``delegate_task(worktree=...)`` SET a concrete ``ctx.cwd``, which
+    detaches the agent scope from the process cwd.
+    """
+    try:
+        value = get_ctx().cwd
+    except LookupError:
+        return os.getcwd()
+    return value if value is not None else os.getcwd()
+
+
 def enter_worktree(path: str, branch: str | None = None) -> None:
     """Make *path* the active worktree for the current session.
 
-    Chdir to *path*, bookkeeping the branch name, and invalidate caches
-    keyed on cwd (read cache + directory walk cache). Safe to call from
-    any thread that has a ctx installed.
+    Sets ``ctx.cwd``, ``ctx.worktree_path``, and ``ctx.worktree_branch``.
+    Does NOT call ``os.chdir`` — process cwd stays pinned at the session
+    project_root so concurrent sub-agents can each have their own ctx.cwd
+    without fighting the process-global state.
 
-    Emits ``cwd.changed`` so plugins that cache paths can refresh.
+    Invalidates read_cache and the gitignore walk cache so cwd-keyed
+    entries from the previous directory don't leak. Emits ``cwd.changed``.
     """
-    import os
     from aru.tools.gitignore import invalidate_walk_cache
 
     ctx = get_ctx()
     abs_path = os.path.abspath(path)
-    old_cwd = os.getcwd()
-    os.chdir(abs_path)
+    old_cwd = ctx.cwd
     ctx.worktree_path = abs_path
     ctx.worktree_branch = branch
+    ctx.cwd = abs_path
     ctx.read_cache.clear()
     invalidate_walk_cache()
     if ctx.session is not None:
         ctx.session.cwd = abs_path
+        # Tier 3 #2 R11: persist worktree state so `aru --resume` can
+        # restore the same worktree on startup.
+        if hasattr(ctx.session, "worktree_path"):
+            ctx.session.worktree_path = abs_path
+            ctx.session.worktree_branch = branch
     _schedule_publish("cwd.changed", {
         "old_cwd": old_cwd, "new_cwd": abs_path,
         "reason": "worktree.enter", "branch": branch,
@@ -449,26 +504,48 @@ def exit_worktree() -> bool:
     """Return the REPL to the session's project_root.
 
     Returns True if a worktree was active (and we exited), False if the
-    session was already at its project root. Emits ``cwd.changed``.
+    session was already at its project root. Does NOT call ``os.chdir`` —
+    process cwd never changed when we entered, so there's nothing to undo
+    at the OS level. Emits ``cwd.changed``.
     """
-    import os
     from aru.tools.gitignore import invalidate_walk_cache
 
     ctx = get_ctx()
     if ctx.worktree_path is None:
         return False
     target = getattr(ctx.session, "project_root", None) or os.getcwd()
-    old_cwd = os.getcwd()
+    old_cwd = ctx.cwd
     old_branch = ctx.worktree_branch
-    os.chdir(target)
     ctx.worktree_path = None
     ctx.worktree_branch = None
+    ctx.cwd = target
     ctx.read_cache.clear()
     invalidate_walk_cache()
     if ctx.session is not None:
         ctx.session.cwd = target
+        if hasattr(ctx.session, "worktree_path"):
+            ctx.session.worktree_path = None
+            ctx.session.worktree_branch = None
     _schedule_publish("cwd.changed", {
         "old_cwd": old_cwd, "new_cwd": target,
         "reason": "worktree.exit", "branch": old_branch,
     })
     return True
+
+
+def get_or_create_worktree_lock(branch: str):
+    """Return the async lock that serialises ``create_worktree`` for *branch*.
+
+    Populated lazily and shared across forks so two ``delegate_task`` calls
+    racing on the same branch end up reusing the worktree rather than each
+    one triggering ``git worktree add`` (which is NOT atomic with
+    ``_find_worktree_by_branch``).
+    """
+    import asyncio as _asyncio
+    ctx = get_ctx()
+    with ctx.worktree_create_locks_mutex:
+        lock = ctx.worktree_create_locks.get(branch)
+        if lock is None:
+            lock = _asyncio.Lock()
+            ctx.worktree_create_locks[branch] = lock
+        return lock
