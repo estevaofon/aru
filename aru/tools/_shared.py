@@ -18,13 +18,23 @@ _MAX_OUTPUT_CHARS = 10_000
 _TRUNCATE_KEEP = 3_000  # chars to keep from start and end
 
 
-def _notify_file_mutation():
-    """Notify the session that files changed so caches are invalidated."""
+def _notify_file_mutation(*, path: str | None = None, mutation_type: str = "unknown"):
+    """Notify the session that files changed so caches are invalidated.
+
+    Also publishes ``file.changed`` via the plugin bus so plugins (auto-
+    linter, memory extractor, LSP didChange etc.) can react. ``path`` and
+    ``mutation_type`` are optional and default to "unknown" for legacy
+    callers that haven't been updated yet.
+    """
     ctx = get_ctx()
     ctx.read_cache.clear()
     invalidate_walk_cache()
     if ctx.on_file_mutation:
         ctx.on_file_mutation()
+    from aru.runtime import _schedule_publish
+    _schedule_publish("file.changed", {
+        "path": path, "mutation_type": mutation_type,
+    })
 
 
 def _checkpoint_file(file_path: str):

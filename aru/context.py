@@ -918,11 +918,16 @@ async def compact_conversation(
 
     # Fire session.compact hook — plugins can pre-process history.
     # Import is lazy here to avoid circular dependency (context ← runtime).
+    # Also fires session.compact.before (Tier 2 #3) as the canonical name
+    # going forward; `session.compact` remains as a legacy alias.
+    _pre_len = len(history)
     try:
         from aru.runtime import get_ctx  # noqa: lazy to avoid circular dep
         mgr = get_ctx().plugin_manager
         if mgr is not None and mgr.loaded:
             event = await mgr.fire("session.compact", {"history": history})
+            history = event.data.get("history", history)
+            event = await mgr.fire("session.compact.before", {"history": history})
             history = event.data.get("history", history)
     except (LookupError, AttributeError, ImportError):
         pass  # no plugin manager available — proceed without hooks
@@ -976,12 +981,29 @@ async def compact_conversation(
             # Fallback: simple mechanical summary
             summary = _fallback_summary(history, plan_task)
 
-        return apply_compaction(history, summary, model_id=model_id, invoked_skills=invoked_skills)
+        compacted = apply_compaction(history, summary, model_id=model_id, invoked_skills=invoked_skills)
+        _publish_compact_after(_pre_len, len(compacted), summary)
+        return compacted
 
     except Exception:
         # Fallback if agent fails
         summary = _fallback_summary(history, plan_task)
-        return apply_compaction(history, summary, model_id=model_id, invoked_skills=invoked_skills)
+        compacted = apply_compaction(history, summary, model_id=model_id, invoked_skills=invoked_skills)
+        _publish_compact_after(_pre_len, len(compacted), summary)
+        return compacted
+
+
+def _publish_compact_after(before_len: int, after_len: int, summary: str) -> None:
+    """Fire-and-forget publish of session.compact.after (Tier 2 #3)."""
+    try:
+        from aru.runtime import _schedule_publish
+    except ImportError:
+        return
+    _schedule_publish("session.compact.after", {
+        "messages_before": before_len,
+        "messages_after": after_len,
+        "summary_chars": len(summary or ""),
+    })
 
 
 def _fallback_summary(history: list[dict], plan_task: str | None = None) -> str:

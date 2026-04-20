@@ -36,11 +36,12 @@ VALID_HOOKS = frozenset({
     # Tool lifecycle
     "tool.execute.before",       # Before any tool runs
     "tool.execute.after",        # After any tool runs
+    "tool.execute.failure",      # Tool raised / returned error (Tier 2 #3)
     "tool.definition",           # When tools are resolved (can modify desc/params)
 
     # Chat lifecycle
     "chat.message",              # Before user message is sent to LLM (can modify)
-    "chat.params",               # Before LLM call (can modify model, temperature). NOT max_tokens — coupled with recovery loop.
+    "chat.params",               # Before LLM call (can modify model, temperature)
     "chat.system.transform",     # Before LLM call (can modify system prompt)
     "chat.messages.transform",   # Before LLM call (can modify message history)
 
@@ -49,8 +50,27 @@ VALID_HOOKS = frozenset({
 
     # Permission / shell
     "permission.ask",            # Before permission prompt (can auto-allow/deny)
+    "permission.denied",         # After user rejection (Tier 2 #3)
     "shell.env",                 # Before bash subprocess
-    "session.compact",           # Before context compaction
+    "session.compact",           # Before context compaction (alias of compact.before)
+    "session.compact.before",    # Explicit pre-compact (Tier 2 #3)
+    "session.compact.after",     # Post-compact notification (Tier 2 #3)
+
+    # File / workspace (Tier 2 #3)
+    "file.changed",              # write/edit/delete/apply_patch notified via _notify_file_mutation
+    "cwd.changed",               # enter/exit worktree or manual chdir
+
+    # Worktree (Tier 2 #3)
+    "worktree.create",           # After git worktree add
+    "worktree.remove",           # After git worktree remove
+
+    # Sub-agent (Tier 2 #3)
+    "subagent.start",            # After delegate_task spawns a sub-agent
+    "subagent.complete",         # After sub-agent terminates (ok, error, cancelled)
+
+    # Turn lifecycle (Tier 2 #3)
+    "turn.start",                # Beginning of runner.prompt for a new user turn
+    "turn.end",                  # End of runner.prompt; payload has assistant reply + metrics
 })
 
 

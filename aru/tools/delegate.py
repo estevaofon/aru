@@ -378,6 +378,15 @@ Do not create documentation files unless explicitly asked.
             if _session is not None and hasattr(_session, "subagent_traces"):
                 _session.subagent_traces.append(_trace)
 
+            # Event: subagent.start (Tier 2 #3) — plugin-visible birth
+            from aru.runtime import _schedule_publish as _sched
+            _sched("subagent.start", {
+                "task_id": _trace.task_id,
+                "parent_id": _trace.parent_id,
+                "agent_name": sub.name,
+                "task": (task or "")[:500],
+            })
+
             try:
                 async for event in agent_instance.arun(task, stream=True, stream_events=True, yield_run_output=True):
                     if is_aborted():
@@ -438,6 +447,16 @@ Do not create documentation files unless explicitly asked.
             _trace.status = "completed"
             _trace.ended_at = _time.monotonic()
             _trace.result = (final_text or "")[:500]
+
+            # Event: subagent.complete (Tier 2 #3)
+            from aru.runtime import _schedule_publish as _sched_end
+            _sched_end("subagent.complete", {
+                "task_id": _trace.task_id,
+                "status": _trace.status,
+                "duration": (_trace.ended_at or 0) - (_trace.started_at or 0),
+                "tokens_in": _trace.tokens_in,
+                "tokens_out": _trace.tokens_out,
+            })
             # Persist trace to disk — fire-and-forget so a slow filesystem
             # never blocks the sub-agent's return. Enables `/subagents list`
             # to surface traces from prior sessions and `/subagent <id>` to

@@ -394,18 +394,44 @@ def snapshot_tracked_processes() -> list[Any]:
 # conception of "active worktree" stays in sync with the OS cwd.
 
 
+def _schedule_publish(event_type: str, data: dict[str, Any]) -> None:
+    """Fire-and-forget ``plugin_manager.publish`` without requiring a running loop.
+
+    Helpers like ``enter_worktree`` are called from sync paths (slash
+    commands) where we don't want to block. If a loop is running, schedule
+    the coroutine; if not, drop silently (tests without an event loop).
+    """
+    try:
+        ctx = get_ctx()
+        mgr = ctx.plugin_manager
+        if mgr is None or not getattr(mgr, "loaded", False):
+            return
+    except LookupError:
+        return
+
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(mgr.publish(event_type, data))
+
+
 def enter_worktree(path: str, branch: str | None = None) -> None:
     """Make *path* the active worktree for the current session.
 
     Chdir to *path*, bookkeeping the branch name, and invalidate caches
     keyed on cwd (read cache + directory walk cache). Safe to call from
     any thread that has a ctx installed.
+
+    Emits ``cwd.changed`` so plugins that cache paths can refresh.
     """
     import os
     from aru.tools.gitignore import invalidate_walk_cache
 
     ctx = get_ctx()
     abs_path = os.path.abspath(path)
+    old_cwd = os.getcwd()
     os.chdir(abs_path)
     ctx.worktree_path = abs_path
     ctx.worktree_branch = branch
@@ -413,13 +439,17 @@ def enter_worktree(path: str, branch: str | None = None) -> None:
     invalidate_walk_cache()
     if ctx.session is not None:
         ctx.session.cwd = abs_path
+    _schedule_publish("cwd.changed", {
+        "old_cwd": old_cwd, "new_cwd": abs_path,
+        "reason": "worktree.enter", "branch": branch,
+    })
 
 
 def exit_worktree() -> bool:
     """Return the REPL to the session's project_root.
 
     Returns True if a worktree was active (and we exited), False if the
-    session was already at its project root.
+    session was already at its project root. Emits ``cwd.changed``.
     """
     import os
     from aru.tools.gitignore import invalidate_walk_cache
@@ -428,6 +458,8 @@ def exit_worktree() -> bool:
     if ctx.worktree_path is None:
         return False
     target = getattr(ctx.session, "project_root", None) or os.getcwd()
+    old_cwd = os.getcwd()
+    old_branch = ctx.worktree_branch
     os.chdir(target)
     ctx.worktree_path = None
     ctx.worktree_branch = None
@@ -435,4 +467,8 @@ def exit_worktree() -> bool:
     invalidate_walk_cache()
     if ctx.session is not None:
         ctx.session.cwd = target
+    _schedule_publish("cwd.changed", {
+        "old_cwd": old_cwd, "new_cwd": target,
+        "reason": "worktree.exit", "branch": old_branch,
+    })
     return True

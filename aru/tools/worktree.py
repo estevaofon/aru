@@ -164,6 +164,8 @@ def create_worktree(branch: str, from_branch: str | None = None, path: str | Non
         raise WorktreeError(
             f"git worktree add failed: {result.stderr.strip() or result.stdout.strip()}"
         )
+    from aru.runtime import _schedule_publish
+    _schedule_publish("worktree.create", {"path": target, "branch": branch})
     return target
 
 
@@ -205,6 +207,8 @@ def remove_worktree(branch: str, force: bool = False) -> str:
         raise WorktreeError(
             f"git worktree remove failed: {result.stderr.strip() or result.stdout.strip()}"
         )
+    from aru.runtime import _schedule_publish
+    _schedule_publish("worktree.remove", {"path": entry.path, "branch": branch})
     return entry.path
 
 

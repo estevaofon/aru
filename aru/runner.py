@@ -437,6 +437,12 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         # Hook: chat.message — let plugins intercept/modify user message
         run_message = await _fire_chat_message_hook(run_message, session)
 
+        # Event: turn.start (Tier 2 #3) — plugin-visible turn boundary
+        await _publish_event("turn.start", {
+            "user_message": run_message,
+            "session_id": getattr(session, "id", None),
+        })
+
         # Event: message.user
         await _publish_event("message.user", {
             "message": run_message,
@@ -773,6 +779,22 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
         await _publish_event("message.assistant", {
             "content": final_content,
             "tool_calls": collected_tool_calls,
+            "session_id": getattr(session, "id", None),
+        })
+
+        # Event: turn.end (Tier 2 #3) — end-of-turn hook consumed by the
+        # auto-memory extractor and metric/audit plugins. Fires even when
+        # the assistant's reply is empty so plugins can still count turns.
+        _turn_tokens_in = 0
+        _turn_tokens_out = 0
+        if session is not None:
+            _turn_tokens_in = getattr(session, "last_input_tokens", 0) or 0
+            _turn_tokens_out = getattr(session, "last_output_tokens", 0) or 0
+        await _publish_event("turn.end", {
+            "assistant_message": final_content or "",
+            "tool_calls": collected_tool_calls,
+            "tokens_in": _turn_tokens_in,
+            "tokens_out": _turn_tokens_out,
             "session_id": getattr(session, "id", None),
         })
 

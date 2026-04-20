@@ -939,6 +939,16 @@ def check_permission(
             if feedback:
                 ctx.last_rejection_feedback = feedback
             allowed = False
+            # Event: permission.denied (Tier 2 #3) — plugins can log/audit.
+            try:
+                from aru.runtime import _schedule_publish
+                _schedule_publish("permission.denied", {
+                    "category": category,
+                    "subject": display_subject,
+                    "feedback": feedback,
+                })
+            except Exception:  # pragma: no cover — defensive
+                pass
 
         # Resume Live display
         if ctx.live:
