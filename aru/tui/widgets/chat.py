@@ -128,6 +128,56 @@ cost and layout cost on the Aru side. This bug is about the
 terminal's own private-mode state being corrupted from outside —
 entirely unrelated to how fast we render, and invisible to any
 latency benchmark. Treat as a seventh layer: output-hygiene.
+
+----
+
+Post-mortem — "mouse wheel dead during heavy streaming" (2026-04-23,
+``fix/scroll-refinement``)
+---------------------------------------------------------------------
+**Symptom:** mouse wheel over the ChatPane does nothing while the
+agent is actively streaming / running tool batches. TAB to focus
+the pane + arrow keys / PgUp / PgDn works fine. Asymmetric enough
+that it felt like "the mouse lost focus" — not a freeze.
+
+Reported against session ``final-fantasy-battle/.aru/sessions/
+e9397dc3.json``: 170 tool calls, 42 task-list / plan-step panels
+mounted via ``add_renderable(scrollable=True)``. A scan of the
+session for C0 control bytes found zero ``\\x1b`` — so layer 7 was
+NOT the cause this time.
+
+**Cause:** interaction between ``self.anchor()`` (layer 4) and
+Textual 8.2.4's wheel-scroll path. The framework's
+``_on_mouse_scroll_up`` (``textual/widget.py:4787``) routes through
+``_scroll_up_for_pointer`` which calls ``_scroll_to(...,
+release_anchor=False)`` (``widget.py:3309``). So wheel-up moves
+``scroll_y`` by one tick BUT leaves the anchor engaged. The
+compositor then re-snaps ``scroll_y`` to the bottom on the next
+recomposition (``_compositor.py:609`` / ``:693``) — and during
+heavy streaming recompositions happen at ~10 Hz via content
+deltas, tool events, and task-list panel mounts. Net effect: each
+wheel tick is reversed before the next frame paints, so the user
+sees no motion.
+
+Keyboard (arrow keys / PgUp / PgDn) is fine because those go
+through ``scroll_up`` / ``scroll_page_up`` which default to
+``release_anchor=True`` — the anchor is released on first press and
+the viewport stays where the user put it.
+
+**Fix — ``on_mouse_scroll_up`` handler on ``ChatPane``.** A
+non-shadowing hook (no ``event.stop()``) that calls
+``release_anchor()`` before the framework handler runs. The
+framework then does the actual scroll on a released anchor, so the
+compositor no longer snaps back. ``_check_anchor`` re-engages the
+anchor automatically when the user scrolls back to the bottom, so
+streaming auto-follow is preserved.
+
+**Why this wasn't in any of layers 1–7:** those layers assumed
+``self.anchor()`` behaved like Textual's "streaming Markdown"
+recipe — which releases on user scroll. The recipe is right for
+keyboard-driven terminals; the wheel path has a quiet asymmetry in
+Textual core that we didn't catch until a user compared wheel vs.
+TAB-then-arrows head-to-head. Treat as an eighth layer:
+anchor-wheel-interaction.
 """
 
 from __future__ import annotations
@@ -875,15 +925,41 @@ class ChatPane(VerticalScroll):
         # us enqueuing a ``scroll_end`` after every delta / tool event.
         # (a) kills the ``call_after_refresh`` backlog that piled up when
         # the UI thread was busy rendering markdown; (b) releases the anchor
-        # when the user manually scrolls up, so they can read history
-        # mid-stream without the viewport snapping back every 50 ms; and
-        # (c) re-engages automatically when they return to the bottom via
-        # ``_check_anchor``. Matches Textual's own "streaming Markdown"
+        # when the user manually scrolls up *via keyboard or drag* so they
+        # can read history mid-stream without the viewport snapping back;
+        # mouse wheel is handled separately in ``on_mouse_scroll_up`` below
+        # because Textual's framework wheel path keeps the anchor engaged;
+        # and (c) re-engages automatically when they return to the bottom
+        # via ``_check_anchor``. Matches Textual's own "streaming Markdown"
         # recipe (see ``Markdown.get_stream`` docstring).
         self.anchor()
         # Periodic flush; cheap because the reactive watcher already
         # debounces repaints when buffer doesn't actually change.
         self.set_interval(self.DEBOUNCE_SEC, self._flush_pending_delta)
+
+    def on_mouse_scroll_up(self, event) -> None:
+        """Release the anchor on wheel-up so the viewport doesn't snap back.
+
+        Textual's framework wheel handler (``_on_mouse_scroll_up`` in
+        ``widget.py``) routes through ``_scroll_up_for_pointer`` which
+        calls ``_scroll_to(..., release_anchor=False)`` — the anchor
+        stays engaged. During streaming the compositor recomposes on
+        every content delta and resets ``scroll_y`` to the bottom of
+        the virtual region (``_compositor.py:609``), so each wheel tick
+        is effectively reversed before the next frame and the user
+        perceives the mouse as "dead". Keyboard scrolling doesn't hit
+        this path — arrow keys / PgUp go through ``scroll_up`` which
+        defaults to ``release_anchor=True`` — which is why TAB + arrows
+        keeps working while the wheel appears broken.
+
+        Releasing the anchor explicitly on user wheel-up keeps the
+        viewport where the user put it. ``_check_anchor`` re-engages
+        automatically once they scroll back to the bottom. No
+        ``event.stop()`` — the framework handler still runs and does
+        the actual scrolling, now unimpeded.
+        """
+        if self._anchored and not self._anchor_released:
+            self.release_anchor()
 
     # ── API used by TextualBusSink and the App ────────────────────────
 
