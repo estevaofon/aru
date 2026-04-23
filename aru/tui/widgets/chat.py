@@ -137,8 +137,11 @@ import io
 import re
 from typing import Any
 
-from rich.console import Console
-from rich.markdown import Markdown
+# ``rich.console`` + ``rich.markdown`` are only needed once the first
+# assistant message starts streaming. Deferring them saves ~310 ms on
+# TUI cold start (markdown-it parser + Pygments lexer registry load on
+# import of ``rich.markdown``). The first ``_markdown_to_text`` call
+# pays a one-shot cost but by then the UI is already interactive.
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
@@ -807,6 +810,11 @@ def _markdown_to_text(raw: str, width: int = 100) -> Text:
     if not raw:
         return Text("")
     raw = _sanitize_for_terminal(raw)
+    # Lazy imports — see module-level comment on deferred ``rich.markdown``.
+    # The first call after process start pays ~310 ms; subsequent calls are
+    # free (Python import cache).
+    from rich.console import Console
+    from rich.markdown import Markdown
     console = Console(
         file=io.StringIO(),
         width=max(width, 20),

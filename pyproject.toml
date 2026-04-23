@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aru-code"
-version = "0.39.0"
+version = "0.40.0"
 description = "A Claude Code clone built with Agno agents"
 readme = "README.md"
 license = "MIT"
@@ -88,6 +88,7 @@ markers = [
 [dependency-groups]
 dev = [
     "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
 ]
 docs = [
     "mkdocs-material>=9.5.0",

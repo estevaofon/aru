@@ -91,7 +91,7 @@ class TestMain:
         mock_asyncio_run.assert_called_once()
 
     @patch("main.load_dotenv")
-    @patch("main.run_cli")
+    @patch("aru.cli.run_cli")
     @patch("main.asyncio.run")
     def test_main_repl_flag_routes_to_repl(self, mock_asyncio_run, mock_run_cli, mock_load_dotenv):
         """Test main() with --repl routes to the classic REPL instead of the TUI."""
