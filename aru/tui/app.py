@@ -1068,6 +1068,24 @@ class AruApp(App):
                 self.query_one(ContextPane).refresh_from_session()
             except Exception:
                 pass
+            # Layer 9 self-heal — re-assert Textual's mouse-tracking
+            # sequences at every turn boundary. If any content path
+            # emitted a rogue DEC private-mode escape during the turn
+            # (``\x1b[?1000l`` or similar) the terminal would have
+            # silently disabled wheel reporting for every scroll area
+            # in the app, with no way for us to detect it. Calling the
+            # driver's enable-mouse path writes four short SGR sequences
+            # (``?1000h`` / ``?1003h`` / ``?1015h`` / ``?1006h``) and
+            # restores wheel input no matter what corrupted the state.
+            # Idempotent when mouse tracking was never disabled. See the
+            # Layer 9 post-mortem at the top of
+            # ``aru/tui/widgets/chat.py`` for the full analysis.
+            try:
+                driver = self._driver
+                if driver is not None:
+                    driver._enable_mouse_support()
+            except Exception:
+                pass
 
     # ── Bus wiring — ToolsPane + StatusPane subscribe to plugin events ──
 

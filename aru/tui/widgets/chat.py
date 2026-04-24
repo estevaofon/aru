@@ -140,44 +140,79 @@ the pane + arrow keys / PgUp / PgDn works fine. Asymmetric enough
 that it felt like "the mouse lost focus" — not a freeze.
 
 Reported against session ``final-fantasy-battle/.aru/sessions/
-e9397dc3.json``: 170 tool calls, 42 task-list / plan-step panels
-mounted via ``add_renderable(scrollable=True)``. A scan of the
-session for C0 control bytes found zero ``\\x1b`` — so layer 7 was
-NOT the cause this time.
+e9397dc3.json``.
 
-**Cause:** interaction between ``self.anchor()`` (layer 4) and
-Textual 8.2.4's wheel-scroll path. The framework's
-``_on_mouse_scroll_up`` (``textual/widget.py:4787``) routes through
-``_scroll_up_for_pointer`` which calls ``_scroll_to(...,
-release_anchor=False)`` (``widget.py:3309``). So wheel-up moves
-``scroll_y`` by one tick BUT leaves the anchor engaged. The
-compositor then re-snaps ``scroll_y`` to the bottom on the next
-recomposition (``_compositor.py:609`` / ``:693``) — and during
-heavy streaming recompositions happen at ~10 Hz via content
-deltas, tool events, and task-list panel mounts. Net effect: each
-wheel tick is reversed before the next frame paints, so the user
-sees no motion.
+**Original (incorrect) theory:** interaction between
+``self.anchor()`` (layer 4) and ``_scroll_up_for_pointer``. This
+was based on a misreading of Textual's source — see the Layer 9
+correction below. ``_scroll_up_for_pointer`` does *not* pass
+``release_anchor=False``; it defaults to ``True`` (``widget.py:3378``
+→ ``widget.py:2730``), so wheel-up already releases the anchor via
+the framework. The ``on_mouse_scroll_up`` handler we added
+(``ChatPane.on_mouse_scroll_up``) is therefore redundant with the
+framework's own behaviour — a no-op on the happy path. It is kept
+as defensive redundancy because removing it is the same shape of
+change as keeping it, but it should not be credited for "fixing"
+anything.
 
-Keyboard (arrow keys / PgUp / PgDn) is fine because those go
-through ``scroll_up`` / ``scroll_page_up`` which default to
-``release_anchor=True`` — the anchor is released on first press and
-the viewport stays where the user put it.
+**What the bug probably was:** the same Layer-7 class of issue
+that the next session surfaced again — a rogue DEC private-mode
+escape reaching the terminal and disabling X10 mouse reporting.
+See Layer 9 for the real signature and the robust fix.
 
-**Fix — ``on_mouse_scroll_up`` handler on ``ChatPane``.** A
-non-shadowing hook (no ``event.stop()``) that calls
-``release_anchor()`` before the framework handler runs. The
-framework then does the actual scroll on a released anchor, so the
-compositor no longer snaps back. ``_check_anchor`` re-engages the
-anchor automatically when the user scrolls back to the bottom, so
-streaming auto-follow is preserved.
+----
 
-**Why this wasn't in any of layers 1–7:** those layers assumed
-``self.anchor()`` behaved like Textual's "streaming Markdown"
-recipe — which releases on user scroll. The recipe is right for
-keyboard-driven terminals; the wheel path has a quiet asymmetry in
-Textual core that we didn't catch until a user compared wheel vs.
-TAB-then-arrows head-to-head. Treat as an eighth layer:
-anchor-wheel-interaction.
+Post-mortem — "wheel globally dead at end of stream" (2026-04-24,
+``fix/scroll-refinement`` continued)
+---------------------------------------------------------------------
+**Symptom:** immediately after a long streaming turn concluded,
+mouse wheel stopped working on *every* scrollable surface in the
+app — ChatPane, sidebars, modals — simultaneously. TAB to walk
+focus into a scrollbar and arrow-key scrolling from there worked.
+Classic Layer-7 fingerprint: terminal-level mouse reporting got
+turned off.
+
+Reported against session ``final-fantasy-battle3/.aru/sessions/
+7e9e4549.json``: one mega-turn with 120 tool calls interleaved
+with 66 text blocks, 31 plan-panel mounts via
+``add_renderable(scrollable=True)``, ~245 widgets in the pane.
+
+**What we could prove:** a byte-level scan of the saved session
+for C0 control chars turned up zero ``\\x1b`` bytes. The leak is
+either (a) from a path that isn't persisted to ``session.json``
+(tool ``stdout``/``stderr`` never reaches the chat directly but
+transient UI strings, skill output, or reasoning tokens might),
+or (b) a Windows ConPTY quirk during high-volume redraw where the
+driver's mouse-enable state drops without us emitting anything
+hostile. Chasing the exact source is caça ao fantasma; the
+mitigation is structural.
+
+**Two-prong fix:**
+
+1. **Close the last unsanitised content path —
+   ``_SanitizedRenderable``.** ``ChatMessageWidget`` already
+   sanitises everything that goes through its ``buffer``. Arbitrary
+   Rich renderables handed to ``add_renderable`` (plan panels, task
+   lists, diff previews, the logo) bypass that path and mount as
+   ``Static(renderable)``. The wrapper sits between the renderable
+   and Rich's console, filtering C0 bytes out of every segment's
+   ``.text`` before it reaches Textual's compositor. Matches the
+   Layer 7 sanitisation boundary for the unchecked route.
+
+2. **Self-heal at turn boundary —
+   ``AruApp._run_turn`` finally clause.** Call the driver's
+   ``_enable_mouse_support()`` after each turn finishes. That
+   re-emits Textual's own four mouse-enable sequences (``?1000h``,
+   ``?1003h``, ``?1015h``, ``?1006h`` — see
+   ``textual/drivers/windows_driver.py:56``). Cost is four short
+   writes; benefit is full recovery of wheel input regardless of
+   what corrupted the terminal state mid-turn. Idempotent: a no-op
+   when mouse tracking was never disabled.
+
+Treat as a ninth layer: defence-in-depth against terminal-state
+corruption. Prong 1 plugs the last known-possible leak inside our
+code; prong 2 recovers even if something outside our reach drops
+the state anyway.
 """
 
 from __future__ import annotations
@@ -230,6 +265,39 @@ def _sanitize_for_terminal(raw: str) -> str:
     Rich renderable.
     """
     return raw.translate(_CTRL_CHAR_TRANSLATION)
+
+
+class _SanitizedRenderable:
+    """Wraps a Rich renderable so its output segments are stripped of C0 bytes.
+
+    ``_sanitize_for_terminal`` covers every string passing through
+    ``ChatMessageWidget.buffer``. Arbitrary Rich renderables handed to
+    ``ChatPane.add_renderable`` (plan panels, task lists, diff previews, the
+    startup logo) skip that widget and mount as a plain ``Static(renderable)``
+    — so a rogue ``\\x1b[?1000l`` inside a task description, a panel title, or
+    subprocess output echoed into a panel would flow straight through Rich
+    segments to Textual's compositor and onto the terminal, disabling mouse
+    tracking globally (Layer 7 signature).
+
+    This wrapper closes that gap: ``console.render`` yields segments from the
+    inner renderable, we strip C0 bytes from any segment whose ``.text``
+    contains them, and re-emit the cleaned stream. Rich's ``Segment`` is a
+    ``NamedTuple`` so ``seg._replace(text=...)`` is a cheap immutable swap.
+    Unchanged segments are re-emitted unmodified — the hot path is a single
+    ``str.translate`` on segment text which typically no-ops.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __rich_console__(self, console: Any, options: Any) -> Any:
+        for seg in console.render(self._inner, options):
+            if seg.text:
+                clean = _sanitize_for_terminal(seg.text)
+                if clean != seg.text:
+                    yield seg._replace(text=clean)
+                    continue
+            yield seg
 
 
 def _scan_fences(text: str) -> tuple[int, int]:
@@ -925,10 +993,8 @@ class ChatPane(VerticalScroll):
         # us enqueuing a ``scroll_end`` after every delta / tool event.
         # (a) kills the ``call_after_refresh`` backlog that piled up when
         # the UI thread was busy rendering markdown; (b) releases the anchor
-        # when the user manually scrolls up *via keyboard or drag* so they
-        # can read history mid-stream without the viewport snapping back;
-        # mouse wheel is handled separately in ``on_mouse_scroll_up`` below
-        # because Textual's framework wheel path keeps the anchor engaged;
+        # when the user manually scrolls — wheel, keyboard, or drag all go
+        # through ``_scroll_to`` which releases by default (widget.py:2730);
         # and (c) re-engages automatically when they return to the bottom
         # via ``_check_anchor``. Matches Textual's own "streaming Markdown"
         # recipe (see ``Markdown.get_stream`` docstring).
@@ -938,25 +1004,21 @@ class ChatPane(VerticalScroll):
         self.set_interval(self.DEBOUNCE_SEC, self._flush_pending_delta)
 
     def on_mouse_scroll_up(self, event) -> None:
-        """Release the anchor on wheel-up so the viewport doesn't snap back.
+        """Defensive redundancy — explicitly release the anchor on wheel-up.
 
-        Textual's framework wheel handler (``_on_mouse_scroll_up`` in
-        ``widget.py``) routes through ``_scroll_up_for_pointer`` which
-        calls ``_scroll_to(..., release_anchor=False)`` — the anchor
-        stays engaged. During streaming the compositor recomposes on
-        every content delta and resets ``scroll_y`` to the bottom of
-        the virtual region (``_compositor.py:609``), so each wheel tick
-        is effectively reversed before the next frame and the user
-        perceives the mouse as "dead". Keyboard scrolling doesn't hit
-        this path — arrow keys / PgUp go through ``scroll_up`` which
-        defaults to ``release_anchor=True`` — which is why TAB + arrows
-        keeps working while the wheel appears broken.
+        Originally added under a misreading of Textual's source (see the
+        Layer 8 correction in the module post-mortem). The framework's
+        ``_scroll_up_for_pointer`` calls ``_scroll_to`` *without*
+        ``release_anchor``, which defaults to ``True`` in
+        ``widget.py:2730`` — so Textual already releases the anchor on
+        wheel-up. This handler does the same thing one beat earlier and
+        is effectively a no-op on the normal path.
 
-        Releasing the anchor explicitly on user wheel-up keeps the
-        viewport where the user put it. ``_check_anchor`` re-engages
-        automatically once they scroll back to the bottom. No
-        ``event.stop()`` — the framework handler still runs and does
-        the actual scrolling, now unimpeded.
+        Kept because (a) removing it has the same shape of change as
+        keeping it and (b) if some future Textual refactor ever flips
+        the default, this keeps wheel-up behaving the way ChatPane
+        needs. No ``event.stop()`` — the framework handler still runs
+        after this and does the actual scroll.
         """
         if self._anchored and not self._anchor_released:
             self.release_anchor()
@@ -1000,7 +1062,11 @@ class ChatPane(VerticalScroll):
         """
         from textual.widgets import Static
         self._close_active_assistant()
-        widget = Static(renderable)
+        # Sanitise the renderable's segment stream — see
+        # ``_SanitizedRenderable`` docstring. This is the only content path
+        # into the ChatPane that doesn't go through ``ChatMessageWidget``,
+        # so it needs its own Layer-7 barrier.
+        widget = Static(_SanitizedRenderable(renderable))
         if scrollable:
             from textual.containers import VerticalScroll
             wrapper = VerticalScroll()
