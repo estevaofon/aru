@@ -256,6 +256,13 @@ class AruApp(App):
         "skills", "agents", "commands", "mcp", "yolo",
     }
 
+    # Layer 10 — interval (seconds) between belt-and-suspenders re-emits of
+    # the mouse-tracking enable sequences. 8s is the worst-case time-to-recover
+    # if a leaked DEC private-mode escape disables the wheel mid-turn; the
+    # cost is ~24 bytes per tick (four idempotent SGR sequences). See
+    # ``on_mount`` and ``_reenable_mouse_tracking`` for context.
+    _MOUSE_REENABLE_INTERVAL: float = 8.0
+
     def __init__(
         self,
         *,
@@ -375,6 +382,21 @@ class AruApp(App):
         if not self.is_headless:
             _push_terminal_title()
             _set_terminal_title(_compose_terminal_title(self.session))
+        # Layer 10 / 11 self-heal — periodic recovery of terminal state and
+        # input focus. Two failure classes share one tick:
+        # * mouse-enable lost (leaked DEC private-mode escape disabled the
+        #   wheel) — re-emit ``_enable_mouse_support`` (Layer 10).
+        # * input focus / visibility lost (a focusable panel mounted by
+        #   ``add_renderable`` grabbed focus, or an ``InlineChoicePrompt``
+        #   left ``#input.-hidden`` stuck because its callback raised) —
+        #   reassert the prompt as focused-and-visible (Layer 11).
+        # Both checks are idempotent on a healthy app and skipped under
+        # headless tests where there's no live driver to talk to.
+        if not self.is_headless:
+            self.set_interval(
+                self._MOUSE_REENABLE_INTERVAL,
+                self._self_heal_terminal_state,
+            )
 
     def _replay_resumed_history(self, chat: ChatPane) -> None:
         """Render a resumed session's user/assistant text back into the chat.
@@ -1069,23 +1091,114 @@ class AruApp(App):
             except Exception:
                 pass
             # Layer 9 self-heal — re-assert Textual's mouse-tracking
-            # sequences at every turn boundary. If any content path
-            # emitted a rogue DEC private-mode escape during the turn
-            # (``\x1b[?1000l`` or similar) the terminal would have
-            # silently disabled wheel reporting for every scroll area
-            # in the app, with no way for us to detect it. Calling the
-            # driver's enable-mouse path writes four short SGR sequences
-            # (``?1000h`` / ``?1003h`` / ``?1015h`` / ``?1006h``) and
-            # restores wheel input no matter what corrupted the state.
-            # Idempotent when mouse tracking was never disabled. See the
-            # Layer 9 post-mortem at the top of
-            # ``aru/tui/widgets/chat.py`` for the full analysis.
-            try:
-                driver = self._driver
-                if driver is not None:
-                    driver._enable_mouse_support()
-            except Exception:
-                pass
+            # sequences at the turn boundary. See ``_reenable_mouse_tracking``
+            # for the rationale; here we eagerly recover the moment the
+            # turn ends so the user's first post-turn scroll always works,
+            # without waiting for the periodic Layer 10 tick.
+            self._reenable_mouse_tracking()
+
+    def _reenable_mouse_tracking(self) -> None:
+        """Re-emit Textual's mouse-tracking enable sequences (idempotent).
+
+        Calls the active driver's ``_enable_mouse_support`` which writes
+        four short SGR sequences (``?1000h`` / ``?1003h`` / ``?1015h`` /
+        ``?1006h``). They re-arm X10 mouse reporting at the terminal level
+        so a leaked ``\\x1b[?1000l`` (or any other DEC private-mode escape
+        that disabled wheel input) is recovered from automatically.
+        Idempotent — sending an enable when tracking is already on is a
+        documented no-op on every emulator.
+        Called from two sites:
+        * ``_run_turn`` finally-clause (Layer 9) — eager recovery at every
+          turn boundary so the first post-turn scroll always works.
+        * ``_self_heal_terminal_state`` periodic tick (Layer 10) — recovers
+          mid-turn corruption (e.g. a leaked escape in panel content)
+          within ``_MOUSE_REENABLE_INTERVAL`` instead of leaving the wheel
+          dead until the (potentially long) turn finishes.
+        Wrapped in ``try/except`` because the driver may be ``None`` in
+        headless / test mode and the private method's exact name could
+        shift in a future Textual; better to no-op silently than crash.
+        """
+        try:
+            driver = self._driver
+            if driver is not None:
+                driver._enable_mouse_support()
+        except Exception:
+            pass
+
+    def _self_heal_terminal_state(self) -> None:
+        """Periodic recovery of mouse tracking and input focus (Layers 10 + 11).
+
+        Two failure classes that the tick recovers from:
+
+        1. **Terminal mouse-tracking lost.** Layer 9 already re-enables at
+           the turn boundary; this catches mid-turn corruption so the
+           wheel comes back within ``_MOUSE_REENABLE_INTERVAL`` instead
+           of waiting for the agent to finish.
+        2. **Input prompt invisible or unfocused** when nothing else
+           legitimately owns it. Three concrete scenarios this fixes:
+           * an ``InlineChoicePrompt`` callback raised before
+             ``on_unmount`` ran, leaving ``#input.-hidden`` stuck;
+           * a focusable panel mounted by ``add_renderable`` (pre-Layer-11
+             behaviour) grabbed focus and never released it;
+           * an exception during ``finalize_assistant_message`` cancelled
+             a focus-restore that ``_run_turn`` would normally do.
+
+        We only intervene when **no modal is on top** (modal owns input,
+        ``len(self.screen_stack) <= 1``) and **no ``InlineChoicePrompt``
+        is currently mounted** (the inline prompt legitimately steals
+        focus and hides the input by design — touching it mid-flight
+        would steal back from the user). When both conditions hold, we
+        treat the input as the canonical focus target.
+        """
+        # Layer 10 — mouse tracking.
+        self._reenable_mouse_tracking()
+
+        # Layer 11 — input watchdog. Skip if a modal is on top: the modal
+        # is the legitimate input owner and the underlying ``Input`` is
+        # not part of the active focus chain.
+        try:
+            if len(self.screen_stack) > 1:
+                return
+        except Exception:
+            return
+
+        # Skip if an ``InlineChoicePrompt`` is currently mounted: it has
+        # explicitly hidden the input and owns the focus while waiting
+        # for the user's choice. ``query`` returns an empty list when the
+        # widget tree has no match, so the truth-test is safe.
+        try:
+            from aru.tui.widgets.inline_choice import InlineChoicePrompt
+            if list(self.query(InlineChoicePrompt)):
+                return
+        except Exception:
+            pass
+
+        # Recover ``#input`` if it's stuck hidden (the ``-hidden`` class
+        # comes off only inside ``InlineChoicePrompt._toggle_input``; if
+        # that didn't run because the callback raised, the user is
+        # stranded with no visible prompt). ``remove_class`` on a class
+        # that isn't applied is a no-op, so the unconditional call is safe.
+        try:
+            inp = self.query_one(Input)
+        except Exception:
+            return
+        try:
+            if inp.has_class("-hidden"):
+                inp.remove_class("-hidden")
+        except Exception:
+            pass
+
+        # Re-focus only when *nothing* currently has focus. We deliberately
+        # do NOT yank focus away from a sidebar / scrollback / search
+        # screen the user navigated to themselves — that would fight
+        # legitimate keyboard navigation. The ``focused is None`` guard
+        # narrows the recovery to the ghost-focus state we actually
+        # observed in the bug.
+        try:
+            if self.screen.focused is None:
+                inp.focus()
+        except Exception:
+            pass
 
     # ── Bus wiring — ToolsPane + StatusPane subscribe to plugin events ──
 

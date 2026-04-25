@@ -8,6 +8,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
 
+from aru.tui.sanitize import sanitize_for_terminal
+
 
 class ConfirmModal(ModalScreen[bool]):
     """Yes / No dialog. ``dismiss(True)`` on yes, ``dismiss(False)`` on no.
@@ -53,7 +55,8 @@ class ConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
-            yield Label(self._prompt, id="confirm-prompt")
+            # Strip C0 controls — see Layer 10 in chat.py post-mortem.
+            yield Label(sanitize_for_terminal(self._prompt), id="confirm-prompt")
             with Horizontal(id="confirm-buttons"):
                 yield Button(
                     "Yes",

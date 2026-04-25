@@ -8,6 +8,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label
 
+from aru.tui.sanitize import sanitize_for_terminal
+
 
 class TextInputModal(ModalScreen[str | None]):
     """Single-line text prompt. ``dismiss(str)`` on Enter, ``dismiss(None)``
@@ -49,7 +51,8 @@ class TextInputModal(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="text-box"):
-            yield Label(self._prompt, id="text-prompt")
+            # Strip C0 controls — see Layer 10 in chat.py post-mortem.
+            yield Label(sanitize_for_terminal(self._prompt), id="text-prompt")
             yield Input(
                 value=self._default,
                 placeholder=self._placeholder,

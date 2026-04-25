@@ -12,6 +12,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
+from aru.tui.sanitize import SanitizedRenderable, sanitize_for_terminal
+
 
 class ChoiceModal(ModalScreen[int | None]):
     """Numbered option menu. ``dismiss(int)`` returns the chosen index.
@@ -74,12 +76,27 @@ class ChoiceModal(ModalScreen[int | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="choice-box"):
             if self._title:
-                yield Label(self._title, id="choice-title")
+                # Sanitise: title may include agent-generated text (plan name,
+                # rejection reason, tool label) which can carry C0 escapes
+                # that would disable mouse tracking globally — see Layer 10
+                # in the chat.py post-mortem.
+                yield Label(
+                    sanitize_for_terminal(self._title),
+                    id="choice-title",
+                )
             if self._details is not None:
-                yield Static(self._details, id="choice-details")
+                # ``details`` is the diff preview / plan summary panel.
+                # Diffs over file content readily contain escape bytes when
+                # the file does (colored scripts, captured terminal output),
+                # making this the most likely entry point for the bug
+                # the periodic re-enable timer recovers from.
+                yield Static(
+                    SanitizedRenderable(self._details),
+                    id="choice-details",
+                )
             yield OptionList(
                 *[
-                    Option(label, id=str(i))
+                    Option(sanitize_for_terminal(label), id=str(i))
                     for i, label in enumerate(self._options)
                 ],
                 id="choice-options",

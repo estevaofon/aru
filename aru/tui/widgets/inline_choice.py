@@ -27,6 +27,8 @@ from textual.widget import Widget
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
+from aru.tui.sanitize import sanitize_for_terminal
+
 
 class InlineChoicePrompt(Widget):
     """Approval prompt rendered as a bordered widget in the ChatPane flow."""
@@ -82,13 +84,18 @@ class InlineChoicePrompt(Widget):
         self._fired = False
 
     def compose(self) -> ComposeResult:
+        # Sanitise every caller-supplied string — title, hint, and option
+        # labels can carry text from the agent, a tool result, or a plan
+        # summary, all of which may contain raw C0 escapes that would
+        # disable mouse tracking globally if they reached the terminal.
+        # Same boundary as ``ChoiceModal``; see Layer 10 in chat.py.
         if self._title:
-            yield Label(self._title, classes="title")
+            yield Label(sanitize_for_terminal(self._title), classes="title")
         if self._hint:
-            yield Label(self._hint, classes="hint")
+            yield Label(sanitize_for_terminal(self._hint), classes="hint")
         yield OptionList(
             *[
-                Option(label, id=str(i))
+                Option(sanitize_for_terminal(label), id=str(i))
                 for i, label in enumerate(self._options)
             ],
         )

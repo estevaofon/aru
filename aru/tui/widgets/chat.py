@@ -213,6 +213,138 @@ Treat as a ninth layer: defence-in-depth against terminal-state
 corruption. Prong 1 plugs the last known-possible leak inside our
 code; prong 2 recovers even if something outside our reach drops
 the state anyway.
+
+----
+
+Post-mortem — "wheel still dies after edits / option prompts" (2026-04-24,
+``fix/scroll-analysis`` continued)
+---------------------------------------------------------------------
+**Symptom:** users reported that the wheel-dead bug reproduces most
+often **right after a file edit was approved** or **while picking an
+option in a modal**, rather than only at end-of-turn. Layers 7 + 9
+already cover ``ChatMessageWidget.buffer`` and ``add_renderable``,
+but the bug clearly fired through some content path neither of those
+guarded.
+
+**Cause:** the Layer 9 audit had a blind spot — the *modal screens*.
+``ChoiceModal`` (the approval prompt for plan / edit / permission),
+``ConfirmModal``, and ``TextInputModal`` all built their visible
+content from raw caller-supplied strings:
+
+* ``aru/tui/screens/choice.py:77`` — ``Label(self._title)``
+* ``aru/tui/screens/choice.py:79`` — ``Static(self._details)``
+  (the **diff preview** for edit approvals)
+* ``aru/tui/screens/confirm.py:56`` — ``Label(self._prompt)``
+* ``aru/tui/screens/text_input.py:52`` — ``Label(self._prompt)``
+
+The ``details`` panel of ``ChoiceModal`` is the obvious gun — it's
+where the unified diff goes when the user is asked to approve an
+``edit_file``. Diffs over file content faithfully reproduce whatever
+bytes were in the file; a colored shell script, a captured terminal
+recording, or any binary-ish artifact saved as text trivially carries
+``\\x1b[?1000l`` straight into the diff and onto the terminal. That
+matches the user's reported pattern exactly: "wheel dies after I
+approve an edit".
+
+**Two-prong fix:**
+
+1. **Lift the Layer 7/9 helpers into a shared module.**
+   ``aru/tui/sanitize.py`` now exports ``sanitize_for_terminal`` and
+   ``SanitizedRenderable``; ``chat.py`` imports them with the same
+   names it had locally so nothing inside this file changes
+   semantically. The four modal compose sites now apply the same
+   barrier — ``Label(sanitize_for_terminal(self._prompt))`` for
+   plain-text prompts and ``Static(SanitizedRenderable(self._details))``
+   for arbitrary renderables. Any future modal added to the TUI
+   should follow this convention; the helper module is the canonical
+   location.
+
+2. **Periodic mouse-tracking re-emit (``AruApp._reenable_mouse_tracking``).**
+   The Layer 9 turn-boundary recovery only fires after the agent
+   finishes. A diff preview shown mid-turn can disable the wheel for
+   minutes if the agent is doing a long batch of edits. The new
+   ``set_interval(_MOUSE_REENABLE_INTERVAL=8s, ...)`` in
+   ``on_mount`` re-emits the four enable sequences every eight
+   seconds regardless of turn state — ~24 bytes per tick, idempotent
+   on a healthy terminal. Worst-case time-to-recover is bounded at 8s
+   instead of "until the agent stops working".
+
+Treat as a tenth layer. Layer 10 differs from 9 in scope: 9 plugs
+known leaks at known boundaries, 10 assumes leaks will keep being
+found (Textual stack, plugin renderables, a future modal) and recovers
+on a clock independently of any code path noticing. The pair is the
+intended steady state — not a bug-of-the-week, a structural answer to
+a class of bug we cannot fully prevent without rewriting how arbitrary
+renderables reach Rich's console.
+
+----
+
+Post-mortem — "input loses focus mid-stream in YOLO" (2026-04-25,
+``fix/scroll-analysis`` continued)
+---------------------------------------------------------------------
+**Symptom:** during long YOLO-mode runs (no permission prompts, no
+modals), the user reported that the input box stops accepting
+keystrokes mid-implementation. Often coincident with the wheel-dead
+signature, but distinct: typing goes nowhere even before any visible
+panel suggests focus moved.
+
+**What it was not:** the Layer 10 audit was scoped to *terminal-state*
+corruption (mouse tracking turned off by stray escape bytes). The
+focus issue is a separate failure mode — the same content paths that
+leak C0 bytes also mount focusable widgets, and Textual's default
+focus chain happily includes them.
+
+**Two compounding causes:**
+
+1. **``add_renderable(scrollable=True)`` mounted a focus-eligible
+   ``VerticalScroll``.** ``VerticalScroll.can_focus`` defaults to
+   ``True`` so users can Tab into a panel for keyboard scrolling.
+   Inside the chat flow, where every plan/task/diff render adds a
+   wrapper, this turns content panels into focus competitors with the
+   ``Input``. A single Tab during streaming, a focus restoration
+   after a modal closes, or any Textual-internal focus rotation could
+   land on a panel and leave the input dead. Fix: ``wrapper.can_focus
+   = False`` on every scrollable wrapper. Mouse-wheel scrolling inside
+   the panel still works because Textual routes wheel events via the
+   pointer, not the focus chain.
+
+2. **``InlineChoicePrompt`` had no recovery if its callback raised.**
+   The widget hides ``#input`` on mount and restores it on unmount.
+   If the ``on_choice`` callback throws (or the widget is removed by a
+   parent before lifecycle fires), ``-hidden`` stays applied and the
+   input is invisible until the next mount/unmount cycle — possibly
+   never. Layer 11 doesn't fix the underlying lifecycle issue
+   (callbacks should be exception-safe in their own right) but adds a
+   recovery loop: the periodic tick checks for stuck state and clears
+   it.
+
+**Layer 11 — input watchdog, sharing the Layer 10 timer.**
+``AruApp._self_heal_terminal_state`` extends ``_reenable_mouse_tracking``
+to also enforce input invariants when the inline-prompt path is not
+legitimately active:
+
+* If a modal screen is on top → skip (modal owns input).
+* If an ``InlineChoicePrompt`` is mounted → skip (it owns focus by
+  design while waiting for a choice).
+* Otherwise: clear stuck ``-hidden`` from ``#input`` and refocus it
+  iff ``screen.focused is None``. The ``focused is None`` guard is
+  intentional — it does NOT fight legitimate Tab navigation to the
+  sidebar / scrollback / search screen. We only recover from the
+  ghost-focus state where Textual's chain has nobody.
+
+Layer 11 also extends the modal-sanitisation pattern to
+``InlineChoicePrompt``, which had been overlooked by Layer 10 — its
+``Label(self._title)`` / ``Option(label)`` calls now go through
+``sanitize_for_terminal`` before reaching the widget tree.
+
+**Why we keep adding layers and not rewriting the architecture:** each
+layer addresses a distinct *signal* the user reported — and each one
+has narrow, idempotent recovery semantics. Rewriting the chat to use
+a single virtualised text buffer (à la Textual's recent Markdown
+virtualisation experiments) would close some of these by structure,
+but at the cost of every other property the chat currently has
+(selection, copy, mid-stream insertion of arbitrary Rich panels, plan
+mounts). Layered defences are cheap and additive; the rewrite is not.
 """
 
 from __future__ import annotations
@@ -233,6 +365,11 @@ from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Static
 
+from aru.tui.sanitize import (
+    SanitizedRenderable as _SanitizedRenderable,
+    sanitize_for_terminal as _sanitize_for_terminal,
+)
+
 
 # Reference-definition line: ``[label]: href`` (optional leading 0–3 spaces).
 # Presence of *any* reference definition anywhere in the snapshot disables the
@@ -240,64 +377,6 @@ from textual.widgets import Static
 # whole-buffer path still handles references correctly because ``markdown-it``
 # sees the full ``state.env`` in one parse.
 _REF_DEF_RE = re.compile(r"^[ ]{0,3}\[[^\]\n]+\]:\s", re.MULTILINE)
-
-
-# Strip ASCII control characters (0x00–0x1F plus DEL 0x7F) from any content
-# about to be rendered to the terminal, EXCEPT ``\n`` and ``\t`` which are
-# semantically meaningful to markdown-it, Rich, and Textual. Rich's ``Text``
-# passes escape bytes through verbatim, so if a streamed model reply or a
-# tool label contains ``\x1b[?1000l`` (or any other DEC private-mode escape),
-# the terminal receives it directly and globally disables mouse tracking —
-# at which point every scroll area in the TUI stops responding to the
-# mouse wheel (keyboard still works, which is why the bug presents as
-# "only scroll froze"). Models that talk about terminal control sequences
-# or tools that echo subprocess output are the realistic injection paths.
-_CTRL_CHAR_TRANSLATION = {c: None for c in range(32) if chr(c) not in ("\n", "\t")}
-_CTRL_CHAR_TRANSLATION[0x7F] = None
-
-
-def _sanitize_for_terminal(raw: str) -> str:
-    """Remove non-printable control chars so rogue ANSI escapes can't reach the tty.
-
-    Keeps ``\\n`` and ``\\t``; drops everything else in the C0 range plus DEL.
-    Cheap: ``str.translate`` is implemented in C and runs in microseconds for
-    multi-KB inputs. Applied at every boundary where chat content becomes a
-    Rich renderable.
-    """
-    return raw.translate(_CTRL_CHAR_TRANSLATION)
-
-
-class _SanitizedRenderable:
-    """Wraps a Rich renderable so its output segments are stripped of C0 bytes.
-
-    ``_sanitize_for_terminal`` covers every string passing through
-    ``ChatMessageWidget.buffer``. Arbitrary Rich renderables handed to
-    ``ChatPane.add_renderable`` (plan panels, task lists, diff previews, the
-    startup logo) skip that widget and mount as a plain ``Static(renderable)``
-    — so a rogue ``\\x1b[?1000l`` inside a task description, a panel title, or
-    subprocess output echoed into a panel would flow straight through Rich
-    segments to Textual's compositor and onto the terminal, disabling mouse
-    tracking globally (Layer 7 signature).
-
-    This wrapper closes that gap: ``console.render`` yields segments from the
-    inner renderable, we strip C0 bytes from any segment whose ``.text``
-    contains them, and re-emit the cleaned stream. Rich's ``Segment`` is a
-    ``NamedTuple`` so ``seg._replace(text=...)`` is a cheap immutable swap.
-    Unchanged segments are re-emitted unmodified — the hot path is a single
-    ``str.translate`` on segment text which typically no-ops.
-    """
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def __rich_console__(self, console: Any, options: Any) -> Any:
-        for seg in console.render(self._inner, options):
-            if seg.text:
-                clean = _sanitize_for_terminal(seg.text)
-                if clean != seg.text:
-                    yield seg._replace(text=clean)
-                    continue
-            yield seg
 
 
 def _scan_fences(text: str) -> tuple[int, int]:
@@ -1080,6 +1159,17 @@ class ChatPane(VerticalScroll):
             # row bleeding outside the box.
             wrapper.styles.padding = 0
             wrapper.styles.margin = 0
+            # ``VerticalScroll`` is focusable by default so users can Tab
+            # into it for keyboard scrolling. Inside the chat flow that's
+            # the wrong default — the user navigates via the outer
+            # ``ChatPane`` (whole-conversation scroll) and the wheel works
+            # over an inner panel without focus thanks to Textual's
+            # pointer-based wheel routing. Leaving these focusable makes
+            # them race the ``Input`` for focus during plan/task/diff
+            # mounts, with the symptom that typing stops reaching the
+            # prompt mid-stream. ``can_focus = False`` removes them from
+            # the focus chain entirely. (Layer 11 in the chat.py post-mortem.)
+            wrapper.can_focus = False
             self.mount(wrapper)
             wrapper.mount(widget)
         else:
