@@ -1,16 +1,32 @@
-"""Layer 12 — mouse-tracking recovery: off-then-on shake + keypress trigger.
+"""Layer 12 / 14 — terminal-state recovery: off-then-on shake + keypress trigger.
 
-Background: ``aru/tui/widgets/chat.py`` post-mortem under "self-heal didn't
-recover the wheel" (2026-04-25). Layers 9/10 emitted only the four ``?...h``
-enable sequences; if ConPTY's enable-cache or the driver's gate suppressed
-the write, no recovery happened. Layer 12 emits a forced ``?...l → ?...h``
-state transition via ``driver.write`` and adds a per-keypress trigger so the
-user gets sub-second recovery instead of waiting for the periodic tick.
+Background: ``aru/tui/widgets/chat.py`` post-mortem traces the evolution.
 
-These tests pin down the observable contracts:
-* the eight DEC private-mode sequences are emitted in disable→enable order;
-* the keypress trigger calls into ``_reenable_mouse_tracking`` debounced by
-  ``_KEYPRESS_REARM_DEBOUNCE``.
+Layer 12 (2026-04-25) introduced an off-then-on shake of the four mouse
+DEC private modes via ``driver.write`` to defeat ConPTY's enable cache
+and bypass the driver's ``_mouse`` gate. That helped some sessions but
+the user reported (``fix/scroll-analysis3``) that mouse-only shake did
+not recover the wheel after Windows display sleep / wake — the wake
+appears to corrupt more than just mouse, and on the input side
+``ENABLE_VIRTUAL_TERMINAL_INPUT`` may also drop, so no stdout escape
+recovers wheel events.
+
+Layer 14 (2026-04-25, after Ctrl+R proved the heavy shake works)
+promoted ``_reenable_mouse_tracking`` from mouse-only to:
+* re-assert ``ENABLE_VIRTUAL_TERMINAL_INPUT`` on stdin (Windows), and
+* shake the full DEC private-mode set from
+  ``WindowsDriver.start_application_mode`` (mouse + focus-events +
+  bracketed-paste).
+
+These tests pin the observable contracts of the promoted method:
+* the twelve DEC private-mode sequences are emitted in disable→enable
+  order with one flush;
+* headless/no-driver path is a quiet no-op;
+* the keypress trigger calls into ``_reenable_mouse_tracking`` debounced
+  by ``_KEYPRESS_REARM_DEBOUNCE`` (the trigger itself is broken in
+  practice — ``Input._on_key`` consumes printable keys before
+  ``App.on_key`` sees them — but the debounce contract is what this
+  test pins).
 """
 
 from __future__ import annotations
@@ -36,12 +52,19 @@ class _RecordingDriver:
 
 @pytest.mark.asyncio
 async def test_reenable_mouse_tracking_emits_off_then_on_shake():
-    """Layer 12: ``?...l`` (4) is emitted *before* ``?...h`` (4), then flush.
+    """Layer 14: full DEC mode set, off→on order, single flush.
 
     The off→on shake forces ConPTY's enable-cache through a state
-    transition, defeating the case where its cache claims ``?1000`` is
+    transition, defeating the case where its cache claims a mode is
     already ``h`` and suppresses the propagated write. Order matters —
     if the on sequences came first the cache could no-op them.
+
+    Layer 12 covered four mouse modes only; Layer 14 widens the shake
+    to mouse + focus-events (``?1004``) + bracketed-paste (``?2004``) —
+    the full set ``WindowsDriver.start_application_mode`` enables at
+    boot. User confirmation on 2026-04-25 was that the mouse-only shake
+    did not recover after Windows display sleep/wake but the full shake
+    via Ctrl+R did, which is the signal that justified the promotion.
     """
     from aru.tui.app import AruApp
 
@@ -59,12 +82,16 @@ async def test_reenable_mouse_tracking_emits_off_then_on_shake():
         "\x1b[?1003l",
         "\x1b[?1015l",
         "\x1b[?1006l",
+        "\x1b[?1004l",
+        "\x1b[?2004l",
     ]
     expected_on = [
         "\x1b[?1000h",
         "\x1b[?1003h",
         "\x1b[?1015h",
         "\x1b[?1006h",
+        "\x1b[?1004h",
+        "\x1b[?2004h",
     ]
     assert rec.writes == expected_off + expected_on
     # One flush at the end — the ``WriterThread`` bufferises everything
@@ -90,6 +117,12 @@ async def test_keypress_rearm_is_debounced(monkeypatch):
     Two keystrokes within the debounce window should produce exactly one
     ``_reenable_mouse_tracking`` invocation; a third keystroke after the
     window elapses should produce a second.
+
+    The trigger itself is broken in production (``Input._on_key``
+    consumes printable keys before ``App.on_key`` sees them), but this
+    test pins the debounce *primitive* contract — useful if a future
+    Layer wires the rearm to ``on_input_changed`` (which bubbles via
+    Message dispatch and isn't absorbed by Input).
     """
     from aru.tui import app as app_mod
     from aru.tui.app import AruApp
@@ -115,6 +148,7 @@ async def test_keypress_rearm_is_debounced(monkeypatch):
     fake_now[0] += 0.5
     app._maybe_rearm_mouse_on_keypress()
 
-    # Each fired call emits 8 sequences (4 off + 4 on). Two fires = 16.
-    assert len(rec.writes) == 16
+    # Each fired call emits 12 sequences (Layer 14 full mode set: 6 off
+    # + 6 on). Two fires = 24.
+    assert len(rec.writes) == 24
     assert rec.flushes == 2

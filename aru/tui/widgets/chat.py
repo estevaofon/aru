@@ -535,6 +535,72 @@ shake is what works and Layers 9/10/12 should be upgraded — that's
 Layer 14's signal. If even ``Ctrl+R`` doesn't recover, the hypothesis
 shifts to "VT escapes are not enough, need ``SetConsoleMode`` direct
 or alt-screen toggle", which is Layer 14 in the other direction.
+
+----
+
+Post-mortem — "Ctrl+R recovered the wheel; promote the shake"
+(2026-04-25, ``fix/scroll-analysis3`` continued)
+---------------------------------------------------------------------
+**Signal:** the user reported, on the same day Layer 13 shipped, that
+the wheel went dead during a session and pressing ``Ctrl+R`` brought
+it back. That is the exact branch the Layer 13 post-mortem set up:
+"if Ctrl+R reliably recovers but the automatic paths still don't,
+that proves the strong shake is what works and Layers 9/10/12 should
+be upgraded".
+
+**Layer 14 — promote the strong shake into ``_reenable_mouse_tracking``.**
+Single change: the body of ``AruApp._reenable_mouse_tracking`` now does
+what Layer 13's ``action_recover_terminal`` did inline — re-assert
+``ENABLE_VIRTUAL_TERMINAL_INPUT`` on stdin (Windows) plus off-then-on
+shake of the full DEC private-mode set (mouse + focus-events +
+bracketed-paste). Every existing caller benefits without further
+changes:
+
+* **Layer 9** (``_run_turn`` finally clause) — every turn boundary
+  now runs the proven recovery, so a wheel that died mid-turn is back
+  before the user reaches for it.
+* **Layer 10** (3s periodic tick via ``_self_heal_terminal_state``)
+  — autonomous recovery within 3 seconds of the wheel dying, with
+  the shake that actually works.
+* **Layer 12** (per-keystroke trigger via ``_maybe_rearm_mouse_on_keypress``)
+  — still broken in production because ``Input._on_key`` consumes
+  printable keys before ``App.on_key`` sees them, so the trigger
+  never actually fires. Layer 14 doesn't fix this; the rearm primitive
+  is still pinned by tests for the day a future Layer wires it to
+  ``on_input_changed`` (which uses Message bubbling, not key events).
+
+``action_recover_terminal`` (Ctrl+R) now delegates the shake to
+``_reenable_mouse_tracking`` and adds two extras unique to the manual
+path: ``self.refresh()`` for immediate visible repaint and the
+``[Ctrl+R] Terminal modes re-armed`` chat message. Periodic / turn-
+boundary callers stay silent — running the strong shake without
+spamming the chat or forcing a redraw every 3s.
+
+**Cost of the upgrade:** every periodic tick emits 12 escapes (~108
+bytes) + one ``GetConsoleMode``/``SetConsoleMode`` syscall pair on
+Windows instead of 8 escapes (~64 bytes) + nothing. At 3s cadence
+that is ~36 B/s plus microseconds of syscall — negligible.
+
+**Risk acknowledged but not seen:** the off→on transition on
+``?1004`` (focus events) could in theory cause Windows Terminal to
+emit a spurious focus event during the gap. Idempotent in practice
+on healthy terminals (``?1004l → ?1004h`` should leave focus state
+unchanged), but if a future signal points at "focus events firing
+unexpectedly every 3s", the fix is to keep ``?1004`` and ``?2004`` in
+the Ctrl+R-only path and revert the periodic shake to mouse-only.
+
+**What Layer 14 does NOT change:**
+
+* The Layer 12 keystroke trigger remains broken — ``Input._on_key``
+  still absorbs printable keys, so typing in the prompt never
+  triggers recovery. Fix candidate for a future layer: hook
+  ``on_input_changed`` instead of ``on_key`` (uses Message bubbling
+  which isn't blocked by widget consumption).
+* The underlying emitter that disables terminal mouse tracking is
+  still unidentified — same as every layer back to 7.
+* No new automatic trigger beyond the existing 3s tick + turn
+  boundary. Hooking ``AppFocus`` for wake-from-display-blank
+  detection is a follow-up if Layer 14 still misses cases.
 """
 
 from __future__ import annotations

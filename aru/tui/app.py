@@ -1128,33 +1128,18 @@ class AruApp(App):
             # without waiting for the periodic Layer 10 tick.
             self._reenable_mouse_tracking()
 
-    # Layer 12 — DEC private-mode sequences for mouse tracking. Defined
-    # at class scope so both the off-then-on shake below and any future
-    # caller (Click handler, focus event) can reuse the exact same set
-    # without drift.
-    _MOUSE_DISABLE_SEQS: tuple[str, ...] = (
-        "\x1b[?1000l",
-        "\x1b[?1003l",
-        "\x1b[?1015l",
-        "\x1b[?1006l",
-    )
-    _MOUSE_ENABLE_SEQS: tuple[str, ...] = (
-        "\x1b[?1000h",
-        "\x1b[?1003h",
-        "\x1b[?1015h",
-        "\x1b[?1006h",
-    )
-
-    # Layer 13 — full set of DEC private modes that ``WindowsDriver
+    # Layer 14 — full set of DEC private modes that ``WindowsDriver
     # .start_application_mode`` enables at boot, minus alt-screen
     # (``?1049``, not idempotent — would save/restore the display
     # buffer) and kitty-keyboard (``>1u``, terminal-specific, doesn't
-    # affect wheel). Used by ``action_recover_terminal`` (Ctrl+R) which
-    # does a stronger shake than ``_reenable_mouse_tracking``: the user
-    # report on 2026-04-25 was that the mouse-only shake doesn't recover
-    # after Windows display sleep/wake — likely because more than just
-    # mouse tracking dropped. Re-emitting the full mode set raises the
-    # odds of catching whatever the wake corrupted.
+    # affect wheel). Layer 13 introduced this set as a Ctrl+R-only
+    # heavy shake; user confirmation that Ctrl+R actually recovered
+    # the wheel after Windows display sleep/wake (2026-04-25) is the
+    # signal that the broader set is what works in practice — the
+    # mouse-only shake from Layer 12 was insufficient. Layer 14 promotes
+    # the full set into ``_reenable_mouse_tracking`` so every existing
+    # caller (Layer 9 turn boundary, Layer 10 periodic tick, Layer 12
+    # broken keypress) gets the proven recovery automatically.
     _FULL_MODE_DISABLE_SEQS: tuple[str, ...] = (
         "\x1b[?1000l",  # mouse VT200
         "\x1b[?1003l",  # any-event mouse
@@ -1173,61 +1158,75 @@ class AruApp(App):
     )
 
     def _reenable_mouse_tracking(self) -> None:
-        """Re-arm mouse tracking via an off-then-on shake (Layer 12).
+        """Re-arm terminal modes via console-mode re-assert + full-mode shake.
 
-        Pre-Layer-12 this method delegated to the driver's
-        ``_enable_mouse_support`` which writes four short SGR sequences
-        (``?1000h`` / ``?1003h`` / ``?1015h`` / ``?1006h``). That worked
-        when the terminal forwarded the writes verbatim, but the user
-        report on 2026-04-25 against
-        ``final-fantasy-9/.aru/sessions/b33dfb99`` was the wheel never
-        coming back even though Layer 9 (turn-boundary call) and Layer 10
-        (8s tick) both ran. Two failure modes the old code couldn't
-        recover from:
+        Single recovery primitive used by every layer: turn boundary
+        (Layer 9), periodic tick (Layer 10), keypress trigger (Layer 12,
+        broken — see chat.py post-mortem), and ``Ctrl+R`` action (Layer
+        13, which adds a refresh + chat message on top). The method
+        keeps its name (``_reenable_mouse_tracking``) for git-blame
+        continuity even though it now re-arms more than just mouse —
+        what it does is documented here, and the post-mortem in
+        chat.py traces the evolution from Layer 12 through Layer 14.
 
-        1. **ConPTY enable cache.** Windows ConPTY tracks DEC private-mode
-           state on its side and may treat ``?1000h`` as a no-op when its
-           cache says "already enabled" — even when the underlying
-           terminal lost the state. Sending ``?1000l`` first forces the
-           cache through a state transition so the subsequent ``?1000h``
-           is propagated.
-        2. **Driver-side gate.** ``WindowsDriver._enable_mouse_support``
-           opens with ``if not self._mouse: return`` (textual 8.2.4,
-           windows_driver.py:55). If a future Textual flips the gate
-           during shutdown / pause / alt-screen toggle, our recovery
-           silently no-ops. Going through ``driver.write`` bypasses the
-           gate and writes the bytes regardless.
+        Two failure modes the recovery handles:
 
-        Implementation: emit all four ``...l`` (off) sequences, then all
-        four ``...h`` (on) sequences, then flush. Eight short writes
-        (~64 bytes) bufferised into one terminal emit by ``WriterThread``.
-        Idempotent on a healthy terminal — the off→on cycle leaves the
-        final state identical to a single ``?1000h``, just with a
-        microscopic gap during the transition (no observable wheel-event
-        loss in practice).
+        1. **``ENABLE_VIRTUAL_TERMINAL_INPUT`` cleared on stdin (Windows).**
+           ``enable_application_mode`` (textual win32.py:179) sets this
+           flag at startup, but a display sleep / wake or other Windows
+           console state transition can clear it. While cleared,
+           ConPTY stops translating mouse / focus events into VT
+           sequences and *no* stdout escape we write can recover wheel
+           input. Re-asserting the flag additively (``current | flag``)
+           preserves any other input flags while ensuring VT input
+           translation is back on.
 
-        Called from three sites:
-        * ``_run_turn`` finally-clause (Layer 9) — eager recovery at every
-          turn boundary so the first post-turn scroll always works.
-        * ``_self_heal_terminal_state`` periodic tick (Layer 10) — recovers
-          mid-turn corruption within ``_MOUSE_REENABLE_INTERVAL``.
-        * ``on_key`` keypress trigger (Layer 12) — recovers the moment the
-          user touches the keyboard, since a keystroke is a strong signal
-          they noticed the wheel is dead.
+        2. **DEC private-mode state lost on the terminal side.** Layer
+           12 originally addressed this for mouse-only via an off-then-on
+           shake (``?1000l → ?1000h``) to defeat ConPTY's enable-cache.
+           Layer 14 widens the shake to the full set ``WindowsDriver
+           .start_application_mode`` enables: mouse (4 modes) + focus
+           events (``?1004``) + bracketed paste (``?2004``). 12 escapes
+           total off-then-on, ~108 bytes, one flush. Excluded:
+           alt-screen (not idempotent) and kitty-keyboard (terminal-
+           specific, doesn't affect wheel). The user report on
+           2026-04-25 confirmed the mouse-only shake didn't recover
+           the wheel after display wake but the full shake (via Ctrl+R)
+           did — Layer 14 promotes that proven recovery into the auto
+           path.
 
-        Wrapped in ``try/except`` because the driver may be ``None`` in
-        headless / test mode; we'd rather no-op silently than crash.
+        Cost per call: ~108 bytes + one ``GetConsoleMode`` +
+        ``SetConsoleMode`` syscall pair on Windows. At the 3s tick
+        rate that is ~36 B/s plus microseconds — negligible.
+
+        Wrapped in ``try/except`` everywhere because the driver may be
+        ``None`` in headless / test mode and the win32 import may fail
+        on non-Windows; we'd rather no-op silently than crash.
         """
+        if sys.platform == "win32":
+            try:
+                from textual.drivers.win32 import (
+                    ENABLE_VIRTUAL_TERMINAL_INPUT,
+                    get_console_mode,
+                    set_console_mode,
+                )
+                current = get_console_mode(sys.__stdin__)
+                set_console_mode(
+                    sys.__stdin__, current | ENABLE_VIRTUAL_TERMINAL_INPUT
+                )
+            except Exception:
+                pass
+
         try:
             driver = self._driver
             if driver is None:
                 return
-            for seq in self._MOUSE_DISABLE_SEQS:
+            for seq in self._FULL_MODE_DISABLE_SEQS:
                 try:
                     driver.write(seq)
                 except Exception:
                     pass
-            for seq in self._MOUSE_ENABLE_SEQS:
+            for seq in self._FULL_MODE_ENABLE_SEQS:
                 try:
                     driver.write(seq)
                 except Exception:
@@ -1484,80 +1483,30 @@ class AruApp(App):
     def action_recover_terminal(self) -> None:
         """Layer 13 — user-invoked terminal-state recovery (Ctrl+R).
 
-        Layers 9 (turn boundary), 10 (3s tick), and 12 (per-keystroke,
-        currently broken because ``Input._on_key`` absorbs printable
-        keys) all delegate to ``_reenable_mouse_tracking`` which only
-        re-emits the four mouse DEC private modes. The user report on
-        2026-04-25 against ``fix/scroll-analysis3`` is that none of
-        those paths recover the wheel after a Windows display sleep /
-        wake — sending mouse-only escapes is not enough.
+        Delegates the recovery sequence (Windows console-mode re-assert
+        + full DEC private-mode shake + flush) to
+        ``_reenable_mouse_tracking`` — that method now does the strong
+        shake for every layer (Layer 14 promotion), so Ctrl+R, the 3s
+        tick, and the turn-boundary call all run identical recovery
+        bytes. This action adds two extras unique to the manual path:
 
-        This action takes a stronger shape, in four steps:
-
-        1. **Re-assert ``ENABLE_VIRTUAL_TERMINAL_INPUT`` on stdin
-           (Windows only).** If the flag was cleared on the input pipe,
-           ConPTY stops translating mouse / focus events into VT
-           sequences and *no* escape we write to stdout fixes that.
-           Aditive (``current | flag``) so other input flags survive.
-
-        2. **Off-then-on shake of the FULL DEC mode set** from
-           ``WindowsDriver.start_application_mode`` (mouse +
-           focus-events + bracketed-paste). Excludes alt-screen
-           (``?1049``, not idempotent) and kitty-keyboard (``>1u``,
-           terminal-specific). 12 escapes total, ~108 bytes, one flush.
-
-        3. **``self.refresh()``** to force the compositor to redraw —
-           catches the case where Textual's view of the screen drifted
-           from the terminal's actual state.
-
-        4. **Visible chat message** so the user sees that the recovery
-           did execute. The user explicitly noted "não vi nenhum self
-           healing seu funcionar até agora" — silent recovery is
-           indistinguishable from no recovery, so we surface it.
+        * ``self.refresh()`` to force a compositor redraw — the
+          autonomous paths don't need this because the next paint
+          cycle handles it; Ctrl+R is interactive and the user wants
+          immediate visible confirmation.
+        * **Visible chat message** so the user sees the recovery did
+          execute. The user explicitly noted that silent recovery is
+          indistinguishable from no recovery, so we surface it on the
+          manual path. Periodic / turn-boundary callers stay silent
+          to avoid spamming the chat.
 
         Bound to ``Ctrl+R`` with ``priority=True`` so the binding fires
         regardless of focused widget. Bindings dispatch via Textual's
         binding system, not through ``_on_key``, so this path is immune
         to the ``Input._on_key → event.stop()`` problem that breaks
         Layer 12's keypress trigger.
-
-        What this does NOT fix: the underlying emitter that disables
-        terminal mouse tracking. It also requires a manual keystroke —
-        if Layer 13 proves the strong shake works, the next step is to
-        wire the same recovery into automatic triggers (resize / focus
-        regain / detect wake-from-sleep gap). Treat this as Layer 13:
-        a guaranteed-fire user-invoked recovery.
         """
-        if sys.platform == "win32":
-            try:
-                from textual.drivers.win32 import (
-                    ENABLE_VIRTUAL_TERMINAL_INPUT,
-                    get_console_mode,
-                    set_console_mode,
-                )
-                current = get_console_mode(sys.__stdin__)
-                set_console_mode(
-                    sys.__stdin__, current | ENABLE_VIRTUAL_TERMINAL_INPUT
-                )
-            except Exception:
-                pass
-
-        driver = self._driver
-        if driver is not None:
-            for seq in self._FULL_MODE_DISABLE_SEQS:
-                try:
-                    driver.write(seq)
-                except Exception:
-                    pass
-            for seq in self._FULL_MODE_ENABLE_SEQS:
-                try:
-                    driver.write(seq)
-                except Exception:
-                    pass
-            try:
-                driver.flush()
-            except Exception:
-                pass
+        self._reenable_mouse_tracking()
 
         try:
             self.refresh()
