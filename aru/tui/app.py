@@ -647,6 +647,27 @@ class AruApp(App):
         if text.startswith("/") and self._maybe_run_local_slash(text):
             return
 
+        # Shell escape: ``! <command>`` runs the command locally in the
+        # session cwd and streams output into the chat. Mirrors the REPL
+        # path in ``cli.py`` so users can do quick ``! git status`` or
+        # ``! ls`` without a round-trip to the agent. The leading ``!``
+        # must be followed by whitespace so plain text starting with ``!``
+        # (rare but possible) still reaches the agent.
+        if text.startswith("!"):
+            cmd = text[1:].lstrip()
+            if not cmd:
+                self.query_one(ChatPane).add_system_message(
+                    "Usage: ! <command>"
+                )
+                return
+            if self._busy:
+                self.query_one(ChatPane).add_system_message(
+                    "Busy — wait for the current task to finish."
+                )
+                return
+            self._dispatch_shell_command(cmd)
+            return
+
         if self._busy:
             self.query_one(ChatPane).add_system_message(
                 "Agent is busy — wait for the current turn to finish."
@@ -963,6 +984,7 @@ class AruApp(App):
             "  /clear           clear chat pane",
             "  /plan            toggle plan mode",
             "  /quit  /exit     save session and exit",
+            "  ! <command>      run a shell command (output streams to chat)",
             "",
             "Shortcuts:",
             "  Ctrl+Q           quit",
@@ -1127,6 +1149,121 @@ class AruApp(App):
             # turn ends so the user's first post-turn scroll always works,
             # without waiting for the periodic Layer 10 tick.
             self._reenable_mouse_tracking()
+
+    # ── Shell escape (``! <command>``) ───────────────────────────────
+
+    def _dispatch_shell_command(self, command: str) -> None:
+        """Run ``command`` in the session cwd and stream output to chat.
+
+        Parity with the REPL's ``! <cmd>`` path in ``cli.py``: we render
+        a syntax-highlighted header, run the command via the system
+        shell, then push stdout/stderr (interleaved) into a single
+        system message that grows as lines arrive. The exit code is
+        appended on completion so the user can tell success from
+        failure.
+
+        Output is NOT persisted to ``session.history`` — the agent never
+        sees ``!`` shell runs (it has its own ``bash`` tool). This is a
+        user convenience, not part of the conversation.
+        """
+        chat = self.query_one(ChatPane)
+        try:
+            from rich.panel import Panel
+            from rich.syntax import Syntax
+            chat.add_renderable(Panel(
+                Syntax(command, "bash", theme="monokai"),
+                title="[bold]Shell[/bold]",
+                border_style="dim",
+                expand=False,
+            ))
+        except Exception:
+            chat.add_system_message(f"$ {command}")
+
+        from aru.tui.widgets.chat import ChatMessageWidget
+        live = ChatMessageWidget(role="system", initial="")
+        chat.mount(live)
+        self._busy = True
+        try:
+            self.query_one(ThinkingIndicator).busy = True
+        except Exception:
+            pass
+        self.run_worker(
+            self._run_shell_command(command, live),
+            name="shell-cmd",
+            exclusive=False,
+            group="shell",
+        )
+
+    async def _run_shell_command(
+        self, command: str, live: "ChatMessageWidget"
+    ) -> None:
+        """Spawn ``command`` and stream output into ``live`` line by line."""
+        import asyncio
+
+        try:
+            from aru.runtime import get_cwd
+            cwd = get_cwd()
+        except Exception:
+            import os
+            cwd = os.getcwd()
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+        except Exception as exc:
+            live.buffer = f"[shell error] {type(exc).__name__}: {exc}"
+            self._busy = False
+            try:
+                self.query_one(ThinkingIndicator).busy = False
+            except Exception:
+                pass
+            return
+
+        assert proc.stdout is not None
+        buffer_lines: list[str] = []
+        try:
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                buffer_lines.append(line)
+                # Cap displayed buffer so a runaway command doesn't grow
+                # the widget until the chat pane stalls. Mirrors the
+                # ``bash`` tool's 10K-char output truncation.
+                joined = "\n".join(buffer_lines)
+                if len(joined) > 10_000:
+                    head = joined[:10_000]
+                    live.buffer = head + "\n... (truncated, still running)"
+                else:
+                    live.buffer = joined
+            await proc.wait()
+        except asyncio.CancelledError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            live.buffer = (live.buffer or "") + "\n[interrupted]"
+            raise
+        except Exception as exc:
+            live.buffer = (live.buffer or "") + (
+                f"\n[shell error] {type(exc).__name__}: {exc}"
+            )
+        finally:
+            rc = proc.returncode if proc.returncode is not None else "?"
+            tail = f"\n[exit {rc}]"
+            current = live.buffer or ""
+            if not current.endswith(tail):
+                live.buffer = current + tail
+            self._busy = False
+            try:
+                self.query_one(ThinkingIndicator).busy = False
+            except Exception:
+                pass
 
     # Layer 14 — full set of DEC private modes that ``WindowsDriver
     # .start_application_mode`` enables at boot, minus alt-screen
