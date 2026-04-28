@@ -121,6 +121,14 @@ class StreamSink(Protocol):
         """Best-effort sideband user message (warnings etc.)."""
         ...
 
+    def on_error(self, message: str) -> None:
+        """Terminal error — runner caught an exception from the agent run.
+
+        REPL renders via Rich console; TUI must route to the ChatPane so
+        the user actually sees it (Textual hijacks stderr/stdout).
+        """
+        ...
+
     def on_stream_finished(self, *, final_content: str) -> None:
         """Run finished — sink may render any trailing markdown."""
         ...

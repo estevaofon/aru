@@ -33,6 +33,8 @@ aru/
 │   ├── ui.py           # TuiUI — UIAdapter backed by Textual ModalScreens
 │   ├── sinks.py        # TextualBusSink — StreamSink routing to ChatPane
 │   ├── slash_bridge.py # Reuse REPL handle_* handlers in TUI (E6b)
+│   ├── log_bridge.py   # Forward agno/aru ERROR log records into ChatPane (Textual hijacks stderr)
+│   ├── sanitize.py     # Strip C0 control bytes from agent/tool/file content before it reaches the terminal
 │   ├── screens/
 │   │   ├── choice.py     # ChoiceModal — numbered option menu
 │   │   ├── confirm.py    # ConfirmModal — yes/no dialog

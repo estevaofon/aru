@@ -877,22 +877,76 @@ class AruApp(App):
         if session is None:
             self._push_chat("No session.", "model")
             return
+        from aru.providers import (
+            MODEL_ALIASES,
+            get_provider,
+            list_providers,
+            resolve_model_ref,
+        )
+
+        config = self.config
+        config_aliases = (getattr(config, "model_aliases", None) or {}) if config else {}
+
         body = body.strip()
         if not body:
-            current = getattr(session, "model_ref", "?")
-            self._push_chat(
-                f"Current model: {current}\n"
-                f"Usage: /model <provider/name>  (e.g. /model anthropic/claude-sonnet-4-5)",
-                "model",
-            )
+            lines = [
+                f"Current model: {session.model_display} ({session.model_id})",
+                "",
+            ]
+            if config_aliases:
+                lines.append("Model aliases (aru.json):")
+                for alias, ref in config_aliases.items():
+                    lines.append(f"  {alias} → {ref}")
+                lines.append("")
+            lines.append("Built-in aliases:")
+            for alias, ref in MODEL_ALIASES.items():
+                lines.append(f"  {alias} → {ref}")
+            lines.append("")
+            lines.append("Providers:")
+            for pkey, pconfig in list_providers().items():
+                dflt = pconfig.default_model or "—"
+                lines.append(f"  {pkey} ({pconfig.name}) — default: {dflt}")
+            lines.append("")
+            lines.append("Usage: /model <provider/name>  (e.g. /model anthropic/claude-sonnet-4-5, /model minimax)")
+            self._push_chat("\n".join(lines), "model")
             return
+
         try:
-            session.model_ref = body
+            arg_lower = body.lower()
+            resolved_ref = config_aliases.get(arg_lower, arg_lower) if config_aliases else arg_lower
+            provider_key, _ = resolve_model_ref(resolved_ref)
+            if get_provider(provider_key) is None:
+                available = ", ".join(sorted(list_providers().keys()))
+                self._push_chat(
+                    f"Unknown provider '{provider_key}'. Available: {available}",
+                    "model",
+                )
+                return
+            # Normalize to the fully-qualified ref so model_display + create_model
+            # see the right provider/model pair.
+            session.model_ref = resolved_ref if "/" in resolved_ref else (
+                MODEL_ALIASES.get(resolved_ref, resolved_ref)
+            )
             if self.ctx is not None:
                 self.ctx.model_id = session.model_id
+                small_ref = config_aliases.get("small")
+                if not small_ref:
+                    sp_key, _ = resolve_model_ref(session.model_ref)
+                    _small_defaults = {
+                        "anthropic": "anthropic/claude-haiku-4-5",
+                        "openai": "openai/gpt-4o-mini",
+                        "groq": "groq/llama-3.1-8b-instant",
+                        "deepseek": "deepseek/deepseek-chat",
+                        "ollama": "ollama/llama3.1",
+                    }
+                    small_ref = _small_defaults.get(sp_key, session.model_ref)
+                self.ctx.small_model_ref = small_ref
             status = self.query_one(StatusPane)
             status._refresh_from_session()
-            self._push_chat(f"Model switched to: {body}", "model")
+            self._push_chat(
+                f"Switched to {session.model_display} ({session.model_id})",
+                "model",
+            )
         except Exception as exc:
             self._push_chat(f"model switch failed: {exc}", "model")
 
@@ -2051,9 +2105,24 @@ async def run_tui(
     ctx.tui_app = app
     ctx.ui = TuiUI(app)
 
+    # Bridge logging → ChatPane so Agno's ERROR records (rate limits,
+    # provider errors, etc.) are visible to the user instead of vanishing
+    # into Textual's captured stderr. Detached in the finally block.
+    log_bridge_handlers: list = []
+    try:
+        from aru.tui.log_bridge import install_chat_log_bridge
+        log_bridge_handlers = install_chat_log_bridge(app)
+    except Exception:
+        pass
+
     try:
         await app.run_async()
     finally:
+        try:
+            from aru.tui.log_bridge import uninstall_chat_log_bridge
+            uninstall_chat_log_bridge(log_bridge_handlers)
+        except Exception:
+            pass
         ctx.tui_app = None
         ctx.ui = None
         try:

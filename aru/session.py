@@ -565,7 +565,19 @@ class Session:
         self._live_cache_write_added = 0
 
     def _get_pricing(self) -> tuple[float, float, float, float]:
-        """Get per-million-token pricing for the current model."""
+        """Get per-million-token pricing for the current model.
+
+        Free models (e.g. OpenRouter `:free` variants like
+        `openrouter/minimax/minimax-m2.5:free`) report no cost. Detected by
+        the literal token "free" in the model ref or id — covers the `:free`
+        suffix convention plus any future provider that adopts the same
+        naming. None of the major paid models contain "free" in their id,
+        so false positives are negligible.
+        """
+        ref = (self.model_ref or "").lower()
+        mid = (self.model_id or "").lower()
+        if "free" in ref or "free" in mid:
+            return (0.0, 0.0, 0.0, 0.0)
         model_id = self.model_id
         # Try exact match, then prefix match, then fallback
         for prefix, pricing in MODEL_PRICING.items():

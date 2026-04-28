@@ -46,6 +46,9 @@ class RecordingSink:
     def notify(self, message: str, style: str = "") -> None:
         self.events.append(("notify", {"msg": message}))
 
+    def on_error(self, message: str) -> None:
+        self.events.append(("error", {"msg": message}))
+
     def on_stream_finished(self, *, final_content: str) -> None:
         self.events.append(("stream_finished", {"final": final_content}))
 

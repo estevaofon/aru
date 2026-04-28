@@ -130,6 +130,16 @@ class TextualBusSink:
         except Exception:
             pass
 
+    def on_error(self, message: str) -> None:
+        # Errors are routed to the ChatPane (persistent) instead of a
+        # Textual toast — under Textual, Agno's ERROR log lines never
+        # reach the terminal, so this is the user's only visible signal
+        # that something went wrong. Closing the active assistant bubble
+        # first prevents the streamed-but-empty assistant message from
+        # swallowing the error widget.
+        self._call(self.chat.finalize_assistant_message)
+        self._call(self.chat.add_system_message, f"Error: {message}")
+
     def on_stream_finished(self, *, final_content: str) -> None:
         self._call(self.chat.finalize_assistant_message, final_content or None)
 

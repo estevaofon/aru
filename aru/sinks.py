@@ -238,6 +238,11 @@ class RichLiveSink:
         else:
             target.print(message)
 
+    def on_error(self, message: str) -> None:
+        from rich.markup import escape
+        target = self._live.console if self._live is not None else self.console
+        target.print(f"[red]Error: {escape(message)}[/red]")
+
     def on_stream_finished(self, *, final_content: str) -> None:
         # Nothing to do here — runner flushes trailing markdown after exit()
         # using the accumulated content + display._flushed_len.

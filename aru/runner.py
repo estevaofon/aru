@@ -695,8 +695,14 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             sink.exit()
         except Exception:
             pass
-        from rich.markup import escape
-        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        # Route via the sink so the message reaches the right surface:
+        # REPL → Rich console; TUI → ChatPane system message (Textual
+        # hijacks stderr/stdout, so ``console.print`` would be invisible).
+        try:
+            sink.on_error(str(e))
+        except Exception:
+            from rich.markup import escape
+            console.print(f"[red]Error: {escape(str(e))}[/red]")
 
     # Final guard: if a plan is active and the agent ended its turn with
     # pending steps (without stalling), mark the session so the next turn's
