@@ -63,7 +63,7 @@ class ContextPane(Vertical):
         border-left: solid $primary;
         border-bottom: solid $primary;
         padding: 1 1 0 1;
-        height: 1fr;
+        height: auto;
     }
     #ctx-title {
         color: $accent;

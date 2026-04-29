@@ -39,10 +39,14 @@ class TasklistPanel(VerticalScroll):
     TasklistPanel {
         display: none;
         height: auto;
-        max-height: 30;
+        max-height: 15;
         background: $boost;
-        border-top: solid $primary;
+        border-left: solid $primary;
+        border-bottom: solid $primary;
         padding: 0 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-size-vertical: 1;
     }
     TasklistPanel.-busy {
         display: block;
