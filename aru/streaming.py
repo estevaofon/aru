@@ -174,6 +174,7 @@ async def run_stream(
     )
     from aru.cache_patch import get_last_stop_reason, reset_last_stop_reason
     from aru.display import _format_tool_label
+    from aru.doom_loop import DoomLoopDetector
 
     state = StreamState()
     accumulated = ""
@@ -188,6 +189,14 @@ async def run_stream(
 
     # Track tool start times so the sink gets a duration on completion.
     tool_start_times: dict[str, float] = {}
+    # Cache args at started so the doom-loop detector and any other
+    # post-hoc check can read them at completed without depending on the
+    # provider always populating ``tool_args`` on the completed event.
+    tool_args_by_id: dict[str, Any] = {}
+    # Per-turn doom-loop detector — reset on each new run_stream call so
+    # repeating the same tool across separate user turns isn't a "loop".
+    # See ``aru/doom_loop.py`` for the heuristic.
+    doom_loop_detector = DoomLoopDetector()
     import time as _time
 
     while True:
@@ -229,6 +238,9 @@ async def run_stream(
                 pending_tool_uses[tool_id] = assistant_blocks[-1]
 
                 tool_start_times[tool_id] = _time.monotonic()
+                tool_args_by_id[tool_id] = (
+                    tool_args if isinstance(tool_args, dict) else None
+                )
                 sink.on_tool_started(
                     tool_id=tool_id,
                     tool_name=tool_name,
@@ -303,6 +315,35 @@ async def run_stream(
                     label=tool_name,  # sink caches its own label if needed
                 )
 
+                # Doom-loop check — if the model just made the same call
+                # for the Nth time in a row, pause and ask the user. The
+                # detector is per-turn (constructed at run_stream entry)
+                # so a legitimate repeat across separate turns doesn't
+                # fire. See ``aru/doom_loop.py``.
+                tool_args_for_detector = tool_args_by_id.pop(tool_id, None)
+                if doom_loop_detector.record(tool_name, tool_args_for_detector):
+                    if await _handle_doom_loop(
+                        sink=sink,
+                        tool_name=tool_name,
+                        tool_args=tool_args_for_detector,
+                    ):
+                        # User chose continue — wipe history for this
+                        # tool so the very next call doesn't immediately
+                        # re-prompt. Other tools' history is preserved.
+                        doom_loop_detector.reset_for_tool(tool_name)
+                    else:
+                        # User chose abort. Mark stalled, propagate the
+                        # abort signal to any in-flight sub-agents, and
+                        # break out of the stream — the outer recovery
+                        # loop's stop-reason check will then exit.
+                        state.stalled = True
+                        try:
+                            from aru.runtime import abort_current
+                            abort_current()
+                        except Exception:
+                            pass
+                        break
+
                 # When the last active tool in the round completed, close it
                 # and let the sink flush deferred renders (plan panel etc.).
                 if not pending_tool_uses:
@@ -352,3 +393,64 @@ async def run_stream(
     state.accumulated = accumulated
     sink.on_stream_finished(final_content=accumulated)
     return state
+
+
+async def _handle_doom_loop(
+    *,
+    sink: StreamSink,
+    tool_name: str,
+    tool_args: Any,
+) -> bool:
+    """Notify + prompt the user when a doom-loop fires. Returns True to continue.
+
+    Routed through ``ctx.ui.confirm`` so REPL gets the prompt_toolkit
+    yes/no and TUI gets a ``ConfirmModal`` — same code path as the
+    permission prompts. Wrapped in ``asyncio.to_thread`` because the UI
+    adapter is sync (it bridges to the Textual event loop internally via
+    ``call_from_thread`` and a ``threading.Event``); calling it directly
+    from the async loop would deadlock the TUI.
+    """
+    import asyncio
+    import json
+
+    try:
+        args_preview = json.dumps(
+            tool_args if isinstance(tool_args, dict) else {},
+            sort_keys=True, default=str,
+        )
+    except Exception:
+        args_preview = repr(tool_args)
+    if len(args_preview) > 120:
+        args_preview = args_preview[:117] + "..."
+
+    sink.notify(
+        f"Doom-loop detected: 3× identical {tool_name}({args_preview}). "
+        f"Pausing for user confirmation.",
+        style="bold yellow",
+    )
+
+    prompt = (
+        f"`{tool_name}` was called 3 times in a row with the same input "
+        f"({args_preview}). The agent may be stuck in a loop. Continue?"
+    )
+
+    try:
+        from aru.runtime import get_ctx
+        ctx = get_ctx()
+    except LookupError:
+        # No runtime ctx (test harness without init_ctx) — default to
+        # abort so the loop doesn't keep firing forever.
+        return False
+
+    ui = getattr(ctx, "ui", None)
+    if ui is None:
+        # No UI installed — same conservative default. abort.
+        return False
+
+    try:
+        return bool(await asyncio.to_thread(ui.confirm, prompt, False))
+    except Exception:
+        # If the prompt itself raises (timeout, missing app, etc.) we
+        # default to abort — the model is stuck and we can't ask the
+        # user, so continuing risks burning more budget for nothing.
+        return False

@@ -59,6 +59,7 @@ aru/
 ├── history_blocks.py   # Conversation history block helpers
 ├── checkpoints.py      # Pre-edit file checkpoints for undo support
 ├── display.py          # Terminal display (logo, status bar, streaming output)
+├── doom_loop.py        # DoomLoopDetector — sliding-window guard for repeated identical tool calls
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
