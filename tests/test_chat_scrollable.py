@@ -58,14 +58,21 @@ async def test_add_renderable_default_not_scrollable():
 
 
 @pytest.mark.asyncio
-async def test_show_panel_routes_scrollable_to_tui_chat():
-    """tasklist._show should wrap panels in a scrollable block in TUI mode."""
+async def test_show_panel_routes_to_chat_when_sidebar_hidden():
+    """tasklist._show falls back to the chat when the sidebar is hidden.
+
+    Tier 2.6 changed the default: panels go to the ``TasklistPanel``
+    sidebar (event-driven). Only when the user toggles the sidebar
+    off (Ctrl+T) does ``_show`` mount the Rich panel into the chat —
+    this test guards that fallback path.
+    """
     from rich.panel import Panel
     from textual.containers import VerticalScroll
 
     from aru.runtime import init_ctx, set_ctx
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets.tasklist_panel import TasklistPanel
 
     app = AruApp()
     async with app.run_test(size=(140, 40)) as pilot:
@@ -73,6 +80,10 @@ async def test_show_panel_routes_scrollable_to_tui_chat():
         ctx = init_ctx()
         ctx.tui_app = app
         set_ctx(ctx)
+        # Hide the sidebar so _show falls through to the chat.
+        sidebar = app.query_one(TasklistPanel)
+        sidebar.toggle_visibility()
+        await pilot.pause()
         chat = app.query_one(ChatPane)
         from aru.tools.tasklist import _show
         panel = Panel("hello " * 200, title="big")

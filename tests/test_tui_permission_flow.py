@@ -122,12 +122,12 @@ async def test_inline_prompt_hides_input_bar_and_restores_on_answer():
     pending.
     """
     from rich.panel import Panel
-    from textual.widgets import Input
 
     from aru.tui.app import AruApp
     from aru.tui.ui import TuiUI
     from aru.tui.widgets.chat import ChatPane
     from aru.tui.widgets.inline_choice import InlineChoicePrompt
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     holder: dict = {}
@@ -145,7 +145,7 @@ async def test_inline_prompt_hides_input_bar_and_restores_on_answer():
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one("#input", Input)
+        inp = app.query_one("#input", PromptArea)
         assert not inp.has_class("-hidden"), "input should be visible at rest"
         task = asyncio.create_task(worker())
         for _ in range(50):

@@ -108,7 +108,7 @@ async def test_completer_at_prefix_shows_files(tmp_path, monkeypatch):
 async def test_app_dispatches_local_slash_cost():
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     # Provide a minimal session so cost_summary works.
     from aru.session import Session
@@ -117,8 +117,8 @@ async def test_app_dispatches_local_slash_cost():
     app = AruApp(session=session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="/cost"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/cost"))
         await pilot.pause(0.1)
         chat = app.query_one(ChatPane)
         text = " ".join(m.buffer for m in chat.query(ChatMessageWidget))
@@ -129,14 +129,14 @@ async def test_app_dispatches_local_slash_cost():
 async def test_app_dispatches_local_slash_model_no_args():
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
     from aru.session import Session
 
     app = AruApp(session=Session())
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="/model"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/model"))
         await pilot.pause(0.1)
         chat = app.query_one(ChatPane)
         text = " ".join(m.buffer for m in chat.query(ChatMessageWidget))
@@ -148,16 +148,14 @@ async def test_app_dispatches_local_slash_model_switch():
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
     from aru.session import Session
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     session = Session()
     app = AruApp(session=session)
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(
-            Input.Submitted(inp, value="/model anthropic/claude-haiku-4-5")
-        )
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/model anthropic/claude-haiku-4-5"))
         await pilot.pause(0.1)
         assert session.model_ref == "anthropic/claude-haiku-4-5"
 
@@ -173,12 +171,12 @@ async def test_enter_submits_when_completer_open_does_not_eat_enter():
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
     from aru.tui.widgets.completer import SlashCompleter
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
+        inp = app.query_one(PromptArea)
         completer = app.query_one(SlashCompleter)
         # Simulate typing /help — completer opens.
         inp.value = "/help"
@@ -186,7 +184,7 @@ async def test_enter_submits_when_completer_open_does_not_eat_enter():
         await pilot.pause()
         assert completer.is_open() is True
         # Single Enter should submit and run /help.
-        inp.post_message(Input.Submitted(inp, value="/help"))
+        inp.post_message(PromptArea.Submitted("/help"))
         await pilot.pause(0.1)
         chat = app.query_one(ChatPane)
         text = " ".join(m.buffer for m in chat.query(ChatMessageWidget))
@@ -198,12 +196,13 @@ async def test_enter_submits_when_completer_open_does_not_eat_enter():
 async def test_tab_accepts_completer_suggestion():
     from aru.tui.app import AruApp
     from aru.tui.widgets.completer import SlashCompleter
-    from textual.widgets import Input, OptionList
+    from aru.tui.widgets.prompt_area import PromptArea
+    from textual.widgets import OptionList
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
+        inp = app.query_one(PromptArea)
         inp.focus()
         inp.value = "/he"
         completer = app.query_one(SlashCompleter)
@@ -223,7 +222,7 @@ async def test_app_dispatches_local_slash_agents_empty():
     from dataclasses import dataclass, field
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     @dataclass
     class _Cfg:
@@ -232,8 +231,8 @@ async def test_app_dispatches_local_slash_agents_empty():
     app = AruApp(config=_Cfg())
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="/agents"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/agents"))
         await pilot.pause(0.1)
         chat = app.query_one(ChatPane)
         text = " ".join(m.buffer for m in chat.query(ChatMessageWidget))

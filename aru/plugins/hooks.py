@@ -78,6 +78,10 @@ VALID_HOOKS = frozenset({
     "metrics.updated",           # After every internal LLM API call (cache_patch);
                                  # lets the TUI refresh tokens/cost mid-turn so long
                                  # implementation runs don't sit silent for minutes.
+
+    # Tasklist / plan visibility (Tier 2 #6 sidebar)
+    "tasklist.updated",          # create_task_list / update_task — full snapshot
+    "plan.updated",              # enter_plan_mode / update_plan_step — full snapshot
 })
 
 

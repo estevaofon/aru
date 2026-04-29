@@ -35,8 +35,8 @@ async def test_action_cycle_mode_updates_status_pane():
 async def test_slash_yolo_toggles_status_pane():
     from aru.runtime import init_ctx
     from aru.tui.app import AruApp
+    from aru.tui.widgets.prompt_area import PromptArea
     from aru.tui.widgets.status import StatusPane
-    from textual.widgets import Input
 
     ctx = init_ctx()
     app = AruApp(ctx=ctx)
@@ -44,10 +44,10 @@ async def test_slash_yolo_toggles_status_pane():
         await pilot.pause()
         status = app.query_one(StatusPane)
         assert status.mode == "default"
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="/yolo"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/yolo"))
         await pilot.pause()
         assert status.mode == "yolo"
-        inp.post_message(Input.Submitted(inp, value="/yolo"))
+        inp.post_message(PromptArea.Submitted("/yolo"))
         await pilot.pause()
         assert status.mode == "default"

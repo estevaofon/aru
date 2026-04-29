@@ -59,6 +59,11 @@ def _show(panel: Panel) -> None:
     so we route the panel into the ChatPane via ``call_from_thread``
     instead (matches how TextualBusSink hands rich renderables off to
     the app loop).
+
+    The TUI sidebar (``TasklistPanel``) listens to ``tasklist.updated``
+    / ``plan.updated`` events directly — it does not use this path. The
+    REPL still gets the panel printed; the TUI also still prints it
+    inline as a fallback when the user has the sidebar hidden.
     """
     ctx = get_ctx()
     if ctx.display and hasattr(ctx.display, "show_permission"):
@@ -69,23 +74,104 @@ def _show(panel: Panel) -> None:
         return
     tui_app = getattr(ctx, "tui_app", None)
     if tui_app is not None:
+        # Sidebar consumes events; we only print into chat when the
+        # sidebar is hidden (Ctrl+B toggle) so the user still has
+        # somewhere to see the panel.
         try:
-            from aru.tui.widgets.chat import ChatPane
-            chat = tui_app.query_one(ChatPane)
-            # Scrollable=True so a big panel (diff preview / task list /
-            # plan steps) stays contained — the user can scroll inside
-            # it without losing the chat stream above/below.
-            kwargs = {"scrollable": True}
+            from aru.tui.widgets.tasklist_panel import TasklistPanel
+            sidebar = None
             try:
-                tui_app.call_from_thread(
-                    chat.add_renderable, panel, **kwargs
-                )
+                sidebar = tui_app.query_one(TasklistPanel)
             except Exception:
-                chat.add_renderable(panel, **kwargs)
+                pass
+            if sidebar is not None and sidebar.has_class("-hidden"):
+                from aru.tui.widgets.chat import ChatPane
+                chat = tui_app.query_one(ChatPane)
+                kwargs = {"scrollable": True}
+                try:
+                    tui_app.call_from_thread(
+                        chat.add_renderable, panel, **kwargs
+                    )
+                except Exception:
+                    chat.add_renderable(panel, **kwargs)
+            # When the sidebar is visible, the event-driven render is
+            # the canonical view; chat stays clean.
             return
         except Exception:
             pass
     ctx.console.print(panel)
+
+
+def _publish_tasklist(tasks: list[dict]) -> None:
+    """Best-effort publish of ``tasklist.updated`` to the plugin bus."""
+    try:
+        ctx = get_ctx()
+        mgr = getattr(ctx, "plugin_manager", None)
+        if mgr is None:
+            return
+        payload = {"tasks": [dict(t) for t in tasks]}
+        # Plugin manager.publish is async; spawn as a task so call sites
+        # that are themselves sync (tools run in threads) don't block.
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(mgr.publish("tasklist.updated", payload))
+        except RuntimeError:
+            # No running loop in this thread — fall back to scheduling
+            # on the App's loop if we can reach it.
+            tui_app = getattr(ctx, "tui_app", None)
+            if tui_app is not None:
+                try:
+                    tui_app.call_from_thread(
+                        _schedule_publish, mgr, "tasklist.updated", payload
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _publish_plan(steps: list) -> None:
+    """Best-effort publish of ``plan.updated`` with the current plan."""
+    try:
+        ctx = get_ctx()
+        mgr = getattr(ctx, "plugin_manager", None)
+        if mgr is None:
+            return
+        payload = {
+            "steps": [
+                {
+                    "index": getattr(s, "index", 0),
+                    "description": getattr(s, "description", ""),
+                    "status": getattr(s, "status", "pending"),
+                }
+                for s in steps
+            ]
+        }
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(mgr.publish("plan.updated", payload))
+        except RuntimeError:
+            tui_app = getattr(ctx, "tui_app", None)
+            if tui_app is not None:
+                try:
+                    tui_app.call_from_thread(
+                        _schedule_publish, mgr, "plan.updated", payload
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _schedule_publish(mgr, event_type: str, payload: dict) -> None:
+    """Helper run via call_from_thread to schedule an async publish."""
+    try:
+        import asyncio
+        asyncio.create_task(mgr.publish(event_type, payload))
+    except Exception:
+        pass
 
 
 def create_task_list(tasks: list[str]) -> str:
@@ -115,6 +201,7 @@ def create_task_list(tasks: list[str]) -> str:
     created = store.create(tasks)
     panel = _render_task_list(created)
     _show(panel)
+    _publish_tasklist(created)
 
     task_lines = "\n".join(f"  {t['index']}. {t['description']}" for t in created)
     verb = "replaced" if was_replaced else "created"
@@ -143,6 +230,7 @@ def update_task(index: int, status: str) -> str:
     all_tasks = store.get_all()
     panel = _render_task_list(all_tasks)
     _show(panel)
+    _publish_tasklist(all_tasks)
 
     # Check if all done
     completed_count = sum(1 for t in all_tasks if t["status"] == "completed")
@@ -177,6 +265,7 @@ def flush_plan_render(session) -> None:
     if not steps:
         return
     _show(_render_plan_steps(steps))
+    _publish_plan(steps)
 
 
 def _render_plan_steps(steps: list) -> Panel:

@@ -97,30 +97,47 @@ async def test_ctrl_c_is_context_sensitive():
 
 
 @pytest.mark.asyncio
-async def test_ctrl_c_idle_quits(monkeypatch):
-    """No selection, no running turn → Ctrl+C exits (matches empty REPL prompt)."""
+async def test_ctrl_c_idle_never_quits(monkeypatch):
+    """Ctrl+C from an idle prompt must never exit the app.
+
+    Background: when ``screen.get_selected_text`` intermittently misses
+    a real selection (focus shift, terminal scroll, refresh), an
+    "exit on second Ctrl+C" rule turned a retry-to-copy into a quit.
+    Users now exit via Ctrl+Q or /quit, both visible in the footer.
+    """
     from aru.tui.app import AruApp
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         called = {"abort": 0, "quit": 0}
+        notes: list[tuple[str, str]] = []
         monkeypatch.setattr(
-            app, "_abort_running_turn", lambda: called.__setitem__("abort", called["abort"] + 1)
+            app, "_abort_running_turn",
+            lambda: called.__setitem__("abort", called["abort"] + 1),
         )
         monkeypatch.setattr(
-            app, "action_quit_app", lambda: called.__setitem__("quit", called["quit"] + 1)
+            app, "action_quit_app",
+            lambda: called.__setitem__("quit", called["quit"] + 1),
+        )
+        monkeypatch.setattr(
+            app, "notify",
+            lambda msg, severity="info", **_k: notes.append((msg, severity)),
         )
         try:
             app.screen.clear_selection()
         except Exception:
             pass
         app._busy = False
-        app.action_ctrl_c()
+        # Hammer Ctrl+C repeatedly — none of these should ever quit.
+        for _ in range(5):
+            app.action_ctrl_c()
         await pilot.pause()
-    # Idle prompt: no abort (nothing to abort), just exit.
     assert called["abort"] == 0
-    assert called["quit"] == 1
+    assert called["quit"] == 0, "idle Ctrl+C must NEVER quit the app"
+    # User got a visible hint at least once.
+    assert notes, "expected at least one toast hint"
+    assert "ctrl+q" in notes[-1][0].lower() or "/quit" in notes[-1][0].lower()
 
 
 @pytest.mark.asyncio
@@ -178,6 +195,34 @@ async def test_ctrl_c_with_selection_copies(monkeypatch):
         await pilot.pause()
     assert captured == ["selected!"]
     assert quit_called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sigint_handler_replaced_during_app_lifetime():
+    """While the App is running, SIGINT must not raise KeyboardInterrupt.
+
+    On Windows the OS still routes ``CTRL_C_EVENT`` through Python's
+    signal module even when Textual disables ``ENABLE_PROCESSED_INPUT``,
+    so a stray SIGINT from a sub-process group could tear the App down
+    intermittently. We swap in a no-op handler in ``on_mount`` and put
+    the original back in ``on_unmount`` so the parent shell isn't
+    affected after the TUI exits.
+    """
+    import signal
+
+    from aru.tui.app import AruApp
+
+    pre = signal.getsignal(signal.SIGINT)
+    app = AruApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        during = signal.getsignal(signal.SIGINT)
+        # The no-op handler is a callable that's not the previous one.
+        assert during is not pre
+        assert callable(during)
+    # After the App tears down, we restored the original handler.
+    after = signal.getsignal(signal.SIGINT)
+    assert after is pre
 
 
 @pytest.mark.asyncio

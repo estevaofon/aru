@@ -53,6 +53,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("sessions",   "List recent sessions"),
     ("resume",     "Show resume hint"),
     ("yolo",       "Toggle YOLO mode"),
+    ("theme",      "Switch TUI colour theme"),
 ]
 
 

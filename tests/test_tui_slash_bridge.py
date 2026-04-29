@@ -80,13 +80,13 @@ async def test_app_dispatches_bridged_command():
     """Typing `/memory` in the TUI invokes the bridge and adds a system msg."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="/memory"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/memory"))
         await pilot.pause(0.2)
         chat = app.query_one(ChatPane)
         msgs = list(chat.query(ChatMessageWidget))

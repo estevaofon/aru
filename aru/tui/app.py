@@ -38,62 +38,25 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Footer, Input
+from textual.widgets import Footer, Input, TextArea
 
 from aru.tui.widgets.chat import ChatPane
 from aru.tui.widgets.completer import SlashCompleter
 from aru.tui.widgets.context_pane import ContextPane
 from aru.tui.widgets.loaded_pane import LoadedPane
+from aru.tui.widgets.prompt_area import PasteAwarePromptArea, PromptArea
+from aru.tui.widgets.prompt_queue import PromptQueueWidget
 from aru.tui.widgets.status import StatusPane
 from aru.tui.widgets.subagent_panel import SubagentPanel
+from aru.tui.widgets.tasklist_panel import TasklistPanel
 from aru.tui.widgets.thinking import ThinkingIndicator
 from aru.tui.widgets.tools import ToolsPane
 
 
-class PromptInput(Input):
-    """Single-line ``Input`` that accepts multi-line pastes.
-
-    Textual's default ``Input._on_paste`` keeps only
-    ``event.text.splitlines()[0]``, throwing away every line after the
-    first newline. For an agent prompt this is the wrong trade-off —
-    users pasting a stack trace, a diff, or a log block expect the whole
-    block to reach the agent, not just the first line.
-
-    We intercept multi-line pastes, stash them on the App, and surface
-    an inline notice so the user knows the paste landed even though the
-    single-line text box can't render it. Single-line pastes keep the
-    default behaviour (inserted at the cursor as regular text).
-
-    On submit ``AruApp.on_input_submitted`` merges any typed annotation
-    with the stashed paste using the same ``build_message`` shape as the
-    REPL (``PasteState.build_message``).
-    """
-
-    def _on_paste(self, event) -> None:
-        text = getattr(event, "text", "") or ""
-        if "\n" not in text and "\r" not in text:
-            # Single-line paste → let the base class handle it. Textual
-            # walks the entire MRO for matching ``_on_paste`` handlers,
-            # so we simply return and ``Input._on_paste`` runs next.
-            # Calling ``super()._on_paste`` here would cause it to run
-            # twice (once by us, once by the MRO loop), duplicating the
-            # inserted text.
-            return
-        # Multi-line paste — hand the full block to the App and stop
-        # the default handler. ``event.stop()`` only blocks bubble to
-        # parent widgets, so ``Input._on_paste`` would still execute
-        # from the MRO loop and insert the first line; ``prevent_default``
-        # sets ``_no_default_action`` which short-circuits that loop —
-        # that is what actually keeps the base class from clobbering us.
-        try:
-            self.app._stash_paste(text)
-        except Exception:
-            pass
-        try:
-            event.prevent_default()
-            event.stop()
-        except Exception:
-            pass
+# NOTE: ``PromptArea`` (multi-line ``TextArea`` subclass) lives in
+# ``aru.tui.widgets.prompt_area``. The previous ``PromptInput(Input)``
+# stash workaround is gone — multi-line pastes now land natively in
+# the visible buffer where the user can edit them before sending.
 
 
 # ── Terminal title helpers ───────────────────────────────────────────
@@ -215,12 +178,9 @@ class AruApp(App):
         display: none;
     }
     #input {
-        /* height = 2 content rows + round border (1 top + 1 bottom) = 4.
-           The extra content row gives the caret breathing room so the
-           input bar doesn't feel cramped under the status line. */
-        height: 4;
-        border: round $primary;
-        padding: 0 1;
+        /* PromptArea drives its own height (auto, min 3, max 10).
+           Keep margin/padding zero here so the border drawn by the
+           widget itself isn't compounded with a host-level frame. */
         margin: 0;
     }
     #input.-hidden {
@@ -236,16 +196,25 @@ class AruApp(App):
         # Ctrl+C is context-sensitive: copies when there's a text
         # selection (standard TUI behaviour), otherwise interrupts the
         # current agent turn / exits. Implemented in action_ctrl_c.
-        Binding("ctrl+c", "ctrl_c", "Copy/Interrupt", show=True),
+        # ``priority=True`` so the focused widget can't shadow this. The
+        # default focus is ``PromptArea`` (a ``TextArea``), which binds
+        # ``ctrl+c`` to its own ``copy`` action — when there's no
+        # in-widget selection it raises ``SkipAction`` and the App
+        # binding fires, but priority avoids any race where the SkipAction
+        # path doesn't propagate.
+        Binding("ctrl+c", "ctrl_c", "Copy/Interrupt", show=True, priority=True),
         Binding("ctrl+l", "clear_chat", "Clear chat", show=True),
         Binding("ctrl+a", "cycle_mode", "Mode", show=True),
         Binding("ctrl+p", "toggle_plan", "Plan mode", show=True),
         Binding("ctrl+f", "search_chat", "Search", show=True),
-        Binding("ctrl+t", "focus_tools", "Tools", show=False),
+        Binding("ctrl+t", "toggle_tasklist", "Tasklist", show=True),
         Binding("ctrl+i", "focus_input", "Input", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=True),
         Binding("ctrl+y", "copy_last", "Copy last", show=True),
         Binding("ctrl+shift+y", "copy_all", "Copy all", show=False),
+        Binding("ctrl+k", "copy_code", "Copy code", show=False),
+        Binding("f1", "show_keymap", "Keys", show=True),
+        Binding("ctrl+s", "show_sessions", "Sessions", show=True),
         # Layer 13 — user-invoked terminal recovery. priority=True so the
         # binding fires before any focused widget can absorb the key, in
         # case Textual ever reclassifies ctrl+r as printable on some
@@ -261,6 +230,7 @@ class AruApp(App):
         "clear", "quit", "exit", "help", "plan",
         "cost", "compact", "sessions", "model", "undo",
         "skills", "agents", "commands", "mcp", "yolo",
+        "theme",
     }
 
     # Layer 10 / 12 — interval (seconds) between belt-and-suspenders re-emits
@@ -298,15 +268,18 @@ class AruApp(App):
         self.ctx = ctx
         self.plugin_manager = plugin_manager
         self._busy = False
+        # Double-Ctrl+C-to-exit guard. A single Ctrl+C while idle used
+        # to quit immediately; users who pressed Ctrl+C to copy a
+        # terminal-level mouse selection (where the OS terminal handles
+        # the copy and forwards the keystroke to the app) lost their
+        # session. Mirrors the Claude Code / Python REPL safeguard: the
+        # first idle Ctrl+C arms a 2s window, the second inside that
+        # window actually exits.
+        self._last_ctrl_c_t: float = 0.0
         # Lightweight input history (E6c minimal). Up/Down cycle through
         # prior turns so the user can re-send or tweak a message.
         self._history: list[str] = []
         self._history_cursor: int | None = None
-        # Multi-line paste buffer: populated by PromptInput._on_paste when
-        # the clipboard contents span multiple lines, consumed (and
-        # cleared) by on_input_submitted.
-        self._pending_paste: str | None = None
-        self._pending_paste_lines: int = 0
         # Layer 12 — last time we re-emitted the mouse-tracking enable
         # sequences via the keypress path. Used to debounce per-keystroke
         # re-arming so a fast typist doesn't spam the terminal with re-
@@ -324,6 +297,7 @@ class AruApp(App):
             yield ChatPane()
             with Vertical(id="sidebar"):
                 yield ContextPane(session=self.session)
+                yield TasklistPanel()
                 yield LoadedPane(
                     config=self.config,
                     plugin_manager=self.plugin_manager,
@@ -331,12 +305,21 @@ class AruApp(App):
                 )
         yield ThinkingIndicator()
         yield SubagentPanel()
+        yield PromptQueueWidget()
         yield StatusPane(session=self.session)
         yield SlashCompleter()
-        yield PromptInput(
-            placeholder="Type a message · / commands · @ files · Tab to accept · Enter to send",
-            id="input",
-        )
+        prompt = PasteAwarePromptArea(id="input")
+        # ``placeholder`` isn't a TextArea constructor arg in current
+        # Textual; we fake the affordance with a tooltip + the empty
+        # state hint kept in the keymap overlay (F1).
+        try:
+            prompt.tooltip = (
+                "Type a message · / commands · @ files · Tab to accept · "
+                "Enter to send · Shift+Enter newline"
+            )
+        except Exception:
+            pass
+        yield prompt
         yield Footer()
 
     def _compose_subtitle(self) -> str:
@@ -358,7 +341,43 @@ class AruApp(App):
         return " · ".join(bits)
 
     def on_mount(self) -> None:
-        self.query_one(Input).focus()
+        # Block the OS-level SIGINT path to Python. Even with Textual
+        # disabling ``ENABLE_PROCESSED_INPUT`` on the console, Windows
+        # still routes ``CTRL_C_EVENT`` through Python's signal module,
+        # which fires ``KeyboardInterrupt`` on the asyncio main task and
+        # tears the App down before any binding can run. We let the
+        # keystroke path (Textual's input parser → ``action_ctrl_c``)
+        # own Ctrl+C entirely.
+        #
+        # Why a no-op handler instead of ``SIG_IGN``: on Windows,
+        # asyncio's ProactorEventLoop relies on a signal-driven wakeup
+        # FD; ``SIG_IGN`` interacts oddly with that path and was
+        # observed to swallow keystrokes wholesale. A regular handler
+        # absorbs the signal, lets the loop wake, and Textual's input
+        # parser still gets the Ctrl+C keystroke through the normal
+        # console-input path.
+        try:
+            import signal as _signal
+            self._prev_sigint_handler = _signal.getsignal(_signal.SIGINT)
+            _signal.signal(_signal.SIGINT, lambda _sig, _frame: None)
+        except (ValueError, OSError, AttributeError):
+            self._prev_sigint_handler = None
+        # Apply theme from aru.json (best-effort — silent if Textual's
+        # stylesheet API has shifted under us). Done before focus / logo
+        # so the very first paint already shows the user's colours.
+        theme_name = ""
+        if self.config is not None:
+            theme_name = (getattr(self.config, "theme", "") or "").strip()
+        if theme_name:
+            try:
+                from aru.tui.themes import apply_theme
+                apply_theme(self, theme_name)
+            except Exception:
+                pass
+        try:
+            self.query_one(PromptArea).focus()
+        except Exception:
+            pass
         chat = self.query_one(ChatPane)
         # Branded ASCII logo replaces the now-removed AruHeader so the
         # user sees the same "aru" welcome moment as in the REPL.
@@ -559,22 +578,39 @@ class AruApp(App):
 
     # ── Input handling ───────────────────────────────────────────────
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        """Keep the SlashCompleter in sync with whatever the user typed."""
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """Keep the SlashCompleter in sync with the cursor's current line.
+
+        The completer fires on the *current line text* (not the whole
+        document) so a user pasting a multi-line block and then typing
+        ``/`` on the last line still pops the menu. ``current_line_text``
+        on the PromptArea handles that — the App just hands the result
+        to the completer.
+        """
         try:
             completer = self.query_one(SlashCompleter)
         except Exception:
             return
-        completer.update_for(event.value or "")
+        try:
+            prompt = self.query_one(PromptArea)
+        except Exception:
+            return
+        if event.text_area is not prompt:
+            return
+        try:
+            line = prompt.current_line_text()
+        except Exception:
+            line = prompt.value or ""
+        completer.update_for(line or "")
 
     async def on_key(self, event) -> None:
         """Route Tab / Up / Down / Esc to the completer when it is open.
 
-        Enter is intentionally NOT intercepted — it always submits the
-        Input. This avoids the conflict where Enter both accepts a
-        suggestion and fires ``Input.Submitted``, which produced the
-        "three Enters to run /help" glitch. Tab is the only key that
-        accepts the highlighted suggestion.
+        Enter never reaches here — ``PromptArea`` consumes it and posts
+        ``PromptArea.Submitted``. Tab is the only key that accepts a
+        completer suggestion; Up/Down move through suggestions when the
+        completer is open *and* hand off to the App's history navigation
+        otherwise (handled in ``on_prompt_area_history_prev/next``).
 
         Layer 12 — every keystroke is also a recovery opportunity. The
         Layer 10 periodic tick still runs every ``_MOUSE_REENABLE_INTERVAL``
@@ -593,15 +629,11 @@ class AruApp(App):
         if key == "tab":
             accepted = completer.accept()
             if accepted is not None:
-                inp = self.query_one(Input)
-                current = inp.value or ""
-                # Replace the last token with the accepted suggestion.
-                if " " in current.rstrip():
-                    head, _ = current.rstrip().rsplit(None, 1)
-                    inp.value = f"{head} {accepted}"
-                else:
-                    inp.value = accepted
-                inp.cursor_position = len(inp.value)
+                try:
+                    prompt = self.query_one(PromptArea)
+                    prompt.replace_current_line_token(accepted)
+                except Exception:
+                    pass
                 event.stop()
                 event.prevent_default()
         elif key == "up":
@@ -617,25 +649,28 @@ class AruApp(App):
             event.stop()
             event.prevent_default()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        annotation = (event.value or "").strip()
-        # Merge any multi-line paste the user queued up via
-        # PromptInput._on_paste. The shape mirrors the REPL's
-        # PasteState.build_message: fenced block when annotated, bare
-        # content when the user just hit Enter right after pasting.
-        pasted = self._pending_paste
-        if pasted:
-            if annotation:
-                text = f"{annotation}\n\n```\n{pasted}\n```"
-            else:
-                text = pasted
-            self._pending_paste = None
-            self._pending_paste_lines = 0
-        else:
-            text = annotation
-        if not text:
+    def on_prompt_area_submitted(self, event: "PromptArea.Submitted") -> None:
+        """Handle Enter from the multi-line PromptArea.
+
+        Routing rules (same as the previous single-line path, minus the
+        invisible-paste stash):
+
+        1. Empty after rstrip → no-op.
+        2. ``/...`` → slash command (local handler or fall-through).
+        3. ``! ...`` → shell escape.
+        4. Anything else → agent turn (or queued if busy — see
+           ``_enqueue_or_dispatch``).
+        """
+        text = (event.text or "").strip("\n")
+        # Strip trailing whitespace per line but preserve internal
+        # newlines so multi-line prompts retain their structure.
+        if not text.strip():
             return
-        event.input.value = ""
+        try:
+            prompt = self.query_one(PromptArea)
+            prompt.value = ""
+        except Exception:
+            pass
         try:
             self.query_one(SlashCompleter).close()
         except Exception:
@@ -643,18 +678,9 @@ class AruApp(App):
         self._history.append(text)
         self._history_cursor = None
 
-        # E6c: handle a small set of slash commands locally so the user
-        # can navigate the TUI without a round-trip to the agent. Others
-        # pass through as regular messages.
         if text.startswith("/") and self._maybe_run_local_slash(text):
             return
 
-        # Shell escape: ``! <command>`` runs the command locally in the
-        # session cwd and streams output into the chat. Mirrors the REPL
-        # path in ``cli.py`` so users can do quick ``! git status`` or
-        # ``! ls`` without a round-trip to the agent. The leading ``!``
-        # must be followed by whitespace so plain text starting with ``!``
-        # (rare but possible) still reaches the agent.
         if text.startswith("!"):
             cmd = text[1:].lstrip()
             if not cmd:
@@ -670,41 +696,64 @@ class AruApp(App):
             self._dispatch_shell_command(cmd)
             return
 
+        self._enqueue_or_dispatch(text)
+
+    def _enqueue_or_dispatch(self, text: str) -> None:
+        """Send to agent or push onto the visible prompt queue."""
         if self._busy:
-            self.query_one(ChatPane).add_system_message(
-                "Agent is busy — wait for the current turn to finish."
-            )
+            try:
+                queue = self.query_one(PromptQueueWidget)
+                queue.enqueue(text)
+                self.notify(
+                    "Queued — will run after the current turn.",
+                    severity="information",
+                    timeout=2,
+                )
+            except Exception:
+                # No queue available → fall back to the previous "tell
+                # the user we're busy" behaviour so the prompt isn't
+                # silently dropped.
+                self.query_one(ChatPane).add_system_message(
+                    "Agent is busy — wait for the current turn to finish."
+                )
             return
         self._dispatch_user_turn(text)
 
-    def _stash_paste(self, text: str) -> None:
-        """Hold a multi-line paste until the user submits.
+    def _drain_prompt_queue(self) -> None:
+        """Pop the next queued prompt and dispatch it as a user turn.
 
-        Called from ``PromptInput._on_paste`` on the App loop. We keep
-        the visible Input value untouched so any annotation the user
-        had already typed survives, and we surface an inline system
-        note so the user knows their paste landed even though a
-        single-line text box can't render it.
+        Called from ``_run_turn`` finally. Drains exactly one prompt
+        per turn — if more are pending, they cascade through the same
+        finally block as each completes. This preserves the visible
+        ordering and lets the user cancel mid-cascade.
         """
-        self._pending_paste = text
-        self._pending_paste_lines = len(text.splitlines())
         try:
-            self.query_one(ChatPane).add_system_message(
-                f"[{self._pending_paste_lines} lines pasted — press Enter "
-                "to send, or type a note first]"
-            )
+            queue = self.query_one(PromptQueueWidget)
         except Exception:
-            pass
-        try:
-            # Brief toast as a second signal for users whose eyes are on
-            # the input bar, not the chat scrollback.
-            self.notify(
-                f"{self._pending_paste_lines} lines pasted",
-                severity="information",
-                timeout=3,
-            )
-        except Exception:
-            pass
+            return
+        next_text = queue.pop_next()
+        if not next_text:
+            return
+        # We're inside _run_turn's finally — _busy was just reset to
+        # False, so dispatching is safe and lands in the foreground
+        # turn slot.
+        self._dispatch_user_turn(next_text)
+
+    def on_prompt_area_history_prev(
+        self, event: "PromptArea.HistoryPrev"
+    ) -> None:
+        """Up at the first row → recall older prompt."""
+        self.action_history_prev()
+
+    def on_prompt_area_history_next(
+        self, event: "PromptArea.HistoryNext"
+    ) -> None:
+        """Down at the last row → recall newer prompt (or empty)."""
+        self.action_history_next()
+
+    # ``_stash_paste`` is gone — multi-line paste lands directly in the
+    # PromptArea where the user can edit it before submitting. The toast
+    # cue moved into ``PasteAwarePromptArea._on_paste``.
 
     def _maybe_run_local_slash(self, text: str) -> bool:
         """Handle slash commands we can execute without the agent.
@@ -761,6 +810,8 @@ class AruApp(App):
                 self._slash_list_mcp()
             elif name == "yolo":
                 self._slash_yolo()
+            elif name == "theme":
+                self._slash_theme(rest)
             return True
 
         # (2) Bridged REPL handlers.
@@ -842,37 +893,8 @@ class AruApp(App):
             )
 
     def _slash_sessions(self) -> None:
-        if self.session_store is None:
-            self._push_chat("No session store.", "sessions")
-            return
-        try:
-            items = self.session_store.list_recent() \
-                if hasattr(self.session_store, "list_recent") else []
-        except Exception as exc:
-            self._push_chat(f"sessions failed: {exc}", "sessions")
-            return
-        if not items:
-            # Fall back to walking .aru/sessions if list_recent isn't there.
-            try:
-                import os
-                base = getattr(self.session_store, "base_dir", ".aru/sessions")
-                if os.path.isdir(base):
-                    items = sorted(os.listdir(base), reverse=True)[:20]
-            except Exception:
-                items = []
-        if not items:
-            self._push_chat("No saved sessions.", "sessions")
-            return
-        lines = []
-        for it in items:
-            if isinstance(it, str):
-                lines.append(f"- {it}")
-            else:
-                # Assume dataclass-ish with session_id + title.
-                sid = getattr(it, "session_id", "?")
-                title = getattr(it, "title", "")
-                lines.append(f"- {sid}  {title}")
-        self._push_chat("\n".join(lines), "sessions")
+        # Slash equivalent of Ctrl+S — open the picker.
+        self.action_show_sessions()
 
     def _slash_model(self, body: str) -> None:
         session = self.session
@@ -1010,6 +1032,63 @@ class AruApp(App):
         if not text:
             text = "No MCP tools loaded."
         self._push_chat(text, "mcp")
+
+    def _slash_theme(self, body: str) -> None:
+        """List or switch the active TUI theme.
+
+        ``/theme`` with no argument lists curated presets and marks the
+        active one. ``/theme <name>`` swaps to the named preset live
+        (no restart). Persist by setting ``"theme": "<name>"`` in
+        ``aru.json``.
+        """
+        from aru.tui.themes import THEME_NAMES, apply_theme, resolve_theme
+
+        # Active theme is whatever Textual is currently rendering with —
+        # ``self.theme`` (the reactive attribute) is authoritative. Map
+        # back to the Aru alias when possible so the marker matches the
+        # name the user typed / sees in the list.
+        active_canonical = getattr(self, "theme", "") or ""
+        body = (body or "").strip()
+        if not body:
+            lines = ["Available themes:"]
+            for tn in THEME_NAMES:
+                canon = resolve_theme(tn)
+                marker = "•" if canon == active_canonical else " "
+                lines.append(f"  {marker} {tn}")
+            lines.append("")
+            lines.append(f"Active: {active_canonical}")
+            lines.append("Usage: /theme <name>")
+            lines.append("Persist via aru.json: \"theme\": \"<name>\"")
+            self._push_chat("\n".join(lines), "theme")
+            return
+        canonical = resolve_theme(body)
+        available = getattr(self, "available_themes", {}) or {}
+        if not canonical or canonical not in available:
+            shown = ", ".join(THEME_NAMES)
+            self._push_chat(
+                f"Unknown theme '{body}'. Available: {shown}",
+                "theme",
+            )
+            return
+        ok = apply_theme(self, body)
+        if not ok:
+            self._push_chat(
+                f"Theme '{body}' could not be applied.",
+                "theme",
+            )
+            return
+        # Mirror into config so subsequent /theme listings show the
+        # right marker; on-disk persistence is still the user's call.
+        try:
+            if self.config is not None:
+                self.config.theme = body
+        except Exception:
+            pass
+        self._push_chat(
+            f"Theme switched to '{canonical}'. Add \"theme\": \"{body}\" to "
+            "aru.json to persist.",
+            "theme",
+        )
 
     def _slash_yolo(self) -> None:
         try:
@@ -1205,6 +1284,15 @@ class AruApp(App):
             # turn ends so the user's first post-turn scroll always works,
             # without waiting for the periodic Layer 10 tick.
             self._reenable_mouse_tracking()
+            # Drain the next prompt off the visible queue (if any). Done
+            # here so the queue follows directly from agent idleness —
+            # the user-side semantic is "queued prompts run as soon as
+            # the previous one finishes". Failures during drain are
+            # absorbed so a single bad prompt can't break the loop.
+            try:
+                self._drain_prompt_queue()
+            except Exception:
+                pass
 
     # ── Shell escape (``! <command>``) ───────────────────────────────
 
@@ -1507,7 +1595,7 @@ class AruApp(App):
         # stranded with no visible prompt). ``remove_class`` on a class
         # that isn't applied is a no-op, so the unconditional call is safe.
         try:
-            inp = self.query_one(Input)
+            inp = self.query_one(PromptArea)
         except Exception:
             return
         try:
@@ -1591,6 +1679,45 @@ class AruApp(App):
                 "metrics.updated",
                 lambda p: _dispatch(ctx_pane.update_from_metrics, p),
             )
+
+        # TasklistPanel — sidebar with macro plan + executor subtasks.
+        # Subscribes to two events emitted from ``aru.tools.tasklist``.
+        try:
+            tasklist_panel = self.query_one(TasklistPanel)
+        except Exception:
+            tasklist_panel = None
+        if tasklist_panel is not None:
+            mgr.subscribe(
+                "tasklist.updated",
+                lambda p: _dispatch(tasklist_panel.on_tasklist_updated, p),
+            )
+            mgr.subscribe(
+                "plan.updated",
+                lambda p: _dispatch(tasklist_panel.on_plan_updated, p),
+            )
+
+        # OS notification dispatcher — fires terminal bell + OSC 9 + OS
+        # toast on subagent.complete / turn.end per the configured policy.
+        # Lazy-instantiated here so we share the same plugin manager as
+        # the rest of the bus subscribers; cheap to construct.
+        try:
+            policy = (
+                getattr(self.config, "notify", "background")
+                if self.config is not None
+                else "background"
+            )
+            threshold = (
+                float(getattr(self.config, "notify_threshold_sec", 30.0))
+                if self.config is not None
+                else 30.0
+            )
+            from aru.tui.notifications import NotificationDispatcher
+            self._notify_dispatcher = NotificationDispatcher(
+                self, policy=policy, threshold_sec=threshold
+            )
+            self._notify_dispatcher.install(mgr)
+        except Exception:
+            pass
 
         # SubagentPanel — live view of fan-out workers + their current
         # tool. Hidden when no sub-agent is running. Subscribes to four
@@ -1692,9 +1819,22 @@ class AruApp(App):
         except Exception:
             pass
 
+    def action_toggle_tasklist(self) -> None:
+        """Show/hide the right-sidebar tasklist panel (Ctrl+T)."""
+        try:
+            panel = self.query_one(TasklistPanel)
+        except Exception:
+            return
+        hidden = panel.toggle_visibility()
+        self.notify(
+            "Tasklist sidebar hidden." if hidden else "Tasklist sidebar shown.",
+            severity="information",
+            timeout=2,
+        )
+
     def action_focus_input(self) -> None:
         try:
-            self.query_one(Input).focus()
+            self.query_one(PromptArea).focus()
         except Exception:
             pass
 
@@ -1752,24 +1892,67 @@ class AruApp(App):
             sidebar.add_class("-hidden")
             chat.add_class("-hide-sidebar")
 
-    def action_ctrl_c(self) -> None:
-        """Context-sensitive Ctrl+C — matches REPL semantics.
+    def _gather_selected_text(self) -> str:
+        """Collect any active text selection across the App.
 
-        1. If the user has a text selection active → copy it (matches
-           every other TUI: ``less``, ``htop``, shell readline, etc.).
+        Two distinct selection models can produce a "selected" string:
+
+        1. **Screen-level mouse selections**: populated by Textual when
+           the user click-drags inside any widget that opts in via
+           ``ALLOW_SELECT``. Lives in ``Screen.selections``. Read via
+           ``Screen.get_selected_text``.
+        2. **Widget-internal selections**: ``Input`` and ``TextArea``
+           track their own text selection (shift+arrow, double-click).
+           These are NOT visible to the screen-level API. We have to
+           ask the focused widget directly.
+
+        Returning the first non-empty hit means a Ctrl+C with selection
+        in *either* model copies the right text instead of arming the
+        exit confirmation.
+        """
+        try:
+            screen_sel = self.screen.get_selected_text() or ""
+        except Exception:
+            screen_sel = ""
+        if screen_sel.strip():
+            return screen_sel
+        try:
+            focused = self.focused
+        except Exception:
+            focused = None
+        if focused is not None:
+            # ``TextArea.selected_text`` and ``Input.selected_text`` are
+            # the public attribute names; both return ``""`` when no
+            # range is selected.
+            for attr in ("selected_text", "_selected_text"):
+                try:
+                    val = getattr(focused, attr, None)
+                except Exception:
+                    val = None
+                if isinstance(val, str) and val:
+                    return val
+        return ""
+
+    def action_ctrl_c(self) -> None:
+        """Context-sensitive Ctrl+C — matches REPL semantics, minus quit.
+
+        1. If there's any text selection (screen mouse selection OR
+           focused-widget internal selection) → copy it.
         2. If an agent turn is running → abort the turn, keep the app
            alive, and hand the prompt back to the user. This mirrors
            the REPL where SIGINT during an agent run raises
            ``KeyboardInterrupt`` inside ``run_agent_capture`` and drops
            back to the readline prompt without exiting.
-        3. Only when the prompt is already idle (no selection, no
-           running turn) does Ctrl+C exit the app — same as hitting
-           Ctrl+C at an empty REPL prompt.
+        3. When the prompt is idle → display a hint and stay alive.
+
+        Ctrl+C **does not exit** Aru. The earlier "two Ctrl+C exits"
+        pattern was a footgun: when the screen-level selection wasn't
+        detected (focus shift, intermittent terminal mouse state), the
+        first press armed silently and the user's retry-to-copy became
+        a quit. Users who really want to leave have ``Ctrl+Q`` (visible
+        in the footer) or ``/quit``.
         """
-        try:
-            selected = self.screen.get_selected_text() or ""
-        except Exception:
-            selected = ""
+        selected = self._gather_selected_text()
         if selected.strip():
             try:
                 self.copy_to_clipboard(selected)
@@ -1785,6 +1968,10 @@ class AruApp(App):
                 self.screen.clear_selection()
             except Exception:
                 pass
+            # Reset the exit-arm — a successful copy is a clear
+            # "user did something useful" signal, no need to keep the
+            # quit window open.
+            self._last_ctrl_c_t = 0.0
             return
         if self._busy:
             # Mid-turn: interrupt the agent and return control to the
@@ -1799,12 +1986,27 @@ class AruApp(App):
             except Exception:
                 pass
             try:
-                self.query_one(Input).focus()
+                self.query_one(PromptArea).focus()
             except Exception:
                 pass
+            self._last_ctrl_c_t = 0.0
             return
-        # Idle prompt → exit, same as Ctrl+C at an empty REPL prompt.
-        self.action_quit_app()
+        # Idle prompt: never exit. Hint at the alternatives so users who
+        # *did* want to quit aren't stranded. Throttle the toast so a
+        # frantic Ctrl+C, Ctrl+C, Ctrl+C burst doesn't spawn three of
+        # them stacked on top of each other.
+        import time
+        now = time.monotonic()
+        if now - self._last_ctrl_c_t > 1.5:
+            self._last_ctrl_c_t = now
+            try:
+                self.notify(
+                    "Nothing selected. Use Ctrl+Q or /quit to exit.",
+                    severity="information",
+                    timeout=2,
+                )
+            except Exception:
+                pass
 
     def _abort_running_turn(self) -> None:
         """Signal any in-flight agent worker to cancel."""
@@ -1850,6 +2052,174 @@ class AruApp(App):
         except Exception as exc:
             self.notify(f"Copy failed: {exc}", severity="error")
 
+    def action_copy_code(self) -> None:
+        """Copy the last fenced code block from any assistant reply (Ctrl+K).
+
+        Walks assistant bubbles in reverse and lifts the most recent
+        ``​```lang\\n...\\n```​`` block. Useful when the model emits
+        prose plus a snippet and the user wants only the snippet — Ctrl+Y
+        copies the whole reply, Ctrl+K narrows to the code.
+        """
+        import re
+        from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
+        try:
+            chat = self.query_one(ChatPane)
+        except Exception:
+            return
+        assistants = [
+            m for m in chat.query(ChatMessageWidget) if m.role == "assistant"
+        ]
+        fence_re = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+        for msg in reversed(assistants):
+            text = msg.buffer or ""
+            blocks = fence_re.findall(text)
+            if blocks:
+                code = blocks[-1]
+                try:
+                    self.copy_to_clipboard(code)
+                    self.notify(
+                        f"Copied last code block ({len(code)} chars).",
+                        severity="information",
+                    )
+                except Exception as exc:
+                    self.notify(f"Copy failed: {exc}", severity="error")
+                return
+        self.notify("No fenced code block found.", severity="warning")
+
+    def action_show_keymap(self) -> None:
+        """Open the keymap overlay (F1)."""
+        from aru.tui.screens.keymap import KeymapScreen
+        self.push_screen(KeymapScreen())
+
+    def action_show_sessions(self) -> None:
+        """Open the session picker (Ctrl+S / /sessions).
+
+        On selection, the chosen session replaces the current one in
+        place — chat is cleared, history replayed, status panes
+        refreshed. The previous session is saved first so the user
+        can return to it later.
+        """
+        if self.session_store is None:
+            self._push_chat("No session store.", "sessions")
+            return
+        from aru.tui.screens.session_picker import SessionPickerScreen
+
+        current_id = (
+            getattr(self.session, "session_id", None)
+            if self.session is not None
+            else None
+        )
+
+        def _on_pick(sid: str | None) -> None:
+            if not sid:
+                return
+            if sid == current_id:
+                self.notify(
+                    "Already on this session.",
+                    severity="information",
+                    timeout=2,
+                )
+                return
+            self._swap_session(sid)
+
+        self.push_screen(SessionPickerScreen(self.session_store, current_id), _on_pick)
+
+    def _swap_session(self, new_id: str) -> None:
+        """Save the current session and resume ``new_id`` in place.
+
+        Surface-level operations (chat clear, history replay, status
+        refresh) keep the visible state consistent with the loaded
+        session. The agent loop is untouched — the next turn picks
+        up the new session naturally because ``ctx.session`` was
+        repointed and ``self.session`` is what every dispatch site
+        reads.
+        """
+        # 1. Save the outgoing session so we don't lose its tail edits.
+        try:
+            if self.session is not None and self.session_store is not None:
+                self.session_store.save(self.session)
+        except Exception:
+            pass
+
+        # 2. Load the new session.
+        try:
+            new_session = self.session_store.load(new_id)
+        except Exception as exc:
+            self.notify(f"Load failed: {exc}", severity="error")
+            return
+        if new_session is None:
+            self.notify(f"Session '{new_id}' not found.", severity="error")
+            return
+
+        # 3. Repoint app + ctx + propagate to status / context panes.
+        self.session = new_session
+        try:
+            if self.ctx is not None:
+                self.ctx.session = new_session
+                # Mirror /model logic so the model + small_model_ref
+                # come from the resumed session, not the previous one.
+                from aru.providers import resolve_model_ref
+                self.ctx.model_id = new_session.model_id
+                config_aliases = (
+                    getattr(self.config, "model_aliases", None) or {}
+                ) if self.config else {}
+                small_ref = config_aliases.get("small")
+                if not small_ref:
+                    provider_key, _ = resolve_model_ref(new_session.model_ref)
+                    _small_defaults = {
+                        "anthropic": "anthropic/claude-haiku-4-5",
+                        "openai": "openai/gpt-4o-mini",
+                        "groq": "groq/llama-3.1-8b-instant",
+                        "deepseek": "deepseek/deepseek-chat",
+                        "ollama": "ollama/llama3.1",
+                    }
+                    small_ref = _small_defaults.get(
+                        provider_key, new_session.model_ref
+                    )
+                self.ctx.small_model_ref = small_ref
+        except Exception:
+            pass
+
+        # 4. Clear and replay chat.
+        try:
+            chat = self.query_one(ChatPane)
+            for child in list(chat.children):
+                try:
+                    child.remove()
+                except Exception:
+                    pass
+            self._replay_resumed_history(chat)
+            chat.add_system_message(f"Resumed session {new_id[:8]}.")
+        except Exception:
+            pass
+
+        # 5. Refresh status / context panes.
+        try:
+            self.query_one(StatusPane)._refresh_from_session()
+        except Exception:
+            pass
+        try:
+            self.query_one(ContextPane).refresh_from_session()
+        except Exception:
+            pass
+
+        # 6. Reset history cursor + clear queue (queued prompts belonged
+        # to the old session — running them against the new one would
+        # be surprising).
+        self._history_cursor = None
+        try:
+            queue = self.query_one(PromptQueueWidget)
+            for qid, _text in list(queue.items()):
+                queue.cancel(qid)
+        except Exception:
+            pass
+
+        self.notify(
+            f"Resumed session {new_id[:8]}.",
+            severity="information",
+            timeout=3,
+        )
+
     def action_copy_all(self) -> None:
         """Copy the entire chat transcript to the clipboard (Ctrl+Shift+Y)."""
         from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
@@ -1886,39 +2256,59 @@ class AruApp(App):
         if not self._history:
             return
         try:
-            inp = self.query_one(Input)
+            prompt = self.query_one(PromptArea)
         except Exception:
             return
-        if inp.has_focus is False:
+        if not prompt.has_focus:
             return
         if self._history_cursor is None:
             self._history_cursor = len(self._history) - 1
         elif self._history_cursor > 0:
             self._history_cursor -= 1
-        inp.value = self._history[self._history_cursor]
+        prompt.value = self._history[self._history_cursor]
 
     def action_history_next(self) -> None:
         """Move forward in history (towards the empty line)."""
         if not self._history:
             return
         try:
-            inp = self.query_one(Input)
+            prompt = self.query_one(PromptArea)
         except Exception:
             return
-        if inp.has_focus is False:
+        if not prompt.has_focus:
             return
         if self._history_cursor is None:
             return
         if self._history_cursor < len(self._history) - 1:
             self._history_cursor += 1
-            inp.value = self._history[self._history_cursor]
+            prompt.value = self._history[self._history_cursor]
         else:
             self._history_cursor = None
-            inp.value = ""
+            prompt.value = ""
 
     def action_quit_app(self) -> None:
         self._save_session()
+        self._restore_sigint_handler()
         self.exit(return_code=0)
+
+    def _restore_sigint_handler(self) -> None:
+        """Restore the SIGINT handler we replaced in ``on_mount``.
+
+        Otherwise the parent shell would inherit our no-op handler and a
+        subsequent long-running command would not respond to Ctrl+C.
+        """
+        prev = getattr(self, "_prev_sigint_handler", None)
+        if prev is None:
+            return
+        try:
+            import signal as _signal
+            _signal.signal(_signal.SIGINT, prev)
+        except (ValueError, OSError, AttributeError):
+            pass
+        self._prev_sigint_handler = None
+
+    def on_unmount(self) -> None:
+        self._restore_sigint_handler()
 
     def _save_session(self) -> None:
         try:

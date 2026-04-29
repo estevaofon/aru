@@ -1,4 +1,4 @@
-"""Tests for the minimal input behaviour added in E6c."""
+"""Tests for the multi-line PromptArea input behaviour."""
 
 from __future__ import annotations
 
@@ -29,9 +29,6 @@ async def test_user_message_persists_to_session_history():
         assert app.session.history == []
 
         app._dispatch_user_turn("hello world")
-        # Persistence happens synchronously, before the worker dispatch,
-        # so we can check immediately — no need to await the worker
-        # (which would fail on an uninstalled runtime anyway).
 
         user_msgs = [m for m in app.session.history if m.get("role") == "user"]
         assert len(user_msgs) == 1
@@ -55,10 +52,6 @@ async def test_multiple_user_turns_accumulate_in_history():
         await pilot.pause()
         app.session = Session(session_id="test-persist-multi")
 
-        # Simulate three user turns in quick succession. The agent worker
-        # is exclusive/grouped, so these enqueue rather than actually
-        # running — which is exactly what we need to isolate the
-        # persistence path.
         for msg in ("first", "second", "continue"):
             app._dispatch_user_turn(msg)
 
@@ -81,21 +74,19 @@ async def test_slash_help_handled_locally():
     """`/help` prints help inline — does NOT dispatch to the agent."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one("Input")
+        inp = app.query_one(PromptArea)
         inp.value = "/help"
-        # Simulate submit
-        from textual.widgets import Input
-        inp.post_message(Input.Submitted(inp, value="/help"))
+        inp.post_message(PromptArea.Submitted("/help"))
         await pilot.pause()
         chat = app.query_one(ChatPane)
         msgs = list(chat.query(ChatMessageWidget))
         joined = " ".join(m.buffer for m in msgs)
         assert "local commands" in joined.lower() or "shortcuts" in joined.lower()
-    # App should not be busy (no turn was dispatched)
     assert app._busy is False
 
 
@@ -103,6 +94,7 @@ async def test_slash_help_handled_locally():
 async def test_slash_clear_clears_chat():
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
@@ -111,9 +103,8 @@ async def test_slash_clear_clears_chat():
         chat.add_user_message("one")
         chat.add_user_message("two")
         await pilot.pause()
-        inp = app.query_one("Input")
-        from textual.widgets import Input as _I
-        inp.post_message(_I.Submitted(inp, value="/clear"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("/clear"))
         await pilot.pause()
         msgs = list(chat.query(ChatMessageWidget))
         # Only the "Chat cleared" system message remains.
@@ -135,55 +126,39 @@ async def test_unknown_slash_falls_through_to_agent_queue():
 
 
 @pytest.mark.asyncio
-async def test_multiline_paste_preserves_full_block():
-    """Pasting N>1 lines stashes the full block; submit sends everything.
+async def test_multiline_paste_lands_in_visible_buffer():
+    """Multi-line paste goes straight into the PromptArea where the user
+    can edit it before submitting.
 
-    Regression: Textual's base ``Input._on_paste`` silently drops
-    everything after the first newline. For agent prompts the whole
-    block must survive so stack traces / diffs / log snippets reach
-    the agent intact.
+    The previous single-line ``PromptInput`` had to stash the paste
+    invisibly because it couldn't render newlines; the new ``TextArea``
+    drops it directly into the visible text. No more ``_pending_paste``
+    state — the buffer IS the source of truth.
     """
     from textual import events
-    from textual.widgets import Input
 
-    from aru.tui.app import AruApp, PromptInput
-    from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
+    from aru.tui.app import AruApp
+    from aru.tui.widgets.prompt_area import PromptArea
 
-    captured: dict = {}
-
-    class _Probe(AruApp):
-        def _dispatch_user_turn(self, text: str) -> None:  # type: ignore[override]
-            captured["text"] = text
-            # Skip the real dispatch (no agent available in tests).
-            self.query_one(ChatPane).add_user_message(text)
-
-    app = _Probe()
+    app = AruApp()
     pasted = "line one\nline two\nline three"
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        assert isinstance(inp, PromptInput), "compose must yield PromptInput"
+        inp = app.query_one(PromptArea)
+        inp.focus()
+        await pilot.pause()
         inp.post_message(events.Paste(text=pasted))
         await pilot.pause()
-        # The full text is stashed, the visible input stays empty.
-        assert app._pending_paste == pasted
-        assert app._pending_paste_lines == 3
-        assert inp.value == ""
-        # Submit with no annotation → agent sees the raw pasted block.
-        inp.post_message(Input.Submitted(inp, value=""))
-        await pilot.pause()
-    assert captured["text"] == pasted
-    assert app._pending_paste is None
+        # Whatever the user pastes is what they see and submit.
+        assert pasted in inp.value
 
 
 @pytest.mark.asyncio
-async def test_multiline_paste_with_annotation_wraps_in_fenced_block():
-    """If the user types a note and submits, the paste is merged as fenced code."""
-    from textual import events
-    from textual.widgets import Input
-
+async def test_submitted_carries_full_multiline_text():
+    """``PromptArea.Submitted`` payload preserves embedded newlines."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets.prompt_area import PromptArea
 
     captured: dict = {}
 
@@ -193,52 +168,131 @@ async def test_multiline_paste_with_annotation_wraps_in_fenced_block():
             self.query_one(ChatPane).add_user_message(text)
 
     app = _Probe()
-    pasted = "err: foo\nerr: bar"
+    multiline = "first line\nsecond line\nthird line"
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(events.Paste(text=pasted))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted(multiline))
         await pilot.pause()
-        inp.post_message(Input.Submitted(inp, value="what does this mean?"))
-        await pilot.pause()
-    expected = f"what does this mean?\n\n```\n{pasted}\n```"
-    assert captured["text"] == expected
+    assert captured["text"] == multiline
 
 
 @pytest.mark.asyncio
-async def test_single_line_paste_falls_back_to_default_behaviour():
-    """A single-line paste must NOT land in ``_pending_paste`` — inserted inline."""
-    from textual import events
-    from textual.widgets import Input
+async def test_ctrl_j_inserts_newline_instead_of_submitting():
+    """Ctrl+J is the universal newline fallback for terminals that drop
+    the shift modifier on Enter (Windows Terminal, conhost, Git Bash).
 
+    Pressing Ctrl+J must insert a literal LF at the cursor and must NOT
+    fire ``PromptArea.Submitted``.
+    """
     from aru.tui.app import AruApp
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
+    submitted: list[str] = []
+
+    class _Probe(AruApp):
+        def _dispatch_user_turn(self, text: str) -> None:  # type: ignore[override]
+            submitted.append(text)
+
+    app = _Probe()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(events.Paste(text="just one line"))
+        inp = app.query_one(PromptArea)
+        inp.focus()
         await pilot.pause()
-        assert app._pending_paste is None
-        assert app._pending_paste_lines == 0
-        assert inp.value == "just one line"
+        inp.value = "first"
+        await pilot.pause()
+        # Move cursor to end of buffer so insert lands after "first".
+        try:
+            inp.move_cursor((0, len("first")))
+        except Exception:
+            pass
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+        # Newline inserted; no Submitted dispatched.
+        assert "\n" in inp.value, f"expected newline, got {inp.value!r}"
+        assert submitted == [], f"unexpected submit: {submitted}"
+
+
+@pytest.mark.asyncio
+async def test_trailing_backslash_enter_inserts_newline_not_submit():
+    """`\\<Enter>` inserts a newline and strips the backslash.
+
+    Mirrors shell line continuation. Gives users a one-handed way to
+    compose multi-line prompts when the terminal silently drops
+    shift+enter.
+    """
+    from aru.tui.app import AruApp
+    from aru.tui.widgets.prompt_area import PromptArea
+
+    submitted: list[str] = []
+
+    class _Probe(AruApp):
+        def _dispatch_user_turn(self, text: str) -> None:  # type: ignore[override]
+            submitted.append(text)
+
+    app = _Probe()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one(PromptArea)
+        inp.focus()
+        await pilot.pause()
+        inp.value = "first\\"
+        try:
+            inp.move_cursor((0, len("first\\")))
+        except Exception:
+            pass
+        await pilot.pause()
+        inp.action_submit_prompt()
+        await pilot.pause()
+        # The trailing ``\`` was consumed and replaced by a newline.
+        assert inp.value == "first\n", f"got {inp.value!r}"
+        assert submitted == [], f"unexpected submit: {submitted}"
+
+
+@pytest.mark.asyncio
+async def test_double_backslash_still_submits():
+    """`\\\\<Enter>` (two backslashes) means the user wants a literal
+    backslash at the end of the message — submit normally."""
+    from aru.tui.app import AruApp
+    from aru.tui.widgets.prompt_area import PromptArea
+
+    submitted: list[str] = []
+
+    class _Probe(AruApp):
+        def _dispatch_user_turn(self, text: str) -> None:  # type: ignore[override]
+            submitted.append(text)
+
+    app = _Probe()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.query_one(PromptArea)
+        inp.value = "ends with \\\\"
+        try:
+            inp.move_cursor((0, len("ends with \\\\")))
+        except Exception:
+            pass
+        await pilot.pause()
+        inp.action_submit_prompt()
+        await pilot.pause()
+    assert submitted == ["ends with \\\\"]
 
 
 @pytest.mark.asyncio
 async def test_history_up_down_cycles_submitted_inputs():
     from aru.tui.app import AruApp
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
+        inp = app.query_one(PromptArea)
         # Simulate two submits to populate history (use /clear so no agent runs)
-        inp.post_message(Input.Submitted(inp, value="/clear"))
+        inp.post_message(PromptArea.Submitted("/clear"))
         await pilot.pause()
-        inp.post_message(Input.Submitted(inp, value="/help"))
+        inp.post_message(PromptArea.Submitted("/help"))
         await pilot.pause()
-        # After submits, history has 2 entries; cursor is reset
         assert app._history == ["/clear", "/help"]
         assert app._history_cursor is None
         # Simulate Up → should recall the latest entry

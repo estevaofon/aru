@@ -1,4 +1,15 @@
-"""Task list and plan steps panels render into the TUI ChatPane."""
+"""Task list and plan steps panels render into the TUI sidebar (Tier 2.6).
+
+Before fix/tui-tier-improvements, every ``create_task_list`` /
+``update_task`` call mounted a fresh Rich panel inside the chat —
+producing N stacked snapshots over a turn. The new contract:
+
+* Tasklist + plan changes publish ``tasklist.updated`` / ``plan.updated``
+  events.
+* The ``TasklistPanel`` sidebar subscribes and renders the current
+  snapshot in one place.
+* The chat fallback only fires when the sidebar is explicitly hidden.
+"""
 
 from __future__ import annotations
 
@@ -8,88 +19,109 @@ pytest.importorskip("textual")
 
 
 @pytest.mark.asyncio
-async def test_create_task_list_renders_panel_in_chat():
-    """`create_task_list` should surface its Rich panel inside the ChatPane
-    when running in TUI mode — verified by checking the SVG render."""
+async def test_create_task_list_publishes_tasklist_event():
+    """``create_task_list`` should publish ``tasklist.updated`` on the bus."""
     from aru.runtime import init_ctx, set_ctx
-    from aru.tui.app import AruApp
-    from aru.tui.widgets.chat import ChatPane
-    import re, html
+    from aru.plugins.manager import PluginManager
+    from aru.tools.tasklist import create_task_list
 
-    app = AruApp()
-    async with app.run_test(size=(160, 50)) as pilot:
-        await pilot.pause()
-        ctx = init_ctx()
-        ctx.tui_app = app
-        set_ctx(ctx)
-        chat = app.query_one(ChatPane)
-        before = len(list(chat.children))
-        from aru.tools.tasklist import create_task_list
-        create_task_list(["first thing", "second thing"])
-        await pilot.pause(0.3)
-        after = len(list(chat.children))
-        svg = app.export_screenshot()
-        text = "".join(
-            html.unescape(m) for m in
-            re.findall(r"<text[^>]*>([^<]*)</text>", svg, re.DOTALL)
-        ).replace("\xa0", " ")
-    # A new renderable was mounted, and at least part of the task text is
-    # visible in the viewport.
-    assert after > before
-    assert "first thing" in text or "second thing" in text
+    received: list[dict] = []
+
+    ctx = init_ctx()
+    mgr = PluginManager()
+    ctx.plugin_manager = mgr
+    set_ctx(ctx)
+    mgr.subscribe("tasklist.updated", lambda p: received.append(p))
+
+    create_task_list(["first thing", "second thing"])
+    # publish is scheduled on the running loop; yield once to let it run.
+    import asyncio
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert received, "tasklist.updated never fired"
+    last = received[-1]
+    descs = [t.get("description") for t in last.get("tasks", [])]
+    assert "first thing" in descs
+    assert "second thing" in descs
 
 
 @pytest.mark.asyncio
-async def test_flush_plan_render_pushes_to_chat():
-    """When the session flags `_plan_render_pending`, flush_plan_render
-    should emit the plan panel into the ChatPane (via ``_show``)."""
-    from aru.runtime import init_ctx, set_ctx
-    from aru.session import Session
-    from aru.tools.tasklist import flush_plan_render
+async def test_tasklist_panel_renders_when_event_received():
+    """When the bus publishes ``tasklist.updated``, the sidebar lights up."""
     from aru.tui.app import AruApp
+    from aru.tui.widgets.tasklist_panel import TasklistPanel
 
     app = AruApp()
-    async with app.run_test(size=(140, 40)) as pilot:
+    async with app.run_test() as pilot:
         await pilot.pause()
-        ctx = init_ctx()
-        ctx.tui_app = app
-        session = Session()
-        session.set_plan(task="Test plan", plan_content="## Steps\n1. one\n2. two")
-        session._plan_render_pending = True
-        ctx.session = session
-        set_ctx(ctx)
-        # Count children before.
-        before = len(list(app.query_one("ChatPane").children))
-        flush_plan_render(session)
-        await pilot.pause(0.2)
-        after = len(list(app.query_one("ChatPane").children))
-    # Panel was mounted into chat.
-    assert after > before
+        panel = app.query_one(TasklistPanel)
+        assert panel.task_count() == 0
+        panel.on_tasklist_updated(
+            {
+                "tasks": [
+                    {"index": 1, "description": "alpha", "status": "pending"},
+                    {"index": 2, "description": "beta", "status": "in_progress"},
+                ]
+            }
+        )
+        await pilot.pause()
+        assert panel.task_count() == 2
+        assert panel.has_class("-busy")
 
 
 @pytest.mark.asyncio
-async def test_sink_on_tool_batch_finished_flushes_plan():
-    """TextualBusSink.on_tool_batch_finished must call flush_plan_render."""
-    from aru.runtime import init_ctx, set_ctx
-    from aru.session import Session
+async def test_plan_panel_renders_when_event_received():
     from aru.tui.app import AruApp
-    from aru.tui.sinks import TextualBusSink
-    from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets.tasklist_panel import TasklistPanel
 
     app = AruApp()
-    async with app.run_test(size=(140, 40)) as pilot:
+    async with app.run_test() as pilot:
         await pilot.pause()
-        ctx = init_ctx()
-        ctx.tui_app = app
-        session = Session()
-        session.set_plan(task="Another", plan_content="## Steps\n1. a\n2. b")
-        session._plan_render_pending = True
-        ctx.session = session
-        set_ctx(ctx)
-        chat = app.query_one(ChatPane)
-        before = len(list(chat.children))
-        sink = TextualBusSink(app=app, chat_pane=chat)
-        sink.on_tool_batch_finished(session=session)
-        await pilot.pause(0.2)
-        after = len(list(chat.children))
-    assert after > before
+        panel = app.query_one(TasklistPanel)
+        panel.on_plan_updated(
+            {
+                "steps": [
+                    {"index": 1, "description": "phase one", "status": "completed"},
+                    {"index": 2, "description": "phase two", "status": "in_progress"},
+                ]
+            }
+        )
+        await pilot.pause()
+        assert panel.plan_step_count() == 2
+
+
+@pytest.mark.asyncio
+async def test_tasklist_event_clears_panel_when_empty():
+    from aru.tui.app import AruApp
+    from aru.tui.widgets.tasklist_panel import TasklistPanel
+
+    app = AruApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app.query_one(TasklistPanel)
+        panel.on_tasklist_updated({"tasks": [{"index": 1, "description": "x"}]})
+        await pilot.pause()
+        assert panel.task_count() == 1
+        panel.on_tasklist_updated({"tasks": []})
+        await pilot.pause()
+        assert panel.task_count() == 0
+        assert not panel.has_class("-busy")
+
+
+@pytest.mark.asyncio
+async def test_toggle_visibility_hides_panel():
+    from aru.tui.app import AruApp
+    from aru.tui.widgets.tasklist_panel import TasklistPanel
+
+    app = AruApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        panel = app.query_one(TasklistPanel)
+        panel.on_tasklist_updated({"tasks": [{"index": 1, "description": "x"}]})
+        await pilot.pause()
+        assert panel.has_class("-busy")
+        hidden = panel.toggle_visibility()
+        await pilot.pause()
+        assert hidden is True
+        assert panel.has_class("-hidden")

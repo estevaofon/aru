@@ -789,6 +789,11 @@ class ChatMessageWidget(Static):
         # assistant reply is streaming in.
         self._md_render_task: asyncio.Task | None = None
         self._pending_md_render: bool = False
+        # Clickable file:line targets surfaced in the rendered Text via
+        # ``add_path_links``. Only populated on ``finalize_render`` to
+        # keep the streaming path zero-cost. The action handler
+        # ``action_open_file(idx)`` indexes into this list.
+        self._link_targets: list[tuple[str, int | None]] = []
         # Incremental-render cache. Holds the rendered ``Text`` of the
         # *stable* prefix of the buffer (everything up to the last blank
         # line outside a fence) so the hot path re-parses only the tail
@@ -1180,6 +1185,11 @@ class ChatMessageWidget(Static):
         guards, the finished bubble the user reads is the pristine naïve
         render.
 
+        After the markdown render, file paths in the buffer are made
+        clickable via ``add_path_links`` (Tier 2 #9). Done only on
+        finalize so streaming bubbles don't pay the regex pass and
+        partial-path matches can't surface.
+
         Also clears the prefix cache so a ~40 KB ``Text`` isn't retained
         per closed bubble for the life of the ``ChatPane``.
         """
@@ -1189,12 +1199,51 @@ class ChatMessageWidget(Static):
         self._pending_md_render = False
         if self.role == "assistant" and self.buffer:
             try:
-                self.update(self._compose_renderable())
+                rendered = self._compose_renderable()
+                # Augment the closed bubble with clickable file paths.
+                # Only meaningful when the renderable is a ``Text`` —
+                # ``_compose_renderable`` returns Text for assistant
+                # messages, so this is the common path.
+                if isinstance(rendered, Text):
+                    self._link_targets = []
+                    try:
+                        from aru.tui.widgets.file_link import add_path_links
+                        add_path_links(rendered, self._link_targets)
+                    except Exception:
+                        pass
+                self.update(rendered)
             except Exception:
                 pass
         self._cache_prefix_src = ""
         self._cache_prefix_text = None
         self._cache_width = 0
+
+    def action_open_file(self, idx: int) -> None:
+        """Open the ``idx``th detected file:line in ``$EDITOR``.
+
+        Called by Textual when the user clicks a path span styled with
+        ``meta={"@click": "open_file(N)"}`` by ``add_path_links``.
+        """
+        try:
+            target = self._link_targets[idx]
+        except (IndexError, TypeError):
+            return
+        path, line = target
+        try:
+            from aru.tui.widgets.file_link import open_in_editor
+            ok = open_in_editor(path, line)
+            if not ok:
+                self.app.notify(
+                    f"Could not launch editor for {path}",
+                    severity="warning",
+                )
+        except Exception as exc:
+            try:
+                self.app.notify(
+                    f"Open failed: {exc}", severity="error"
+                )
+            except Exception:
+                pass
 
     def on_resize(self, event) -> None:
         """Re-render the assistant bubble so markdown wrap follows width.

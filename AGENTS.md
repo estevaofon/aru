@@ -35,20 +35,28 @@ aru/
 │   ├── slash_bridge.py # Reuse REPL handle_* handlers in TUI (E6b)
 │   ├── log_bridge.py   # Forward agno/aru ERROR log records into ChatPane (Textual hijacks stderr)
 │   ├── sanitize.py     # Strip C0 control bytes from agent/tool/file content before it reaches the terminal
+│   ├── themes.py       # Curated theme presets (dark/light/nord/gruvbox/dracula/solarized) + apply_theme
+│   ├── notifications.py # NotificationDispatcher — terminal bell / OSC 9 / OS toast on subagent.complete + turn.end
 │   ├── screens/
 │   │   ├── choice.py     # ChoiceModal — numbered option menu
 │   │   ├── confirm.py    # ConfirmModal — yes/no dialog
+│   │   ├── keymap.py     # KeymapScreen — F1 overlay listing every TUI shortcut grouped by context
 │   │   ├── search.py     # SearchScreen — free-text chat history filter
+│   │   ├── session_picker.py # SessionPickerScreen — Ctrl+S/list+resume+delete saved sessions
 │   │   └── text_input.py # TextInputModal — free-form text prompt
 │   └── widgets/
 │       ├── chat.py     # ChatPane + ChatMessageWidget (reactive streaming)
 │       ├── completer.py # SlashCompleter — dropdown for /cmds and @file
+│       ├── file_link.py # PATH_RE + add_path_links + open_in_editor — clickable file:line spans in chat
 │       ├── context_pane.py # ContextPane — top sidebar, context-window breakdown
 │       ├── header.py   # AruHeader — branded top bar
 │       ├── inline_choice.py # InlineChoicePrompt — approval prompt mounted inline in ChatPane (keeps diff/plan visible above)
 │       ├── loaded_pane.py  # LoadedPane — bottom sidebar, boot breadcrumbs
+│       ├── prompt_area.py # PromptArea — multi-line TextArea with Enter=submit / Shift+Enter=newline + paste-aware variant
+│       ├── prompt_queue.py # PromptQueueWidget — visible stack of prompts queued while the agent is busy
 │       ├── status.py   # StatusPane — session/model/tokens/cost/mode bottom bar
 │       ├── subagent_panel.py # SubagentPanel — live rows for fan-out subagents (gap 5)
+│       ├── tasklist_panel.py # TasklistPanel — sidebar with current plan steps + executor subtasks (replaces inline-in-chat panels)
 │       ├── thinking.py # ThinkingIndicator — rotating phrase + spinner while busy
 │       └── tools.py    # ToolsPane — legacy live tool-call sidebar (not mounted)
 ├── session.py          # Session state, persistence, plan tracking

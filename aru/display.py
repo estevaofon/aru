@@ -25,7 +25,7 @@ aru_logo = """
 """
 
 neon_green = "#39ff14"
-shadow_green = "#042800"
+shadow_green = "#073e00"
 
 
 def _build_logo_with_shadow(logo_text: str) -> Text:

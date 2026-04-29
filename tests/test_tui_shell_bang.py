@@ -18,7 +18,7 @@ pytest.importorskip("textual")
 async def test_bang_dispatches_shell_not_agent():
     """``! cmd`` should run via _dispatch_shell_command, NOT _dispatch_user_turn."""
     from aru.tui.app import AruApp
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     captured: dict = {}
 
@@ -32,8 +32,8 @@ async def test_bang_dispatches_shell_not_agent():
     app = _Probe()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="! echo hi"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("! echo hi"))
         await pilot.pause()
 
     assert captured.get("shell_cmd") == "echo hi"
@@ -45,7 +45,7 @@ async def test_bang_empty_command_warns():
     """``! `` alone should show a usage message and not dispatch anything."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     captured: dict = {}
 
@@ -59,8 +59,8 @@ async def test_bang_empty_command_warns():
     app = _Probe()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="!   "))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("!   "))
         await pilot.pause()
         chat = app.query_one(ChatPane)
         msgs = list(chat.query(ChatMessageWidget))
@@ -75,7 +75,7 @@ async def test_bang_empty_command_warns():
 async def test_bang_busy_blocks_dispatch():
     """If the app is already busy, ``! cmd`` should refuse to start."""
     from aru.tui.app import AruApp
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     captured: dict = {}
 
@@ -87,8 +87,8 @@ async def test_bang_busy_blocks_dispatch():
     async with app.run_test() as pilot:
         await pilot.pause()
         app._busy = True
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="! echo hi"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("! echo hi"))
         await pilot.pause()
 
     assert "shell_cmd" not in captured
@@ -99,7 +99,7 @@ async def test_bang_runs_real_command_and_streams_output():
     """End-to-end: a real shell command's output reaches the chat pane."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     # Pick a command that works on both Windows and POSIX. ``python -c``
     # avoids shell-specific syntax (echo behaves differently between
@@ -110,8 +110,8 @@ async def test_bang_runs_real_command_and_streams_output():
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value=f"! {command}"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted(f"! {command}"))
         # Wait for the worker to finish — _busy flips back to False once
         # the subprocess exits and the finally block runs.
         for _ in range(200):
@@ -135,14 +135,14 @@ async def test_bang_does_not_persist_to_session_history():
     """
     from aru.tui.app import AruApp
     from aru.session import Session
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         app.session = Session(session_id="test-shell-no-history")
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value="! echo hi"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted("! echo hi"))
         # Don't even need to wait for the worker — persistence (or lack
         # thereof) is decided synchronously during dispatch.
         await pilot.pause()
@@ -162,7 +162,7 @@ async def test_bang_failing_command_reports_nonzero_exit():
     """A command that exits non-zero should still surface an exit-code line."""
     from aru.tui.app import AruApp
     from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
-    from textual.widgets import Input
+    from aru.tui.widgets.prompt_area import PromptArea
 
     py = sys.executable.replace("\\", "/")
     command = f'{py} -c "import sys; sys.exit(7)"'
@@ -170,8 +170,8 @@ async def test_bang_failing_command_reports_nonzero_exit():
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        inp = app.query_one(Input)
-        inp.post_message(Input.Submitted(inp, value=f"! {command}"))
+        inp = app.query_one(PromptArea)
+        inp.post_message(PromptArea.Submitted(f"! {command}"))
         for _ in range(200):
             await pilot.pause(0.05)
             if not app._busy:

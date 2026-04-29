@@ -180,6 +180,16 @@ class AgentConfig:
     # Formatter config per language (Tier 3 #1). Same shape as `lsp`, plus
     # an `enabled` top-level boolean to flip auto-format on/off in aggregate.
     format: dict[str, Any] = field(default_factory=dict)
+    # TUI theme name (one of the presets in `aru/tui/themes.py`). When unset
+    # the App keeps Textual's default. Hot-reloadable via the `/theme` slash
+    # command, but the persisted choice lives in `aru.json`.
+    theme: str = ""
+    # OS notification policy: "off" | "background" | "long" | "always".
+    # See `aru/tui/notifications.py` for the threshold logic.
+    notify: str = "background"
+    # Minimum turn duration (seconds) to ring the bell when `notify: long`
+    # or `notify: always`. Default 30s — short turns don't warrant a chime.
+    notify_threshold_sec: float = 30.0
 
     @property
     def has_instructions(self) -> bool:
@@ -545,6 +555,19 @@ def _apply_config_data(config: AgentConfig, data: dict, root: Path) -> None:
         config.lsp = data["lsp"]
     if "format" in data and isinstance(data["format"], dict):
         config.format = data["format"]
+    if "theme" in data and isinstance(data["theme"], str):
+        config.theme = data["theme"].strip()
+    if "notify" in data and isinstance(data["notify"], str):
+        nv = data["notify"].strip().lower()
+        if nv in ("off", "background", "long", "always"):
+            config.notify = nv
+    if "notify_threshold_sec" in data:
+        try:
+            v = float(data["notify_threshold_sec"])
+            if v > 0:
+                config.notify_threshold_sec = v
+        except (TypeError, ValueError):
+            pass
     if "instructions" in data and isinstance(data["instructions"], list):
         entries = [str(e) for e in data["instructions"] if isinstance(e, str)]
         config.rules_instructions = _resolve_instructions(entries, root)

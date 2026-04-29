@@ -166,6 +166,29 @@ class PermissionModeChangedEvent(BaseEvent):
 # ── Intra-turn metrics ────────────────────────────────────────────────
 
 
+class TasklistUpdatedEvent(BaseEvent):
+    """Published whenever ``create_task_list`` / ``update_task`` mutates
+    the executor's subtask list. Lets the TUI ``TasklistPanel`` render
+    a live sidebar without reading the chat for the Rich panel.
+
+    ``tasks`` is the full list (newest snapshot) — subscribers do not
+    need to maintain incremental state. Empty list = list cleared.
+    """
+
+    event_type: Literal["tasklist.updated"] = "tasklist.updated"
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PlanUpdatedEvent(BaseEvent):
+    """Published when macro plan steps change (enter_plan_mode /
+    update_plan_step). Same shape contract as TasklistUpdatedEvent —
+    full snapshot, sidebar consumes directly.
+    """
+
+    event_type: Literal["plan.updated"] = "plan.updated"
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class MetricsUpdatedEvent(BaseEvent):
     """Published after each internal LLM API call (from ``cache_patch``).
 
@@ -208,6 +231,8 @@ AruEvent = Union[
     PermissionDeniedEvent,
     PermissionModeChangedEvent,
     MetricsUpdatedEvent,
+    TasklistUpdatedEvent,
+    PlanUpdatedEvent,
 ]
 
 
@@ -230,6 +255,8 @@ EVENT_MODELS: dict[str, type[BaseEvent]] = {
     "permission.denied": PermissionDeniedEvent,
     "permission.mode.changed": PermissionModeChangedEvent,
     "metrics.updated": MetricsUpdatedEvent,
+    "tasklist.updated": TasklistUpdatedEvent,
+    "plan.updated": PlanUpdatedEvent,
 }
 
 
