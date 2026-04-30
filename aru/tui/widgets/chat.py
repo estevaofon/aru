@@ -1198,22 +1198,31 @@ class ChatMessageWidget(Static):
             self._md_render_task = None
         self._pending_md_render = False
         if self.role == "assistant" and self.buffer:
-            try:
-                rendered = self._compose_renderable()
-                # Augment the closed bubble with clickable file paths.
-                # Only meaningful when the renderable is a ``Text`` —
-                # ``_compose_renderable`` returns Text for assistant
-                # messages, so this is the common path.
-                if isinstance(rendered, Text):
-                    self._link_targets = []
-                    try:
-                        from aru.tui.widgets.file_link import add_path_links
-                        add_path_links(rendered, self._link_targets)
-                    except Exception:
-                        pass
-                self.update(rendered)
-            except Exception:
-                pass
+            # Wrapped in TimedSection so ``ARU_DEBUG_LOOP=1`` records
+            # the duration this synchronous full-buffer re-parse held
+            # the loop. Suspected dominant cause of post-stream
+            # ``loop_blocked`` gaps. See investigation plan in
+            # ``docs/aru/2026-04-30-ctrlc-streaming-plan.md``.
+            from aru._debug.loop_tracer import TimedSection as _TimedSection
+            with _TimedSection(
+                "finalize_render", f"buffer_bytes={len(self.buffer)}"
+            ):
+                try:
+                    rendered = self._compose_renderable()
+                    # Augment the closed bubble with clickable file paths.
+                    # Only meaningful when the renderable is a ``Text`` —
+                    # ``_compose_renderable`` returns Text for assistant
+                    # messages, so this is the common path.
+                    if isinstance(rendered, Text):
+                        self._link_targets = []
+                        try:
+                            from aru.tui.widgets.file_link import add_path_links
+                            add_path_links(rendered, self._link_targets)
+                        except Exception:
+                            pass
+                    self.update(rendered)
+                except Exception:
+                    pass
         self._cache_prefix_src = ""
         self._cache_prefix_text = None
         self._cache_width = 0

@@ -68,6 +68,9 @@ aru/
 ├── checkpoints.py      # Pre-edit file checkpoints for undo support
 ├── display.py          # Terminal display (logo, status bar, streaming output)
 ├── doom_loop.py        # DoomLoopDetector — sliding-window guard for repeated identical tool calls
+├── _debug/
+│   ├── loop_tracer.py    # ARU_DEBUG_LOOP=1 — gated CSV trace of main-loop saturation, key dispatch, finalize_render duration (off-by-default; see docs/aru/2026-04-30-ctrlc-streaming-plan.md)
+│   └── analyze_trace.py  # python -m aru._debug.analyze_trace — parse loop-trace.log, run Fase 3 decision tree, suggest C1/C3 fix
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)

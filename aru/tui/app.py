@@ -40,6 +40,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import Footer, Input, TextArea
 
+# Loop-saturation tracer (off unless ``ARU_DEBUG_LOOP=1``). Patches
+# Textual's ``Driver.process_message`` and ``App._post_message`` at
+# import time so every keystroke / message is logged with thread name
+# + monotonic timestamp. See ``aru/_debug/loop_tracer.py`` and the
+# investigation plan in ``docs/aru/2026-04-30-ctrlc-streaming-plan.md``.
+from aru._debug import loop_tracer as _loop_tracer
+_loop_tracer.install_textual_patches()
+
 from aru.tui.widgets.chat import ChatPane
 from aru.tui.widgets.completer import SlashCompleter
 from aru.tui.widgets.context_pane import ContextPane
@@ -356,10 +364,41 @@ class AruApp(App):
         # absorbs the signal, lets the loop wake, and Textual's input
         # parser still gets the Ctrl+C keystroke through the normal
         # console-input path.
+        # Investigation patch (see docs/aru/2026-04-30-ctrlc-streaming-plan.md
+        # Fase 4): the Layer-1 hypothesis was that Textual's input parser
+        # would receive Ctrl+C as a keystroke once we disabled
+        # ``ENABLE_PROCESSED_INPUT``. The 2026-04-30 trace shows it does
+        # not — 1182 ``driver.process_message`` events landed in
+        # ``loop-trace.log`` with every other keystroke, but **never**
+        # ``key=ctrl+c``. Conclusion: on Windows, Python's Console Control
+        # Handler intercepts Ctrl+C and turns it into ``SIGINT`` *before*
+        # the byte ever reaches the console input buffer that
+        # ``ReadConsoleInputW`` drains. The previous no-op handler
+        # absorbed the signal so the app didn't die, but the keystroke
+        # was lost — Ctrl+C was effectively silent.
+        #
+        # Fix: keep the signal handler, but make it actively trigger the
+        # same path the keystroke would have taken. The handler runs in
+        # an unspecified thread (Python's signal delivery thread on
+        # Windows), so it must hop back to the loop via
+        # ``call_soon_threadsafe``. ``action_ctrl_c`` is idempotent and
+        # already context-sensitive (selection / busy / idle), so firing
+        # it from here matches the keystroke contract exactly.
         try:
             import signal as _signal
             self._prev_sigint_handler = _signal.getsignal(_signal.SIGINT)
-            _signal.signal(_signal.SIGINT, lambda _sig, _frame: None)
+
+            def _sigint_handler(_sig, _frame, _app=self):
+                _loop_tracer.trace("sigint_received", "")
+                loop = _app._loop
+                if loop is None:
+                    return
+                try:
+                    loop.call_soon_threadsafe(_app._on_sigint_from_handler)
+                except Exception:
+                    pass
+
+            _signal.signal(_signal.SIGINT, _sigint_handler)
         except (ValueError, OSError, AttributeError):
             self._prev_sigint_handler = None
         # Apply theme from aru.json (best-effort — silent if Textual's
@@ -442,6 +481,15 @@ class AruApp(App):
                 self._MOUSE_REENABLE_INTERVAL,
                 self._self_heal_terminal_state,
             )
+        # Loop-saturation heartbeat (off unless ``ARU_DEBUG_LOOP=1``).
+        # 20 Hz tick on the main loop — gaps > 200 ms are logged as
+        # ``loop_blocked`` and pin exactly when/how long the loop was
+        # unable to drain a callback.
+        try:
+            if self._loop is not None:
+                _loop_tracer.start_heartbeat(self._loop)
+        except Exception:
+            pass
 
     def _replay_resumed_history(self, chat: ChatPane) -> None:
         """Render a resumed session's user/assistant text back into the chat.
@@ -2003,6 +2051,7 @@ class AruApp(App):
         a quit. Users who really want to leave have ``Ctrl+Q`` (visible
         in the footer) or ``/quit``.
         """
+        _loop_tracer.trace("action_ctrl_c", f"busy={self._busy}")
         selected = self._gather_selected_text()
         if selected.strip():
             try:
@@ -2058,6 +2107,23 @@ class AruApp(App):
                 )
             except Exception:
                 pass
+
+    def _on_sigint_from_handler(self) -> None:
+        """Loop-thread entry point for the SIGINT handler.
+
+        Runs after ``call_soon_threadsafe`` from ``_sigint_handler``.
+        Forwards to ``action_ctrl_c`` so SIGINT-delivered Ctrl+C
+        (the only path that exists on Windows — see
+        ``on_mount`` for why) follows the same selection / abort /
+        idle hint flow as a keystroke would have. Wrapped in
+        ``try/except`` because action handlers may touch widgets
+        and a failure must not kill the app.
+        """
+        _loop_tracer.trace("sigint_dispatched_to_loop", "")
+        try:
+            self.action_ctrl_c()
+        except Exception:
+            pass
 
     def _abort_running_turn(self) -> None:
         """Signal any in-flight agent worker to cancel."""
@@ -2338,9 +2404,13 @@ class AruApp(App):
             prompt.value = ""
 
     def action_quit_app(self) -> None:
+        _loop_tracer.trace("action_quit_app", "begin")
         self._save_session()
+        _loop_tracer.trace("action_quit_app", "after_save_session")
         self._restore_sigint_handler()
+        _loop_tracer.trace("action_quit_app", "after_restore_sigint")
         self.exit(return_code=0)
+        _loop_tracer.trace("action_quit_app", "after_exit_call")
 
     def _restore_sigint_handler(self) -> None:
         """Restore the SIGINT handler we replaced in ``on_mount``.
@@ -2359,7 +2429,13 @@ class AruApp(App):
         self._prev_sigint_handler = None
 
     def on_unmount(self) -> None:
+        _loop_tracer.trace("on_unmount", "begin")
         self._restore_sigint_handler()
+        try:
+            _loop_tracer.stop_heartbeat()
+        except Exception:
+            pass
+        _loop_tracer.trace("on_unmount", "end")
 
     def _save_session(self) -> None:
         try:
@@ -2475,7 +2551,14 @@ async def run_tui(
         pass
     ctx.on_file_mutation = session.invalidate_context_cache
 
-    atexit.register(lambda: cleanup_processes(ctx.tracked_processes))
+    def _atexit_with_trace():
+        _loop_tracer.trace("atexit", "begin_cleanup_processes")
+        try:
+            cleanup_processes(ctx.tracked_processes)
+        finally:
+            _loop_tracer.trace("atexit", "end_cleanup_processes")
+
+    atexit.register(_atexit_with_trace)
 
     # Checkpoint manager for /undo support.
     try:
@@ -2586,17 +2669,20 @@ async def run_tui(
     try:
         await app.run_async()
     finally:
+        _loop_tracer.trace("run_tui_finally", "after_run_async")
         try:
             from aru.tui.log_bridge import uninstall_chat_log_bridge
             uninstall_chat_log_bridge(log_bridge_handlers)
         except Exception:
             pass
+        _loop_tracer.trace("run_tui_finally", "log_bridge_uninstalled")
         ctx.tui_app = None
         ctx.ui = None
         try:
             store.save(session)
         except Exception:
             pass
+        _loop_tracer.trace("run_tui_finally", "session_saved")
         # Restore the shell's original terminal-tab title. We pushed on
         # mount, so popping leaves the user's tab exactly as they
         # handed it to us — no stale "aru — …" lingering after exit.

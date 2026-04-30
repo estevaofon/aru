@@ -199,11 +199,20 @@ async def run_stream(
     doom_loop_detector = DoomLoopDetector()
     import time as _time
 
+    # Loop-saturation tracer hook (off unless ``ARU_DEBUG_LOOP=1``).
+    # Counts events as they're processed and emits ``stream.event_burst``
+    # periodically so we can detect rajadas with no IO yield in between
+    # — the suspected hot-loop pattern that strands Ctrl+C during
+    # streaming. See ``docs/aru/2026-04-30-ctrlc-streaming-plan.md``.
+    from aru._debug.loop_tracer import StreamSampler as _StreamSampler
+    _stream_sampler = _StreamSampler(every=16)
+
     while True:
         reset_last_stop_reason()
         _stall_counter = 0
 
         async for event in agent.arun(current_input, **arun_kwargs):
+            _stream_sampler.tick(type(event).__name__)
             if isinstance(event, RunOutput):
                 run_output = event
                 state.run_output = event
