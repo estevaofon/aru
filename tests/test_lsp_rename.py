@@ -290,6 +290,60 @@ async def test_rename_no_manager_reports_not_configured():
     assert "LSP not configured" in out
 
 
+# ── Permission gate ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rename_denied_blocks_write(rename_env, monkeypatch):
+    """A denied rename must touch no files — it rewrites the whole workspace."""
+    import aru.tools.lsp as mod
+
+    _mgr, fake, a, b = rename_env
+    original_a, original_b = a.read_text(), b.read_text()
+    fake.scripted["textDocument/rename"] = {
+        "changes": {
+            path_to_uri(str(a)): [{
+                "range": {"start": {"line": 0, "character": 4},
+                          "end":   {"line": 0, "character": 7}},
+                "newText": "bar",
+            }],
+        }
+    }
+    monkeypatch.setattr(mod, "check_permission", lambda *a, **k: False)
+
+    result = await mod.lsp_rename(str(a), 0, 5, "bar")
+    assert "PERMISSION DENIED" in result
+    assert a.read_text() == original_a
+    assert b.read_text() == original_b
+
+
+@pytest.mark.asyncio
+async def test_rename_allowed_consults_edit_category(rename_env, monkeypatch):
+    import aru.tools.lsp as mod
+
+    _mgr, fake, a, _b = rename_env
+    seen: list = []
+
+    def fake_check(category, subjects, details):
+        seen.append((category, subjects))
+        return True
+
+    monkeypatch.setattr(mod, "check_permission", fake_check)
+    fake.scripted["textDocument/rename"] = {
+        "changes": {
+            path_to_uri(str(a)): [{
+                "range": {"start": {"line": 0, "character": 4},
+                          "end":   {"line": 0, "character": 7}},
+                "newText": "bar",
+            }],
+        }
+    }
+
+    result = await mod.lsp_rename(str(a), 0, 5, "bar")
+    assert "Renamed symbol" in result
+    assert seen and seen[0][0] == "edit"
+
+
 @pytest.mark.asyncio
 async def test_rename_failed_server_surfaces_error(tmp_path):
     mgr = LspManager(config_lsp={"python": {"command": "pylsp"}}, root=str(tmp_path))

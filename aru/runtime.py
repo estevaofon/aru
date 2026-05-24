@@ -345,6 +345,101 @@ def is_aborted() -> bool:
         return False
 
 
+# ── Permission-wait gate (tool-timeout suspension) ───────────────────
+#
+# Safety-critical. A tool's execution timeout (see
+# ``aru.tools._shared._thread_tool``) must NOT count the time a human spends
+# deciding on a permission prompt. The danger is concrete: if the timeout
+# fired while a prompt was still open, ``asyncio`` reports a timeout to the
+# model — but the worker thread it ran on CANNOT be killed (a Python
+# limitation), so it keeps running, parked on the prompt. The moment the user
+# clicks "yes", that orphaned thread applies the mutation **out-of-band**,
+# after the tool already claimed it timed out. An edit (or a delete) then
+# lands that the user never knowingly approved in-context.
+#
+# To prevent that, ``check_permission`` marks a per-tool-call gate while it
+# blocks on the user, and ``_thread_tool`` suspends its timeout for exactly
+# as long as the gate is active. Decision time is the human's, not the
+# tool's budget.
+#
+# Cross-thread mechanics: the gate object is created per tool call by the
+# ``_thread_tool`` wrapper (on the event loop) and stored in a ContextVar.
+# ``asyncio.to_thread`` copies the context into the worker thread, so
+# ``check_permission`` running on that thread flips the SAME gate object the
+# wrapper polls. Concurrent tool calls each get their own gate, so a prompt
+# open for one call never accidentally exempts a sibling.
+
+
+class PermissionWaitGate:
+    """Per-tool-call counter of in-flight human permission decisions.
+
+    A depth counter (not a bool) so re-entrant or repeated permission checks
+    within one tool call nest correctly. ``active`` is true whenever at least
+    one decision is outstanding.
+    """
+
+    __slots__ = ("_depth", "_lock")
+
+    def __init__(self) -> None:
+        self._depth = 0
+        self._lock = threading.Lock()
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._depth > 0
+
+    def enter(self) -> None:
+        with self._lock:
+            self._depth += 1
+
+    def leave(self) -> None:
+        with self._lock:
+            if self._depth > 0:
+                self._depth -= 1
+
+
+_perm_wait_gate: contextvars.ContextVar[PermissionWaitGate | None] = (
+    contextvars.ContextVar("aru_perm_wait_gate", default=None)
+)
+
+
+def install_permission_wait_gate() -> tuple[PermissionWaitGate, contextvars.Token]:
+    """Create a fresh gate, install it in the current context, return (gate, token).
+
+    Called by the ``_thread_tool`` wrapper before offloading to a worker
+    thread so the worker (which runs in a copy of this context) shares the
+    gate. Pair with ``reset_permission_wait_gate(token)`` in a finally.
+    """
+    gate = PermissionWaitGate()
+    token = _perm_wait_gate.set(gate)
+    return gate, token
+
+
+def reset_permission_wait_gate(token: contextvars.Token) -> None:
+    """Restore the previous gate binding (undo ``install_permission_wait_gate``)."""
+    _perm_wait_gate.reset(token)
+
+
+def begin_permission_wait() -> None:
+    """Mark that the current tool call is blocking on a human permission decision.
+
+    Paired with ``end_permission_wait()``. A no-op when no gate is installed
+    (async tools like ``bash`` that aren't wrapped by ``_thread_tool``, or
+    direct test calls) — those paths have no execution timeout to suspend.
+    """
+    gate = _perm_wait_gate.get()
+    if gate is not None:
+        gate.enter()
+
+
+def end_permission_wait() -> None:
+    """End the permission-wait window opened by ``begin_permission_wait()``."""
+    gate = _perm_wait_gate.get()
+    if gate is not None:
+        gate.leave()
+
+
 # ── Shared-state helpers (Stage 4) ───────────────────────────────────
 #
 # Individual ``dict[k] = v``, ``dict.get(k)``, and ``list.append`` are atomic

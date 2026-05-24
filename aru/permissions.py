@@ -27,8 +27,29 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 
-from aru.runtime import get_ctx
+from aru.runtime import begin_permission_wait, end_permission_wait, get_ctx
 from aru.select import select_option
+
+
+@contextmanager
+def _permission_prompt_scope(ctx):
+    """Hold ``permission_lock`` while marking the tool-call permission gate.
+
+    The gate tells the surrounding ``_thread_tool`` wrapper to suspend its
+    execution-timeout for as long as we are blocked here — acquiring the lock
+    can wait on a sibling tool's open prompt, and the prompt itself waits on
+    the user. Without this, the tool could report a timeout mid-prompt and
+    then apply the mutation out-of-band once the user finally answered.
+    ``begin_permission_wait`` runs BEFORE the lock is acquired so the
+    lock-wait is covered too; it is a no-op when no gate is installed (async
+    tools, tests). See ``aru.runtime.PermissionWaitGate``.
+    """
+    begin_permission_wait()
+    try:
+        with ctx.permission_lock:
+            yield
+    finally:
+        end_permission_wait()
 
 
 def _resolve_ui(ctx):
@@ -891,8 +912,11 @@ def check_permission(
         except Exception:
             pass  # never let plugin errors block permissions
 
-    # action == "ask" -> prompt user
-    with ctx.permission_lock:
+    # action == "ask" -> prompt user. The scope holds permission_lock AND
+    # suspends the tool-execution timeout while we block on the user (see
+    # _permission_prompt_scope) — so a slow human decision can never let the
+    # tool time out and then apply the mutation out-of-band.
+    with _permission_prompt_scope(ctx):
         # Re-check after acquiring lock (another thread may have resolved it)
         results2 = _resolve_many(category, subjects)
         if any(action == "deny" for action, _ in results2):

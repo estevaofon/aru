@@ -27,6 +27,10 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rich.console import Group
+from rich.text import Text
+
+from aru.permissions import check_permission, consume_rejection_feedback
 from aru.tools._shared import _checkpoint_file, _notify_file_mutation
 
 
@@ -499,7 +503,86 @@ except OSError:
     _PROMPT_TEXT = "Apply a multi-file patch atomically (see apply_patch_prompt.txt)."
 
 
+_PREVIEW_MAX_ADD_LINES = 40  # cap new-file body shown in the prompt
+
+
+def _patch_permission_preview(patch: Patch) -> tuple[list[str], Group]:
+    """Build the (subjects, renderable) pair for the permission prompt.
+
+    Subjects are the affected paths (one per op, plus the move target) so the
+    user's per-path rules apply. The renderable shows a real diff — the actual
+    +/- lines for each Update hunk and Add body — so the user approves what
+    they can see, not a blind "update". Deletes and moves are highlighted;
+    those are the irreversible ones. New-file bodies are capped so a large
+    patch can't flood the terminal.
+    """
+    subjects: list[str] = []
+    blocks: list[Text] = [
+        Text(f"apply_patch — {len(patch.operations)} operation(s):", style="bold"),
+        Text(),
+    ]
+    for op in patch.operations:
+        if isinstance(op, AddFile):
+            subjects.append(op.path)
+            blocks.append(Text(f"+ add     {op.path}", style="bold green"))
+            body = op.content.splitlines()
+            for line in body[:_PREVIEW_MAX_ADD_LINES]:
+                blocks.append(Text(f"  +{line}", style="green"))
+            if len(body) > _PREVIEW_MAX_ADD_LINES:
+                blocks.append(Text(f"  … (+{len(body) - _PREVIEW_MAX_ADD_LINES} more lines)", style="dim"))
+        elif isinstance(op, DeleteFile):
+            subjects.append(op.path)
+            blocks.append(Text(f"- delete  {op.path}", style="bold red"))
+        elif isinstance(op, UpdateFile):
+            subjects.append(op.path)
+            header = f"~ update  {op.path}"
+            if op.move_to:
+                subjects.append(op.move_to)
+                header += f" → {op.move_to}"
+            blocks.append(Text(header, style="bold yellow"))
+            for hunk in op.hunks:
+                if hunk.anchor:
+                    blocks.append(Text(f"  @@ {hunk.anchor}", style="cyan"))
+                for tag, text in hunk.lines:
+                    if tag == "+":
+                        blocks.append(Text(f"  +{text}", style="green"))
+                    elif tag == "-":
+                        blocks.append(Text(f"  -{text}", style="red"))
+                    else:
+                        blocks.append(Text(f"   {text}", style="dim"))
+        blocks.append(Text())
+    return subjects, Group(*blocks)
+
+
 def apply_patch(patch: str) -> str:
+    # Parse + validate FIRST (neither touches disk for writes — validate only
+    # reads). This lets us reject malformed / non-applicable patches without
+    # bothering the user, and show exactly which files will change. ONLY then
+    # do we gate on permission, and only on approval do we apply. This is the
+    # security boundary: apply_patch can delete and move files, so it must
+    # never mutate the tree without an explicit allow.
+    try:
+        parsed = parse_patch(patch)
+        validate(parsed)
+    except PatchParseError as exc:
+        return f"Parse error: {exc}"
+    except PatchValidationError as exc:
+        return f"Validation error (no files modified): {exc}"
+
+    subjects, preview = _patch_permission_preview(parsed)
+    if not check_permission("edit", subjects, preview):
+        feedback = consume_rejection_feedback()
+        action = f"apply_patch ({len(parsed.operations)} operation(s))"
+        if feedback:
+            return (
+                f"PERMISSION DENIED by user: {action}. The user said: {feedback}\n"
+                f"Follow the user's instructions instead of retrying."
+            )
+        return (
+            f"PERMISSION DENIED by user: {action}. Do NOT retry this operation. "
+            f"Stop and ask the user for new instructions."
+        )
+
     try:
         return apply_patch_text(patch)
     except PatchParseError as exc:

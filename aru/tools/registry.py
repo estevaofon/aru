@@ -42,6 +42,15 @@ from aru.tools.worktree import worktree_info
 
 _rank_files_tool = _thread_tool(rank_files, timeout=45)
 
+# apply_patch now prompts for permission (it can delete/move files). The
+# prompt blocks on a threading.Event, which would deadlock the event loop if
+# the raw sync function ran there — so wrap it like the other mutating file
+# tools: run on a worker thread (loop stays free to drive the modal) and pick
+# up the permission-wait timeout suspension for free. functools.wraps keeps
+# __name__ == "apply_patch" so the registry key and LLM-facing schema are
+# unchanged.
+_apply_patch_tool = _thread_tool(apply_patch, timeout=60)
+
 
 # Tool sets composed from a single core set — avoid duplication and drift.
 _READ_ONLY_TOOLS = [
@@ -63,7 +72,7 @@ _WRITE_TOOLS = [
     _write_files_tool,
     _edit_file_tool,
     _edit_files_tool,
-    apply_patch,
+    _apply_patch_tool,
     lsp_rename,
 ]
 

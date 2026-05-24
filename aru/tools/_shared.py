@@ -17,6 +17,11 @@ from aru.tools.gitignore import invalidate_walk_cache
 _MAX_OUTPUT_CHARS = 10_000
 _TRUNCATE_KEEP = 3_000  # chars to keep from start and end
 
+# How often (seconds) the timeout loop re-checks the permission gate while a
+# human decision is in flight. Small enough that the post-decision write is
+# noticed promptly; large enough not to busy-spin while the user is thinking.
+_PERM_POLL_SLICE = 0.1
+
 
 def _notify_file_mutation(*, path: str | None = None, mutation_type: str = "unknown"):
     """Notify the session that files changed so caches are invalidated.
@@ -75,20 +80,66 @@ def _thread_tool(sync_fn, *, timeout: float | None = None):
             running until its sync work finishes. Applying a blanket
             default would break custom plugin tools that legitimately take
             longer than the cap.
+
+    Permission-wait suspension (safety-critical): if the wrapped tool calls
+    ``check_permission`` and blocks on a human decision, the timeout is
+    suspended for the duration of that prompt. Without this, the timeout
+    could fire mid-prompt, report a timeout to the model, and leave the
+    worker thread alive to apply the mutation out-of-band once the user
+    finally answered. See ``aru.runtime.PermissionWaitGate``.
     """
 
     @functools.wraps(sync_fn)
     async def wrapper(*args, **kwargs):
-        coro = asyncio.to_thread(sync_fn, *args, **kwargs)
         if timeout is None:
-            return await coro
+            return await asyncio.to_thread(sync_fn, *args, **kwargs)
+
+        from aru.runtime import (
+            install_permission_wait_gate,
+            reset_permission_wait_gate,
+        )
+
+        # Install the per-call gate BEFORE offloading so the worker thread
+        # (which runs in a copy of this context) shares the same gate object
+        # and ``check_permission`` can flip it while it blocks on the user.
+        gate, token = install_permission_wait_gate()
+        task: asyncio.Future | None = None
         try:
-            return await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
-            return (
-                f"[Tool timeout: {sync_fn.__name__} exceeded {timeout:g}s. "
-                f"The worker thread may still be running in the background; "
-                f"narrow the query or raise the timeout explicitly.]"
-            )
+            loop = asyncio.get_running_loop()
+            task = asyncio.ensure_future(asyncio.to_thread(sync_fn, *args, **kwargs))
+            deadline = loop.time() + timeout
+            while True:
+                if task.done():
+                    return task.result()
+                now = loop.time()
+                if gate.active:
+                    # A human is being asked to approve this tool call. Their
+                    # decision time is not the tool's execution budget — and
+                    # abandoning the worker thread now would let it apply the
+                    # mutation the instant the user answers, after we already
+                    # reported a timeout. Hold the deadline a full window
+                    # ahead so that, once the prompt closes, the actual work
+                    # still gets the complete budget (this closes the
+                    # answer→write race: when ``gate.active`` flips false the
+                    # deadline is at most one poll-slice old).
+                    deadline = now + timeout
+                    await asyncio.wait({task}, timeout=_PERM_POLL_SLICE)
+                    continue
+                remaining = deadline - now
+                if remaining <= 0:
+                    # Genuine timeout — no human in the loop. Request
+                    # cancellation (best-effort; the OS thread may run on,
+                    # same as the historical behaviour) and surface a string.
+                    task.cancel()
+                    return (
+                        f"[Tool timeout: {sync_fn.__name__} exceeded {timeout:g}s. "
+                        f"The worker thread may still be running in the background; "
+                        f"narrow the query or raise the timeout explicitly.]"
+                    )
+                await asyncio.wait({task}, timeout=remaining)
+        finally:
+            if task is not None and not task.done():
+                task.cancel()
+            reset_permission_wait_gate(token)
 
     return wrapper

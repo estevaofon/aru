@@ -273,3 +273,136 @@ def test_apply_patch_wrapper_returns_string_on_validation_error(workspace):
 """
     result = apply_patch(text)
     assert "Validation error" in result
+
+
+# ── Permission gate (security boundary) ──────────────────────────────
+#
+# apply_patch can delete and move files. It MUST NOT mutate the tree without
+# an explicit allow — the bug that prompted this work was apply_patch applying
+# silently with no prompt at all.
+
+
+def test_apply_patch_denied_blocks_update(workspace, monkeypatch):
+    import aru.tools.apply_patch as mod
+
+    p = workspace / "greet.py"
+    p.write_text("def greet():\n    return 1\n")
+    monkeypatch.setattr(mod, "check_permission", lambda *a, **k: False)
+
+    text = """\
+*** Begin Patch
+*** Update File: greet.py
+@@ def greet():
+-    return 1
++    return 2
+*** End Patch
+"""
+    result = mod.apply_patch(text)
+    assert "PERMISSION DENIED" in result
+    # File must be completely untouched.
+    assert p.read_text() == "def greet():\n    return 1\n"
+
+
+def test_apply_patch_denied_blocks_delete(workspace, monkeypatch):
+    """The 'could delete a database' case: a denied Delete must not remove the file."""
+    import aru.tools.apply_patch as mod
+
+    p = workspace / "victim.txt"
+    p.write_text("important data\n")
+    monkeypatch.setattr(mod, "check_permission", lambda *a, **k: False)
+
+    text = """\
+*** Begin Patch
+*** Delete File: victim.txt
+*** End Patch
+"""
+    result = mod.apply_patch(text)
+    assert "PERMISSION DENIED" in result
+    assert p.exists()
+    assert p.read_text() == "important data\n"
+
+
+def test_apply_patch_allowed_applies_and_consults_edit_category(workspace, monkeypatch):
+    import aru.tools.apply_patch as mod
+
+    p = workspace / "greet.py"
+    p.write_text("def greet():\n    return 1\n")
+    seen: list = []
+
+    def fake_check(category, subjects, details):
+        seen.append((category, subjects))
+        return True
+
+    monkeypatch.setattr(mod, "check_permission", fake_check)
+
+    text = """\
+*** Begin Patch
+*** Update File: greet.py
+@@ def greet():
+-    return 1
++    return 2
+*** End Patch
+"""
+    result = mod.apply_patch(text)
+    assert "1 updated" in result
+    assert "return 2" in p.read_text()
+    # Gated under the "edit" category, with the affected path as a subject.
+    assert seen and seen[0][0] == "edit"
+    assert any("greet.py" in s for s in seen[0][1])
+
+
+def test_apply_patch_prompt_shows_real_diff(workspace, monkeypatch):
+    """The user must see the actual +/- lines, not a blind 'update' summary."""
+    import aru.tools.apply_patch as mod
+    from rich.console import Console
+
+    p = workspace / "greet.py"
+    p.write_text("def greet():\n    return 1\n")
+    captured = {}
+
+    def fake_check(category, subjects, details):
+        captured["details"] = details
+        return False  # block — we only care about what was shown
+
+    monkeypatch.setattr(mod, "check_permission", fake_check)
+    text = """\
+*** Begin Patch
+*** Update File: greet.py
+@@ def greet():
+-    return 1
++    return 2
+*** End Patch
+"""
+    mod.apply_patch(text)
+    console = Console(width=120)
+    with console.capture() as cap:
+        console.print(captured["details"])
+    out = cap.get()
+    assert "-    return 1" in out
+    assert "+    return 2" in out
+
+
+def test_apply_patch_does_not_prompt_for_unapplicable_patch(workspace, monkeypatch):
+    """Validation runs BEFORE the prompt — a stale patch never reaches the user."""
+    import aru.tools.apply_patch as mod
+
+    (workspace / "x.py").write_text("actual content\n")
+    prompts = {"n": 0}
+
+    def counting_check(*a, **k):
+        prompts["n"] += 1
+        return True
+
+    monkeypatch.setattr(mod, "check_permission", counting_check)
+
+    text = """\
+*** Begin Patch
+*** Update File: x.py
+@@ nonexistent anchor
+-does not match
++replacement
+*** End Patch
+"""
+    result = mod.apply_patch(text)
+    assert "Validation error" in result
+    assert prompts["n"] == 0

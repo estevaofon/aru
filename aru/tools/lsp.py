@@ -8,12 +8,17 @@ strings rather than raises — the model can fall back to grep-based tools.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+
+from rich.console import Group
+from rich.text import Text
 
 from aru.lsp.client import LspRequestError
 from aru.lsp.manager import get_lsp_manager
 from aru.lsp.protocol import Location, Position, path_to_uri, uri_to_path
+from aru.permissions import check_permission, consume_rejection_feedback
 
 logger = logging.getLogger("aru.lsp")
 
@@ -193,6 +198,30 @@ async def lsp_rename(file_path: str, line: int, column: int, new_name: str) -> s
         return f"[Unsupported WorkspaceEdit: {exc}]"
     if not per_file_edits:
         return "No files to edit."
+
+    # Gate on permission before touching any file — a rename rewrites every
+    # referencing file across the workspace, so the user must approve the
+    # full set. ``check_permission`` is sync and may open a TUI modal that
+    # blocks on ``threading.Event``; calling it directly from this async tool
+    # (running on the App loop) would deadlock the loop so the modal never
+    # resolves. Hop to a worker thread — same pattern as ``bash``.
+    paths = sorted({uri_to_path(uri) for uri in per_file_edits})
+    preview = Group(
+        Text(f"Rename symbol → {new_name!r} across {len(paths)} file(s):", style="bold"),
+        *[Text(f"  ~ {p}") for p in paths],
+    )
+    if not await asyncio.to_thread(check_permission, "edit", paths, preview):
+        feedback = consume_rejection_feedback()
+        if feedback:
+            return (
+                f"PERMISSION DENIED by user: lsp_rename → {new_name!r}. "
+                f"The user said: {feedback}\n"
+                f"Follow the user's instructions instead of retrying."
+            )
+        return (
+            f"PERMISSION DENIED by user: lsp_rename → {new_name!r}. Do NOT retry "
+            f"this operation. Stop and ask the user for new instructions."
+        )
 
     applied = _apply_workspace_edit(per_file_edits)
     if isinstance(applied, str):  # error path
