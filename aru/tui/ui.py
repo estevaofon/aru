@@ -138,19 +138,27 @@ class TuiUI:
                 result["error"] = f"mount failed: {exc}"
                 done.set()
 
+        # Hide the "thinking…" spinner while the prompt owns the screen — we
+        # are parked waiting on the user, not computing, so an animated
+        # spinner there is misleading. Restored in the finally regardless of
+        # how the wait ends.
+        self._suppress_thinking()
         try:
-            self.app.call_from_thread(_mount)
-        except Exception as exc:
-            raise RuntimeError(
-                f"TuiUI inline-choice dispatch failed: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+            try:
+                self.app.call_from_thread(_mount)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"TuiUI inline-choice dispatch failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
-        if not done.wait(timeout=timeout_s):
-            raise RuntimeError(
-                f"TuiUI inline-choice timed out after {timeout_s:.0f}s"
-            )
-        return result.get("value")
+            if not done.wait(timeout=timeout_s):
+                raise RuntimeError(
+                    f"TuiUI inline-choice timed out after {timeout_s:.0f}s"
+                )
+            return result.get("value")
+        finally:
+            self._release_thinking()
 
     # ── confirm ───────────────────────────────────────────────────────
 
@@ -208,6 +216,34 @@ class TuiUI:
 
     # ── internal ──────────────────────────────────────────────────────
 
+    def _suppress_thinking(self) -> None:
+        """Hide the ThinkingIndicator while a blocking prompt is open.
+
+        Safe to call from a tool worker thread — the widget mutation is
+        marshalled onto the App loop. Best-effort: any failure (App shutting
+        down, indicator not mounted) is swallowed so a UI hiccup never blocks
+        a permission decision. Paired with ``_release_thinking``.
+        """
+        try:
+            from aru.tui.widgets.thinking import ThinkingIndicator
+
+            self.app.call_from_thread(
+                lambda: self.app.query_one(ThinkingIndicator).suppress()
+            )
+        except Exception:
+            pass
+
+    def _release_thinking(self) -> None:
+        """Undo one ``_suppress_thinking`` once the prompt closes."""
+        try:
+            from aru.tui.widgets.thinking import ThinkingIndicator
+
+            self.app.call_from_thread(
+                lambda: self.app.query_one(ThinkingIndicator).release()
+            )
+        except Exception:
+            pass
+
     def _run_modal(self, modal: Any, timeout_s: float = 300.0) -> Any:
         """Push a ModalScreen and block until it is dismissed.
 
@@ -225,15 +261,21 @@ class TuiUI:
             result["value"] = value
             done.set()
 
+        # Park the spinner while the modal owns the screen (see
+        # _run_inline_choice). Restored in the finally.
+        self._suppress_thinking()
         try:
-            self.app.call_from_thread(self.app.push_screen, modal, _on_dismiss)
-        except Exception as e:
-            raise RuntimeError(
-                f"TuiUI modal dispatch failed: {type(e).__name__}: {e}"
-            ) from e
+            try:
+                self.app.call_from_thread(self.app.push_screen, modal, _on_dismiss)
+            except Exception as e:
+                raise RuntimeError(
+                    f"TuiUI modal dispatch failed: {type(e).__name__}: {e}"
+                ) from e
 
-        if not done.wait(timeout=timeout_s):
-            raise RuntimeError(
-                f"TuiUI modal timed out after {timeout_s:.0f}s"
-            )
-        return result.get("value")
+            if not done.wait(timeout=timeout_s):
+                raise RuntimeError(
+                    f"TuiUI modal timed out after {timeout_s:.0f}s"
+                )
+            return result.get("value")
+        finally:
+            self._release_thinking()

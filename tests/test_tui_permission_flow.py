@@ -274,6 +274,65 @@ async def test_auto_accept_inline_choice_updates_status_pane_mode():
 
 
 @pytest.mark.asyncio
+async def test_thinking_spinner_hidden_while_prompt_open():
+    """While a permission prompt owns the screen the spinner must be hidden —
+    we're parked waiting on the user, not computing — and it must return once
+    the user answers (the turn is still in flight)."""
+    from rich.panel import Panel
+
+    from aru.tui.app import AruApp
+    from aru.tui.ui import TuiUI
+    from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets.inline_choice import InlineChoicePrompt
+    from aru.tui.widgets.thinking import ThinkingIndicator
+
+    app = AruApp()
+    holder: dict = {}
+
+    async def worker() -> None:
+        ui = TuiUI(app)
+        holder["choice"] = await asyncio.to_thread(
+            ui.ask_choice,
+            ["Yes", "No"],
+            title="Approve?",
+            default=0,
+            cancel_value=None,
+            details=Panel("- old\n+ new"),
+        )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        indicator = app.query_one(ThinkingIndicator)
+        # Simulate a turn in flight (this is what _run_turn does).
+        indicator.busy = True
+        await pilot.pause()
+        assert indicator.has_class("-busy"), "spinner should show while busy at rest"
+
+        task = asyncio.create_task(worker())
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if list(app.query_one(ChatPane).query(InlineChoicePrompt)):
+                break
+        await pilot.pause(0.05)
+        # Busy is still true, but the spinner is hidden while the prompt is up.
+        assert indicator.busy is True
+        assert not indicator.has_class("-busy"), (
+            "spinner must be hidden while the permission prompt is open"
+        )
+
+        await pilot.press("enter")
+        await asyncio.wait_for(task, timeout=5.0)
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if indicator.has_class("-busy"):
+                break
+        assert indicator.has_class("-busy"), (
+            "spinner should return after the prompt is answered (turn still busy)"
+        )
+    assert holder["choice"] == 0
+
+
+@pytest.mark.asyncio
 async def test_tui_confirm_from_worker_returns_bool():
     from aru.tui.app import AruApp
     from aru.tui.ui import TuiUI

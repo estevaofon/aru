@@ -54,6 +54,14 @@ class ThinkingIndicator(Widget):
     TICK_SECONDS: float = 0.1
 
     busy: reactive[bool] = reactive(False, layout=True)
+    # Incremented while a blocking prompt (permission / confirm / text input)
+    # owns the screen. The spinner means "a turn is in flight", but while we
+    # are parked waiting on the user there is nothing to animate — showing it
+    # there reads as "still processing" and is misleading. The indicator is
+    # hidden whenever suppress_depth > 0, regardless of ``busy``. A depth
+    # counter (not a bool) keeps back-to-back prompts (e.g. "No" → feedback
+    # box) suppressed throughout, without a flash between them.
+    suppress_depth: reactive[int] = reactive(0, layout=True)
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,16 +74,35 @@ class ThinkingIndicator(Widget):
     def on_mount(self) -> None:
         self.set_interval(self.TICK_SECONDS, self._tick)
 
-    def watch_busy(self, _old: bool, new: bool) -> None:
-        if new:
+    def _visible(self) -> bool:
+        return self.busy and self.suppress_depth == 0
+
+    def _apply_visibility(self) -> None:
+        if self._visible():
             self.add_class("-busy")
-            self._index = 0
-            self._ticks_since_rotate = 0
         else:
             self.remove_class("-busy")
 
+    def watch_busy(self, _old: bool, new: bool) -> None:
+        if new:
+            self._index = 0
+            self._ticks_since_rotate = 0
+        self._apply_visibility()
+
+    def watch_suppress_depth(self, _old: int, _new: int) -> None:
+        self._apply_visibility()
+
+    def suppress(self) -> None:
+        """Hide the spinner while a blocking prompt owns the screen."""
+        self.suppress_depth += 1
+
+    def release(self) -> None:
+        """Undo one ``suppress()``; spinner returns only if the turn is still busy."""
+        if self.suppress_depth > 0:
+            self.suppress_depth -= 1
+
     def _tick(self) -> None:
-        if not self.busy:
+        if not self._visible():
             return
         self._ticks_since_rotate += 1
         if self._ticks_since_rotate * self.TICK_SECONDS >= self.ROTATE_SECONDS:
