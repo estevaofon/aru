@@ -24,6 +24,7 @@ specialized read-only tool set and instructions.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from rich.panel import Panel
@@ -197,7 +198,18 @@ async def exit_plan_mode(plan: str) -> str:
     session.set_plan(task=task_label, plan_content=plan_text)
     n_steps = len(session.plan_steps)
 
-    approved, feedback = _prompt_plan_approval(session.plan_steps, n_steps)
+    # ``exit_plan_mode`` is an async tool, so ``agent_factory`` awaits it
+    # directly on the event-loop thread (no ``_thread_tool`` worker hop like
+    # sync tools get). ``_prompt_plan_approval`` is synchronous and in TUI
+    # mode invokes ``TuiUI.ask_choice`` → ``App.call_from_thread``, which
+    # raises "must run in a different thread from the app" when called from
+    # the loop thread it targets. Hop to a worker thread first so the modal
+    # dispatch path matches the sync-tool and runner-auto-exit paths
+    # (``runner.py`` does the same). ``asyncio.to_thread`` copies the
+    # contextvars snapshot, so ``get_ctx()`` inside still resolves.
+    approved, feedback = await asyncio.to_thread(
+        _prompt_plan_approval, session.plan_steps, n_steps
+    )
 
     # The approval prompt already rendered the plan panel inline, so suppress
     # the runner's coalesced end-of-batch render to avoid a duplicate.

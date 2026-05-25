@@ -245,6 +245,60 @@ class TestExitPlanMode:
         assert "needs more detail" in result
         assert "STILL in plan mode" in result
 
+    @pytest.mark.asyncio
+    async def test_approval_prompt_runs_off_event_loop_thread(self):
+        """Regression: the approval prompt must run on a worker thread, never
+        the event-loop thread.
+
+        ``exit_plan_mode`` is an async tool awaited directly on the loop. In
+        TUI mode ``_prompt_plan_approval`` reaches ``TuiUI.ask_choice`` →
+        ``App.call_from_thread``, which raises "must run in a different
+        thread from the app" when called on the loop thread. The fix hops to
+        a worker via ``asyncio.to_thread``; this test asserts the prompt
+        observes a thread id different from the loop's. Before the fix the
+        ids matched and TUI users hit the RuntimeError.
+        """
+        import threading
+
+        from aru.runtime import RuntimeContext, _runtime_ctx as _ctx
+        from aru.tools import plan_mode as plan_mode_module
+
+        loop_thread_id = threading.get_ident()
+        captured: dict = {}
+
+        def _fake_prompt(plan_steps, n_steps):
+            # Runs inside exit_plan_mode's approval call. Record the thread.
+            captured["thread_id"] = threading.get_ident()
+            # Also prove get_ctx() still resolves across the to_thread hop.
+            from aru.runtime import get_ctx
+            captured["has_ctx_session"] = get_ctx().session is not None
+            return (True, "")
+
+        session = Session()
+        session.plan_mode = True
+        ctx = RuntimeContext()
+        ctx.session = session
+        token = _ctx.set(ctx)
+        with patch.object(plan_mode_module, "_prompt_plan_approval", _fake_prompt):
+            try:
+                result = await plan_mode_module.exit_plan_mode(
+                    plan="## Steps\n1. do thing\n2. other thing"
+                )
+            finally:
+                _ctx.reset(token)
+
+        assert "thread_id" in captured, "approval prompt was never invoked"
+        assert captured["thread_id"] != loop_thread_id, (
+            "approval prompt ran on the event-loop thread — "
+            "TuiUI.ask_choice's call_from_thread would raise in TUI mode"
+        )
+        assert captured["has_ctx_session"], (
+            "contextvars must propagate across asyncio.to_thread so the "
+            "prompt can still read ctx.session"
+        )
+        assert session.plan_mode is False
+        assert "approved" in result.lower()
+
 
 # ── Tool-wrapper plan-mode gate ───────────────────────────────────────
 

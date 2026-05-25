@@ -23,9 +23,13 @@ Contract notes:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Sequence
 
 from aru.tui.screens import ChoiceModal, ConfirmModal, TextInputModal
+
+_log = logging.getLogger("aru.tui.ui")
 
 
 class TuiUI:
@@ -33,6 +37,28 @@ class TuiUI:
 
     def __init__(self, app: Any) -> None:
         self.app = app
+
+    @staticmethod
+    def _on_app_thread() -> bool:
+        """True when the caller is running on an asyncio event-loop thread.
+
+        ``TuiUI``'s blocking prompts bridge to the App loop via
+        ``App.call_from_thread``, which *requires* the caller to be on a
+        DIFFERENT thread than the loop (otherwise it raises rather than
+        deadlock). The correct callers reach us from ``asyncio.to_thread`` /
+        ``_thread_tool`` workers — plain threads with no running loop. If a
+        loop IS running in this thread, we are on the App's own event-loop
+        thread and must not block: that would freeze the loop so the prompt
+        could never be drawn or answered. The guards below degrade safely in
+        that case instead of surfacing the cryptic ``call_from_thread``
+        ``RuntimeError``. The real fix for any such caller is to wrap the
+        call in ``await asyncio.to_thread(ctx.ui.<method>, ...)``.
+        """
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
 
     # ── choice ────────────────────────────────────────────────────────
 
@@ -88,6 +114,19 @@ class TuiUI:
         user answers, mirroring ``_run_modal`` so the sync call sites
         (``check_permission``, plan approval) keep their contract.
         """
+        if self._on_app_thread():
+            # Contract violation (see ``_on_app_thread``): a caller dispatched
+            # this blocking prompt from the App's own event-loop thread. We
+            # cannot show it here, so degrade to ``cancel_value`` rather than
+            # crash the turn with ``call_from_thread``'s RuntimeError.
+            _log.warning(
+                "TuiUI.ask_choice invoked on the event-loop thread; returning "
+                "cancel_value=%r without prompting. Wrap the call site in "
+                "asyncio.to_thread.",
+                cancel_value,
+            )
+            return cancel_value
+
         import threading
 
         from aru.tui.widgets.chat import ChatPane
@@ -252,6 +291,18 @@ class TuiUI:
         we work without an active Textual worker context. Designed to be
         called from ``asyncio.to_thread`` tool threads.
         """
+        if self._on_app_thread():
+            # See ``_on_app_thread``: blocking on the loop thread would
+            # freeze the App. Degrade to ``None`` (callers map this to their
+            # default / cancel outcome) instead of raising.
+            _log.warning(
+                "TuiUI modal (%s) invoked on the event-loop thread; "
+                "dismissing without prompting. Wrap the call site in "
+                "asyncio.to_thread.",
+                type(modal).__name__,
+            )
+            return None
+
         import threading
 
         done = threading.Event()

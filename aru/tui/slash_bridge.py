@@ -119,7 +119,17 @@ def run_bridged(name: str, body: str, app: Any) -> tuple[bool, str]:
 
     import aru.commands as cmds_module
     original_console = cmds_module.console
-    temp = Console(record=True, width=100, force_terminal=True, color_system=None)
+    # ``file=StringIO()`` keeps the live output off the raw terminal — we
+    # only want the recorded copy (``export_text`` below), which we mirror
+    # into the ChatPane. Writing to stdout here is pointless under Textual
+    # (it owns the screen) and outright unsafe now that the handler runs on
+    # a worker thread; ``record=True`` still captures everything regardless
+    # of the file target.
+    import io
+    temp = Console(
+        record=True, width=100, force_terminal=True, color_system=None,
+        file=io.StringIO(),
+    )
     cmds_module.console = temp
     try:
         handler(*args, **kwargs)

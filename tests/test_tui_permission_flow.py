@@ -367,6 +367,53 @@ async def test_thinking_spinner_hidden_while_prompt_open():
 
 
 @pytest.mark.asyncio
+async def test_blocking_prompt_on_event_loop_thread_degrades_not_raises():
+    """Defense-in-depth (bug class): a blocking TuiUI prompt invoked directly
+    on the App's event-loop thread must NOT raise the cryptic
+    'call_from_thread must run in a different thread' RuntimeError.
+
+    The correct fix for any *known* caller is to hop to a worker thread
+    (asyncio.to_thread) — this guard is the safety net that keeps a stray
+    on-loop call (e.g. the /memory clear slash bridge) from crashing a turn.
+    It degrades to cancel_value / the caller default instead.
+    """
+    from rich.panel import Panel
+
+    from aru.tui.ui import TuiUI
+
+    class _DummyApp:
+        # If the guard fails, _run_inline_choice/_run_modal would reach this
+        # and we'd see the assertion instead of a clean degrade.
+        def call_from_thread(self, *args, **kwargs):
+            raise AssertionError(
+                "call_from_thread must not be reached on the loop thread"
+            )
+
+    ui = TuiUI(_DummyApp())
+    # This coroutine runs on the event loop, so we ARE on the loop thread.
+    assert TuiUI._on_app_thread() is True
+
+    # Inline path (details present) — the exact shape of the plan-approval /
+    # edit-permission prompt. Degrades to cancel_value.
+    inline = ui.ask_choice(
+        ["Yes", "No"],
+        title="Approve?",
+        default=0,
+        cancel_value=99,
+        details=Panel("preview"),
+    )
+    assert inline == 99
+
+    # Modal path (no details) — degrades to None.
+    modal = ui.ask_choice(["Yes", "No"], title="Pick", default=0, cancel_value=None)
+    assert modal is None
+
+    # confirm() maps the degraded None back to the caller's default.
+    assert ui.confirm("Proceed?", default=True) is True
+    assert ui.confirm("Proceed?", default=False) is False
+
+
+@pytest.mark.asyncio
 async def test_tui_confirm_from_worker_returns_bool():
     from aru.tui.app import AruApp
     from aru.tui.ui import TuiUI
@@ -390,3 +437,67 @@ async def test_tui_confirm_from_worker_returns_bool():
         await pilot.press("y")
         await asyncio.wait_for(worker_task, timeout=5.0)
     assert result_holder["answer"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_clear_slash_shows_confirm_modal_and_clears():
+    """Regression: ``/memory clear`` in the TUI must actually show the
+    ConfirmModal (and clear on "yes"), not silently degrade.
+
+    The slash bridge used to run handlers inline on the event-loop thread,
+    so ``handle_memory_command`` → ``ui.confirm`` → ``call_from_thread``
+    raised / degraded to the cancel default and the modal never appeared.
+    The bridge now hops the handler to a worker thread (``_run_bridged_slash``
+    → ``asyncio.to_thread``), so the modal is dispatched correctly and the
+    user's answer is honoured.
+    """
+    from unittest.mock import patch
+
+    from aru.runtime import init_ctx, set_ctx
+    from aru.session import Session
+    from aru.tui.app import AruApp
+    from aru.tui.screens import ConfirmModal
+    from aru.tui.ui import TuiUI
+
+    ctx = init_ctx()
+    session = Session()
+    session.project_root = "/tmp/aru-memory-clear-test"
+    app = AruApp(ctx=ctx, session=session)
+    ctx.tui_app = app
+
+    cleared: dict = {}
+
+    def _fake_clear(project_root, *args, **kwargs):
+        cleared["root"] = project_root
+        return 3
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ctx.ui = TuiUI(app)
+        set_ctx(ctx)  # ensure the worker task + its to_thread child inherit ctx
+        # Patch the destructive clear so the test never touches real memory;
+        # the patch stays active across the awaits below, covering the
+        # handler's execution on the worker thread.
+        with patch("aru.memory.store.clear_memory", _fake_clear):
+            app._run_bridged_slash("memory", "clear")
+            # The crux of the fix: the modal actually appears. Before the
+            # fix the handler ran on the loop thread and degraded silently.
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if app.screen_stack and isinstance(app.screen, ConfirmModal):
+                    break
+            assert isinstance(app.screen, ConfirmModal), (
+                "ConfirmModal never appeared — /memory clear degraded instead "
+                "of prompting (handler ran on the event-loop thread)"
+            )
+            # Answer "yes" and let the worker finish + run the (patched) clear.
+            await pilot.press("y")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if "root" in cleared:
+                    break
+
+    assert "root" in cleared, (
+        "clear_memory was never called — the 'yes' answer did not propagate "
+        "back through the worker to the handler"
+    )

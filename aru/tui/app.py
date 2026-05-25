@@ -873,14 +873,45 @@ class AruApp(App):
         return False
 
     def _run_bridged_slash(self, name: str, body: str) -> None:
-        """Execute a bridged REPL handler and show its output in ChatPane."""
+        """Execute a bridged REPL handler and show its output in ChatPane.
+
+        Dispatched as a coroutine worker so the handler runs OFF the
+        event-loop thread. Some bridged handlers prompt — ``/memory clear``
+        calls ``ctx.ui.confirm``, which bridges to the App loop via
+        ``App.call_from_thread`` and therefore *must* be invoked from a
+        thread other than the loop (otherwise it raises, or degrades to the
+        cancel default — see ``TuiUI._on_app_thread``). The worker hops the
+        handler to a thread via ``asyncio.to_thread`` so the loop stays free
+        to draw and service the modal, then marshals the captured output
+        back to the ChatPane.
+        """
+        from aru.tui.slash_bridge import BRIDGED_COMMANDS
+
+        if name.lower() not in BRIDGED_COMMANDS:
+            return
+        self.run_worker(
+            self._run_bridged_slash_async(name, body),
+            name=f"slash-{name}",
+            group="slash-bridge",
+            exclusive=False,
+        )
+
+    async def _run_bridged_slash_async(self, name: str, body: str) -> None:
+        """Worker body for :meth:`_run_bridged_slash` — see its docstring."""
         from aru.tui.slash_bridge import run_bridged
 
-        handled, text = run_bridged(name, body, self)
+        # Hop to a worker thread: the handler may block on a ``ctx.ui``
+        # prompt whose ModalScreen dispatch needs the loop to stay
+        # responsive. ``asyncio.to_thread`` copies the contextvars snapshot
+        # so the handler's ``get_ctx()`` still resolves.
+        handled, text = await asyncio.to_thread(run_bridged, name, body, self)
         if not handled:
             return
-        chat = self.query_one(ChatPane)
-        # Prefix with the command so the user has context.
+        # Back on the loop after the await — safe to touch widgets.
+        try:
+            chat = self.query_one(ChatPane)
+        except Exception:
+            return
         header = f"/{name}" + (f" {body}" if body else "")
         chat.add_system_message(f"$ {header}\n{text}" if text else f"$ {header}")
 
