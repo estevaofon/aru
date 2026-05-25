@@ -9,6 +9,33 @@ import pytest
 pytest.importorskip("textual")
 
 
+async def _wait_for_inline_focus(app, pilot, *, max_iter: int = 50):
+    """Block until the InlineChoicePrompt's OptionList owns focus.
+
+    ``query(InlineChoicePrompt)`` returns the widget as soon as it is in
+    the DOM, but the OptionList only gains focus (and its default
+    highlight) inside ``InlineChoicePrompt.on_mount`` — a message
+    dispatched *after* mount completes. Pressing Enter / arrow keys
+    before that lands sends the key nowhere useful: ``OptionSelected``
+    never fires and the worker thread blocks until its timeout. In
+    isolation the gap is sub-tick so the press always lands; under a
+    loaded suite the mount lifecycle slips behind detection and the test
+    flakes with a TimeoutError. Waiting for focus closes the race.
+    """
+    from textual.widgets import OptionList
+
+    from aru.tui.widgets.inline_choice import InlineChoicePrompt
+
+    for _ in range(max_iter):
+        prompts = list(app.query(InlineChoicePrompt))
+        if prompts:
+            opts = list(prompts[0].query(OptionList))
+            if opts and app.focused is opts[0] and opts[0].highlighted is not None:
+                return opts[0]
+        await pilot.pause(0.05)
+    raise AssertionError("InlineChoicePrompt OptionList never took focus")
+
+
 @pytest.mark.asyncio
 async def test_tui_ask_choice_from_worker_resolves_via_modal():
     """TuiUI.ask_choice invoked from a worker thread returns modal result.
@@ -106,6 +133,9 @@ async def test_ask_choice_with_details_uses_inline_prompt_not_modal():
             "expected InlineChoicePrompt in ChatPane"
         )
         # Press Enter — OptionList focuses on mount, default=0 highlighted.
+        # Wait for that focus to actually land first; querying the prompt
+        # only proves it is in the DOM (see _wait_for_inline_focus).
+        await _wait_for_inline_focus(app, pilot)
         await pilot.press("enter")
         await asyncio.wait_for(task, timeout=5.0)
     assert holder["choice"] == 0
@@ -156,6 +186,7 @@ async def test_inline_prompt_hides_input_bar_and_restores_on_answer():
         assert inp.has_class("-hidden"), (
             "input should be hidden while InlineChoicePrompt is mounted"
         )
+        await _wait_for_inline_focus(app, pilot)
         await pilot.press("enter")
         await asyncio.wait_for(task, timeout=5.0)
         # After the user answers, the input bar is restored.
@@ -199,6 +230,7 @@ async def test_ask_choice_inline_esc_cancels_with_cancel_value():
             await pilot.pause(0.05)
             if list(app.query_one(ChatPane).query(InlineChoicePrompt)):
                 break
+        await _wait_for_inline_focus(app, pilot)
         await pilot.press("escape")
         await asyncio.wait_for(task, timeout=5.0)
     assert holder["choice"] == 99
@@ -257,6 +289,7 @@ async def test_auto_accept_inline_choice_updates_status_pane_mode():
             if list(chat.query(InlineChoicePrompt)):
                 break
         # Option index 1 = "Yes, and auto-accept edits".
+        await _wait_for_inline_focus(app, pilot)
         await pilot.press("down")
         await pilot.press("enter")
         await asyncio.wait_for(task, timeout=5.0)
@@ -320,6 +353,7 @@ async def test_thinking_spinner_hidden_while_prompt_open():
             "spinner must be hidden while the permission prompt is open"
         )
 
+        await _wait_for_inline_focus(app, pilot)
         await pilot.press("enter")
         await asyncio.wait_for(task, timeout=5.0)
         for _ in range(20):

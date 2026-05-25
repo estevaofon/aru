@@ -301,13 +301,16 @@ class ToolTracker:
         self._completed: list[tuple[str, float]] = []      # (label, duration)
 
     def start(self, tool_id: str, label: str):
-        self._active[tool_id] = (label, time.monotonic())
+        # perf_counter, not monotonic: on Windows monotonic() has ~15.6ms
+        # resolution, so a sub-tick tool call would report a 0.0 duration.
+        # perf_counter is monotonic too but high-resolution (~100ns).
+        self._active[tool_id] = (label, time.perf_counter())
 
     def complete(self, tool_id: str) -> tuple[str, float] | None:
         entry = self._active.pop(tool_id, None)
         if entry:
             label, start = entry
-            duration = time.monotonic() - start
+            duration = time.perf_counter() - start
             self._completed.append((label, duration))
             return label, duration
         return None
@@ -315,7 +318,7 @@ class ToolTracker:
     @property
     def active_labels(self) -> list[tuple[str, float]]:
         """Return (label, elapsed_seconds) for each active tool."""
-        now = time.monotonic()
+        now = time.perf_counter()
         return [(label, now - start) for label, start in self._active.values()]
 
     def pop_completed(self) -> list[tuple[str, float]]:
