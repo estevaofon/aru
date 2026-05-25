@@ -15,6 +15,7 @@ from aru.display import console
 SLASH_COMMANDS = [
     ("/help", "Show help and available commands", "/help"),
     ("/plan", "Create an implementation plan", "/plan <task>"),
+    ("/connect", "Connect a provider — store an API key", "/connect [provider|list|logout]"),
     ("/model", "Switch model/provider", "/model [provider/model]"),
     ("/reasoning", "Set reasoning effort for this session", "/reasoning [low|medium|high|max|off|clear]"),
     ("/sessions", "List recent sessions", "/sessions"),
@@ -77,6 +78,389 @@ def ask_yes_no(prompt: str) -> bool:
         return answer in ("y", "yes", "s", "sim")
     except (EOFError, KeyboardInterrupt):
         return False
+
+
+# ---------------------------------------------------------------------------
+# /connect — interactive provider connection (OpenCode `auth login` parity)
+# ---------------------------------------------------------------------------
+
+# Where to grab an API key, shown as a hint before the key prompt. Keyed by
+# built-in provider id. Providers absent here just skip the hint.
+_PROVIDER_KEY_HINTS: dict[str, str] = {
+    "anthropic": "Create a key at https://console.anthropic.com/settings/keys",
+    "openai": "Create a key at https://platform.openai.com/api-keys",
+    "openrouter": "Create a key at https://openrouter.ai/keys",
+    "groq": "Create a key at https://console.groq.com/keys",
+    "deepseek": "Create a key at https://platform.deepseek.com/api_keys",
+    "ollama": "Local provider — no API key needed.",
+}
+
+# Display order for the provider menu (most common first); anything not
+# listed is appended afterwards in registry order.
+_PROVIDER_MENU_ORDER = ["anthropic", "openai", "openrouter", "groq", "deepseek", "ollama"]
+
+_OTHER_SENTINEL = "__other__"
+
+
+def _resolve_connect_ui():
+    """Return the active ``ctx.ui`` adapter, falling back to a REPL one."""
+    from aru.runtime import get_ctx
+    try:
+        ctx = get_ctx()
+    except LookupError:
+        ctx = None
+    if ctx is not None:
+        from aru.permissions import _resolve_ui
+        return _resolve_ui(ctx)
+    from aru.ui import ReplUI
+    return ReplUI()
+
+
+def _mask_key(key: str) -> str:
+    """Mask an API key for display: keep a short head/tail, hide the middle."""
+    if not key:
+        return "(empty)"
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}…{key[-4:]}"
+
+
+def handle_connect_command(args: str, session=None):
+    """``/connect`` — connect to an LLM provider by storing an API key.
+
+    OpenCode-parity ``auth login`` flow: pick a provider, paste a key, then
+    pick a model — all in one go. The credential is persisted to
+    ``~/.aru/auth.json`` and live immediately (no ``aru.json`` editing) and
+    the chosen model becomes the session model. All interaction goes through
+    ``ctx.ui`` so the same handler drives both the TUI (modals) and the REPL.
+
+    Subcommands:
+        ``/connect``              Interactive: select a provider, enter a key.
+        ``/connect <provider>``   Skip selection; connect that provider.
+        ``/connect list``         Show stored credentials + active env vars.
+        ``/connect logout [p]``   Remove a stored credential.
+
+    Returns the new ``model_ref`` string when the user opts to switch models
+    after connecting (so the caller can sync the UI), else ``None``.
+    """
+    ui = _resolve_connect_ui()
+    arg = (args or "").strip()
+    parts = arg.split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub == "list":
+        _connect_list(ui)
+        return None
+    if sub in ("logout", "disconnect", "remove"):
+        _connect_logout(ui, rest)
+        return None
+    return _connect_login(ui, arg, session)
+
+
+def _provider_menu() -> list[tuple[str, str]]:
+    """Build ``(key, label)`` provider menu entries in display order."""
+    from aru.providers import list_providers
+
+    providers = list_providers()
+    ordered_keys = [k for k in _PROVIDER_MENU_ORDER if k in providers]
+    ordered_keys += [k for k in providers if k not in ordered_keys]
+    entries: list[tuple[str, str]] = []
+    for k in ordered_keys:
+        p = providers[k]
+        entries.append((k, f"{p.name}  ({k})"))
+    return entries
+
+
+def _connect_login(ui, preselect: str, session):
+    """Provider selection → key entry → store → optional model switch."""
+    from aru import auth
+    from aru.providers import apply_stored_credentials, get_provider, list_providers
+
+    entries = _provider_menu()
+
+    # ── 1. Resolve which provider to connect ─────────────────────────────
+    provider_key: str | None = None
+    if preselect:
+        low = preselect.lower()
+        if low in ("other", "custom"):
+            provider_key = _OTHER_SENTINEL
+        else:
+            providers = list_providers()
+            if low in providers:
+                provider_key = low
+            else:
+                # Match by display name (case-insensitive).
+                for k, p in providers.items():
+                    if p.name.lower() == low:
+                        provider_key = k
+                        break
+            if provider_key is None:
+                ui.notify(
+                    f"Unknown provider '{preselect}'. Run /connect with no "
+                    "argument to pick from the list.",
+                    "warn",
+                )
+                return None
+    else:
+        labels = [label for _, label in entries]
+        labels.append("Other (custom OpenAI-compatible endpoint)")
+        idx = ui.ask_choice(
+            labels,
+            title="Connect a provider — select one",
+            cancel_value=None,
+        )
+        if idx is None:
+            ui.notify("Connect cancelled.", "warn")
+            return None
+        provider_key = _OTHER_SENTINEL if idx == len(entries) else entries[idx][0]
+
+    # ── 2. Gather provider details + the credential ──────────────────────
+    if provider_key == _OTHER_SENTINEL:
+        return _connect_custom(ui, session)
+
+    provider = get_provider(provider_key)
+    display_name = provider.name if provider else provider_key
+    hint = _PROVIDER_KEY_HINTS.get(provider_key)
+    if hint:
+        ui.print(hint)
+
+    # Keyless local providers (Ollama) — store a base URL instead of a key.
+    if provider is not None and not provider.api_key_env:
+        default_url = provider.base_url or "http://localhost:11434"
+        base_url = ui.ask_text(
+            f"Base URL for {display_name}:", default=default_url
+        ).strip()
+        if not base_url:
+            base_url = default_url
+        auth.set_credential(provider_key, {"type": "local", "base_url": base_url})
+        apply_stored_credentials()
+        ui.print(f"Connected {display_name} at {base_url}.")
+    else:
+        key = ui.ask_text(
+            f"Enter your API key for {display_name}:", password=True
+        ).strip()
+        if not key:
+            ui.notify("Connect cancelled — no key entered.", "warn")
+            return None
+        auth.set_credential(provider_key, {"type": "api", "key": key})
+        apply_stored_credentials()
+        ui.print(f"Connected {display_name} — key stored in {auth.auth_path()}.")
+
+    return _select_model(ui, provider_key, session)
+
+
+def _connect_custom(ui, session):
+    """Connect a custom OpenAI-compatible provider (the 'Other' path)."""
+    import re
+
+    from aru import auth
+    from aru.providers import apply_stored_credentials
+
+    pid = ui.ask_text(
+        "Provider id (lowercase letters, digits, hyphens):"
+    ).strip().lower()
+    if not pid:
+        ui.notify("Connect cancelled.", "warn")
+        return None
+    if not re.fullmatch(r"[a-z0-9-]+", pid):
+        ui.notify("Invalid id — use only a-z, 0-9 and hyphens.", "error")
+        return None
+
+    base_url = ui.ask_text(
+        "Base URL (OpenAI-compatible, e.g. https://api.example.com/v1):"
+    ).strip()
+    if not base_url:
+        ui.notify("Connect cancelled — a base URL is required.", "warn")
+        return None
+
+    name = ui.ask_text("Display name (optional):", default=pid).strip() or pid
+    default_model = ui.ask_text("Default model id (optional):").strip()
+    key = ui.ask_text(f"Enter your API key for {name}:", password=True).strip()
+    if not key:
+        ui.notify("Connect cancelled — no key entered.", "warn")
+        return None
+
+    info = {
+        "type": "api",
+        "key": key,
+        "base_url": base_url,
+        "name": name,
+        "provider_type": "openai",
+    }
+    if default_model:
+        info["default_model"] = default_model
+    auth.set_credential(pid, info)
+    apply_stored_credentials()
+    ui.print(f"Connected {name} ({pid}) — key stored in {auth.auth_path()}.")
+    # The custom setup already asked for a model id — honour it directly
+    # instead of re-prompting. Otherwise offer the (free-text) selector.
+    if default_model and session is not None:
+        session.model_ref = f"{pid}/{default_model}"
+        ui.print(f"Model set to {pid}/{default_model}.")
+        return f"{pid}/{default_model}"
+    return _select_model(ui, pid, session)
+
+
+_CUSTOM_MODEL_LABEL = "Enter a model id manually…"
+
+
+def _list_provider_models(provider) -> list[str]:
+    """Return the provider's model names, deduped by underlying API id.
+
+    The registry carries both clean aliases and dated ids that map to the
+    same model (e.g. ``claude-sonnet-4-5`` and ``claude-sonnet-4-5-20250929``).
+    Keep the first occurrence — the clean alias — so the picker stays tidy.
+    """
+    seen_ids: set[str] = set()
+    out: list[str] = []
+    for name, cfg in provider.models.items():
+        mid = cfg.get("id", name) if isinstance(cfg, dict) else name
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+        out.append(name)
+    return out
+
+
+def _model_id_for(provider, name: str) -> str:
+    cfg = provider.models.get(name)
+    return cfg.get("id", name) if isinstance(cfg, dict) else name
+
+
+def _select_model(ui, provider_key: str, session):
+    """Pick a model for the just-connected provider (OpenCode-style).
+
+    Shows a menu of the provider's models with its default pre-highlighted,
+    plus an escape hatch for a model id not in the registry. Providers
+    without a static model list (Ollama, OpenRouter, custom) fall back to a
+    free-text id prompt. Esc keeps the current model. Returns the new
+    ``model_ref`` when changed, else ``None``.
+    """
+    if session is None:
+        return None
+    from aru.providers import get_provider
+
+    provider = get_provider(provider_key)
+    if provider is None:
+        return None
+
+    model_names = _list_provider_models(provider)
+    chosen: str | None = None
+
+    if model_names:
+        # Pre-highlight whichever name resolves to the provider's default id.
+        default_idx = 0
+        if provider.default_model:
+            default_id = _model_id_for(provider, provider.default_model)
+            for i, n in enumerate(model_names):
+                if _model_id_for(provider, n) == default_id:
+                    default_idx = i
+                    break
+        labels = [*model_names, _CUSTOM_MODEL_LABEL]
+        idx = ui.ask_choice(
+            labels,
+            title=f"Select a model for {provider.name}",
+            default=default_idx,
+            cancel_value=None,
+        )
+        if idx is None:
+            return None  # keep current model
+        if idx == len(model_names):
+            chosen = ui.ask_text(
+                "Model id:", default=provider.default_model or ""
+            ).strip()
+        else:
+            chosen = model_names[idx]
+    else:
+        chosen = ui.ask_text(
+            f"Model id for {provider.name}:",
+            default=provider.default_model or "",
+        ).strip()
+
+    if not chosen:
+        return None
+    new_ref = f"{provider_key}/{chosen}"
+    session.model_ref = new_ref
+    ui.print(f"Model set to {new_ref}.")
+    return new_ref
+
+
+def _connect_list(ui) -> None:
+    """Show stored credentials and any active provider env vars."""
+    import os as _os
+
+    from aru import auth
+    from aru.providers import get_provider, list_providers
+
+    lines: list[str] = []
+    stored = auth.load_auth()
+    lines.append(f"Stored credentials ({auth.auth_path()}):")
+    if stored:
+        for key, info in sorted(stored.items()):
+            provider = get_provider(key)
+            name = provider.name if provider else key
+            itype = info.get("type", "api")
+            if itype == "local":
+                detail = info.get("base_url", "")
+            else:
+                detail = _mask_key(info.get("key", ""))
+            lines.append(f"  • {name} ({key})  [{itype}]  {detail}")
+    else:
+        lines.append("  (none — run /connect to add one)")
+
+    # Active env vars that back a provider (these still work as a fallback).
+    active: list[str] = []
+    for key, provider in list_providers().items():
+        env = provider.api_key_env
+        if env and _os.environ.get(env):
+            active.append(f"  • {provider.name} ({key})  {env}")
+    if active:
+        lines.append("")
+        lines.append("Active environment variables:")
+        lines.extend(active)
+
+    ui.print("\n".join(lines))
+
+
+def _connect_logout(ui, arg: str) -> None:
+    """Remove a stored credential (interactive picker when no arg given)."""
+    from aru import auth
+    from aru.providers import forget_credential, get_provider
+
+    stored = auth.load_auth()
+    if not stored:
+        ui.notify("No stored credentials to remove.", "warn")
+        return
+
+    keys = sorted(stored.keys())
+    if arg:
+        target = arg.lower()
+        if target not in stored:
+            ui.notify(f"No stored credential for '{arg}'.", "warn")
+            return
+    else:
+        labels = []
+        for k in keys:
+            provider = get_provider(k)
+            name = provider.name if provider else k
+            labels.append(f"{name} ({k})  [{stored[k].get('type', 'api')}]")
+        idx = ui.ask_choice(
+            labels, title="Remove which credential?", cancel_value=None
+        )
+        if idx is None:
+            ui.notify("Logout cancelled.", "warn")
+            return
+        target = keys[idx]
+
+    auth.remove_credential(target)
+    forget_credential(target)
+    provider = get_provider(target)
+    name = provider.name if provider else target
+    note = ""
+    if provider and provider.api_key_env:
+        note = f" Falls back to ${provider.api_key_env} if set."
+    ui.print(f"Disconnected {name}.{note}")
 
 
 def handle_subagents_command(session) -> None:
@@ -685,6 +1069,7 @@ def _show_help(config) -> None:
     table.add_column("Description", style="dim")
 
     table.add_row("/plan <task>", "Create detailed implementation plan")
+    table.add_row("/connect [provider]", "Connect a provider — store API key (list/logout)")
     table.add_row("/model [provider/model]", "Switch models (e.g., ollama/llama3.1, openai/gpt-4o)")
     table.add_row("/sessions", "List recent sessions")
     table.add_row("/commands", "List custom commands")

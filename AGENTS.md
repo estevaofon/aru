@@ -73,6 +73,7 @@ aru/
 │   └── analyze_trace.py  # python -m aru._debug.analyze_trace — parse loop-trace.log, run Fase 3 decision tree, suggest C1/C3 fix
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
+├── auth.py             # Credential store (~/.aru/auth.json, 0600) — backs the /connect command
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
 ├── tool_policy.py      # Single tool-policy decision (plan mode + skill disallowed). Shared by wrapper and permissions.
 ├── plugin_cache.py     # Plugin install/cache/discovery system (/plugin command backend)
@@ -147,6 +148,32 @@ Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured 
 **Invariant — every mutating tool is gated, and the action waits for the decision.** All file-mutating tools (`write_file(s)`, `edit_file(s)`, `apply_patch`, `lsp_rename`, `bash`, `delegate_task`) call `check_permission` *before* touching disk and must not proceed on anything but `allow`. `apply_patch` parses + validates first (so non-applicable patches never prompt), then gates under the `edit` category.
 
 **Permission-wait timeout suspension (safety-critical).** Sync tools run inside `_thread_tool(timeout=…)` on a worker thread, and `check_permission` blocks *that same thread* on the user. Because `asyncio.to_thread` cannot abort a worker thread, a naive timeout firing mid-prompt would report a timeout to the model while the orphaned thread stayed parked — then apply the mutation out-of-band the instant the user clicked "yes". To prevent that, `check_permission` marks a per-call `runtime.PermissionWaitGate` while it blocks (via `_permission_prompt_scope`), and `_thread_tool` suspends its timeout for as long as the gate is active (the gate object crosses the thread boundary through the copied context). Human decision time is never charged against the tool's execution budget. Do **not** reintroduce a plain `asyncio.wait_for` around a code path that can prompt.
+
+### `auth.py` — Credential store & the `/connect` command
+
+`/connect` is the interactive way to wire up a provider (OpenCode `auth login`
+parity) so users don't hand-edit `aru.json` for an API key. `auth.py` is the
+pure storage layer: a flat `{ "<provider>": <info> }` map in `~/.aru/auth.json`
+written `0600`, with a `type` discriminator (`api` / `local`; OAuth reserved
+for later). `providers.apply_stored_credentials()` layers these onto the
+in-memory registry — setting `ProviderConfig.api_key` for built-ins (which
+`_resolve_api_key` prefers over `api_key_env`) and registering a fresh
+OpenAI-compatible provider for custom endpoints. It runs at TUI bootstrap
+(`run_tui`) and again right after `/connect` so a new key is live on the next
+turn without a restart.
+
+The flow mirrors OpenCode: select a provider → paste the key → **select a
+model** (a menu of the provider's registry models with the default
+pre-highlighted, plus a manual-id escape hatch; providers with no static list
+— Ollama/OpenRouter/custom — fall back to a free-text id). The chosen model
+becomes the session model. The command handler
+`commands.handle_connect_command(args, session)` is UI-agnostic — all prompts
+go through `ctx.ui` (`ask_choice` / `ask_text(..., password=True)`), so it
+drives both TUI modals and the REPL. The
+TUI dispatches it from a worker thread (`app._slash_connect` →
+`asyncio.to_thread`) because `ctx.ui` modal prompts must not block the event
+loop. Subcommands: `/connect [provider]`, `/connect list`, `/connect logout`.
+**The REPL path is not wired (it is legacy); `/connect` is TUI-only.**
 
 ### `tool_policy.py` — Unified Tool-Policy Gate
 
@@ -282,6 +309,7 @@ Compatibility is checked via `engines.aru` using a small semver subset (`>=`, `<
 ## Configuration
 
 - `.env` → `ANTHROPIC_API_KEY`
+- `~/.aru/auth.json` → provider credentials stored by `/connect` (mode `0600`; a stored key wins over the provider's `api_key_env`)
 - `~/.aru/config.json` → global user config (applies to all projects)
 - `aru.json` or `.aru/config.json` → project config (deep-merged over global)
 - `.agents/commands/*.md` → custom slash commands

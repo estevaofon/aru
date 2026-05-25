@@ -41,6 +41,11 @@ class ProviderConfig:
     models: dict[str, dict[str, Any]] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
     reasoning_effort: str | None = None  # provider-level default effort
+    # Resolved API key injected by `/connect` (via apply_stored_credentials).
+    # Takes precedence over `api_key_env` so a credential the user stored
+    # interactively wins over a stale shell env var. Left None for providers
+    # configured only through env vars (the legacy path).
+    api_key: str | None = None
 
 
 # Built-in providers with sensible defaults
@@ -857,10 +862,88 @@ def _create_provider_model(
 
 
 def _resolve_api_key(provider: ProviderConfig) -> str | None:
-    """Resolve API key from environment variable."""
+    """Resolve the API key for a provider.
+
+    Priority: a key stored via ``/connect`` (``provider.api_key``, populated
+    by :func:`apply_stored_credentials`) wins over the provider's
+    ``api_key_env`` environment variable. Existing env-only setups are
+    unaffected — ``api_key`` stays ``None`` until the user connects.
+    """
+    if provider.api_key:
+        return provider.api_key
     if provider.api_key_env:
         return os.environ.get(provider.api_key_env)
     return None
+
+
+def apply_stored_credentials() -> None:
+    """Layer credentials from ``~/.aru/auth.json`` onto the provider registry.
+
+    Called at startup (after config load) and again right after ``/connect``
+    so the in-memory registry reflects stored keys without a restart. For a
+    built-in provider this sets ``api_key`` (and any ``base_url`` override);
+    for an unknown provider id it registers a fresh OpenAI-compatible
+    ``ProviderConfig`` so custom endpoints connected via ``/connect`` work
+    with no ``aru.json`` editing. Best-effort: a missing/garbled file is a
+    no-op.
+    """
+    try:
+        from aru import auth
+        data = auth.load_auth()
+    except Exception as exc:  # pragma: no cover — never fail startup over auth
+        logger.warning("apply_stored_credentials: %s", exc)
+        return
+    if not data:
+        return
+
+    from aru.context import MODEL_CONTEXT_LIMITS
+
+    for key, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        api_key = info.get("key")
+        base_url = info.get("base_url")
+        default_model = info.get("default_model") or None
+
+        existing = _providers.get(key)
+        if existing is not None:
+            if api_key:
+                existing.api_key = api_key
+                # Populate the env var too (without clobbering an explicit
+                # one) so any code path that reads it directly still works.
+                if existing.api_key_env:
+                    os.environ.setdefault(existing.api_key_env, api_key)
+            if base_url:
+                existing.base_url = base_url
+            if default_model:
+                existing.default_model = default_model
+        else:
+            provider_type = info.get("provider_type", "openai")
+            _providers[key] = ProviderConfig(
+                name=info.get("name", key),
+                api_key_env=info.get("api_key_env"),
+                base_url=base_url,
+                default_model=default_model,
+                models={},
+                options={"_provider_type": provider_type},
+                api_key=api_key,
+            )
+
+        # Honour an explicit context window for the default model.
+        cl = info.get("context_limit")
+        if isinstance(cl, int) and cl > 0 and default_model:
+            MODEL_CONTEXT_LIMITS.setdefault(default_model, cl)
+
+
+def forget_credential(provider_key: str) -> None:
+    """Clear an in-memory stored key so the provider falls back to its env var.
+
+    Paired with ``auth.remove_credential`` on ``/connect logout`` — the file
+    write removes persistence, this drops the live override.
+    """
+    provider = _providers.get(provider_key)
+    if provider is not None:
+        provider.api_key = None
 
 
 # ---------------------------------------------------------------------------

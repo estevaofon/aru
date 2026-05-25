@@ -35,6 +35,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("help",       "Show this help"),
     ("clear",      "Clear chat pane"),
     ("plan",       "Toggle plan mode"),
+    ("connect",    "Connect a provider (API key)"),
     ("quit",       "Save and quit"),
     ("exit",       "Save and quit"),
     ("cost",       "Show token usage & cost"),

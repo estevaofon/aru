@@ -217,8 +217,9 @@ class TuiUI:
         *,
         default: str = "",
         multiline: bool = False,  # TODO: multi-line TextArea modal (deferred)
+        password: bool = False,
     ) -> str:
-        modal = TextInputModal(prompt, default=default)
+        modal = TextInputModal(prompt, default=default, password=password)
         result = self._run_modal(modal)
         return default if result is None else result
 

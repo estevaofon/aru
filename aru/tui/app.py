@@ -238,7 +238,7 @@ class AruApp(App):
         "clear", "quit", "exit", "help", "plan",
         "cost", "calls", "compact", "sessions", "model", "undo",
         "skills", "agents", "commands", "mcp", "yolo",
-        "theme",
+        "theme", "connect",
     }
 
     # Layer 10 / 12 — interval (seconds) between belt-and-suspenders re-emits
@@ -848,6 +848,8 @@ class AruApp(App):
                 self._slash_sessions()
             elif name == "model":
                 self._slash_model(rest)
+            elif name == "connect":
+                self._slash_connect(rest)
             elif name == "undo":
                 self._slash_undo()
             elif name == "skills":
@@ -1067,6 +1069,76 @@ class AruApp(App):
         except Exception as exc:
             self._push_chat(f"model switch failed: {exc}", "model")
 
+    def _slash_connect(self, body: str) -> None:
+        """``/connect`` — interactive provider connection (store an API key).
+
+        Runs the shared ``handle_connect_command`` on a worker thread (it
+        blocks on ``ctx.ui`` modal prompts, which must NOT run on the event
+        loop — same constraint as the bridged ``/memory`` handlers). On
+        return, syncs the model UI if the user opted to switch.
+        """
+        session = self.session
+        if session is None:
+            self._push_chat("No session.", "connect")
+            return
+        self.run_worker(
+            self._run_connect_async(body),
+            name="connect",
+            group="connect",
+            exclusive=False,
+        )
+
+    async def _run_connect_async(self, body: str) -> None:
+        """Worker body for :meth:`_slash_connect`."""
+        # Make the ctx visible to the worker thread's contextvars snapshot so
+        # the handler's get_ctx() / ctx.ui resolve (asyncio.to_thread copies
+        # the current context).
+        if self.ctx is not None:
+            from aru.runtime import set_ctx
+            set_ctx(self.ctx)
+
+        from aru.commands import handle_connect_command
+
+        try:
+            new_ref = await asyncio.to_thread(
+                handle_connect_command, body, self.session
+            )
+        except Exception as exc:
+            try:
+                self.query_one(ChatPane).add_system_message(
+                    f"/connect failed: {type(exc).__name__}: {exc}"
+                )
+            except Exception:
+                pass
+            return
+
+        # Back on the loop. If the handler switched the session model, sync
+        # the RuntimeContext + status bar so the next turn uses it.
+        if new_ref and self.session is not None:
+            try:
+                from aru.providers import resolve_model_ref
+
+                config_aliases = (
+                    getattr(self.config, "model_aliases", None) or {}
+                ) if self.config else {}
+                if self.ctx is not None:
+                    self.ctx.model_id = self.session.model_id
+                    small_ref = config_aliases.get("small")
+                    if not small_ref:
+                        sp_key, _ = resolve_model_ref(self.session.model_ref)
+                        _small_defaults = {
+                            "anthropic": "anthropic/claude-haiku-4-5",
+                            "openai": "openai/gpt-4o-mini",
+                            "groq": "groq/llama-3.1-8b-instant",
+                            "deepseek": "deepseek/deepseek-chat",
+                            "ollama": "ollama/llama3.1",
+                        }
+                        small_ref = _small_defaults.get(sp_key, self.session.model_ref)
+                    self.ctx.small_model_ref = small_ref
+                self.query_one(StatusPane)._refresh_from_session()
+            except Exception:
+                pass
+
     def _slash_undo(self) -> None:
         # Full /undo semantics require restoring checkpoints; keep it
         # minimal for now — hint + run the bridged handler if available.
@@ -1211,6 +1283,7 @@ class AruApp(App):
             "  /help            this message",
             "  /clear           clear chat pane",
             "  /plan            toggle plan mode",
+            "  /connect         connect a provider — store an API key",
             "  /quit  /exit     save session and exit",
             "  ! <command>      run a shell command (output streams to chat)",
             "",
@@ -2523,6 +2596,14 @@ async def run_tui(
 
     config = load_config()
     ctx.config = config
+
+    # Layer credentials stored via /connect (~/.aru/auth.json) onto the
+    # provider registry so connected keys are live from the first turn.
+    try:
+        from aru.providers import apply_stored_credentials
+        apply_stored_credentials()
+    except Exception:
+        pass
 
     # LSP wiring (Tier 2 #5)
     try:

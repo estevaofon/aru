@@ -43,11 +43,13 @@ class TextInputModal(ModalScreen[str | None]):
         *,
         default: str = "",
         placeholder: str = "",
+        password: bool = False,
     ) -> None:
         super().__init__()
         self._prompt = prompt
         self._default = default
         self._placeholder = placeholder
+        self._password = password
 
     def compose(self) -> ComposeResult:
         with Vertical(id="text-box"):
@@ -56,6 +58,7 @@ class TextInputModal(ModalScreen[str | None]):
             yield Input(
                 value=self._default,
                 placeholder=self._placeholder,
+                password=self._password,
                 id="text-input",
             )
 

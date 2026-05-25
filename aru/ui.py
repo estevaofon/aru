@@ -52,8 +52,13 @@ class UIAdapter(Protocol):
         *,
         default: str = "",
         multiline: bool = False,
+        password: bool = False,
     ) -> str:
-        """Free-form text prompt. Returns user input or ``default``."""
+        """Free-form text prompt. Returns user input or ``default``.
+
+        When ``password`` is True the input is masked (no echo / dots) — used
+        for API keys so they don't land in terminal scrollback.
+        """
         ...
 
     def print(self, renderable: Any) -> None:  # noqa: A003 — mirrors Rich API
@@ -118,9 +123,15 @@ class ReplUI:
         *,
         default: str = "",
         multiline: bool = False,
+        password: bool = False,
     ) -> str:
         try:
-            answer = self.console.input(prompt)
+            if password:
+                # console.input(password=True) masks the echo with the
+                # console's password char (no scrollback leak).
+                answer = self.console.input(prompt, password=True)
+            else:
+                answer = self.console.input(prompt)
         except (EOFError, KeyboardInterrupt):
             return default
         return answer if answer else default
