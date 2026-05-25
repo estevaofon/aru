@@ -91,18 +91,6 @@ class TestMain:
         mock_asyncio_run.assert_called_once()
 
     @patch("main.load_dotenv")
-    @patch("aru.cli.run_cli")
-    @patch("main.asyncio.run")
-    def test_main_repl_flag_routes_to_repl(self, mock_asyncio_run, mock_run_cli, mock_load_dotenv):
-        """Test main() with --repl routes to the classic REPL instead of the TUI."""
-        with patch.object(sys, "argv", ["main.py", "--repl"]):
-            main.main()
-
-        mock_load_dotenv.assert_called_once()
-        mock_run_cli.assert_called_once_with(skip_permissions=False, resume_id=None)
-        mock_asyncio_run.assert_called_once()
-
-    @patch("main.load_dotenv")
     @patch("aru.tui.run_tui")
     @patch("main.asyncio.run")
     def test_main_keyboard_interrupt_handling(self, mock_asyncio_run, mock_run_tui, mock_load_dotenv):

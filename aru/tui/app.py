@@ -2572,9 +2572,9 @@ async def run_tui(
 ) -> None:
     """Bootstrap Aru in TUI mode and run the Textual App.
 
-    Mirrors ``cli.run_cli`` bootstrap sequence so the TUI gets the same
-    config resolution, custom tools/agents/plugins/MCP loading,
-    formatter wiring, LSP, and session/worktree restoration as the REPL.
+    Performs the full Aru bootstrap: config resolution, custom
+    tools/agents/plugins/MCP loading, formatter wiring, LSP, and
+    session/worktree restoration.
     """
     import atexit
     import logging as _logging
@@ -2643,8 +2643,8 @@ async def run_tui(
             session.model_ref = config.default_model
     ctx.session = session
 
-    # Mirror _sync_model from run_cli — update RuntimeContext with the
-    # session's model and resolve the small-model reference.
+    # Update RuntimeContext with the session's model and resolve the
+    # small-model reference.
     try:
         from aru.providers import resolve_model_ref
         ctx.model_id = session.model_id

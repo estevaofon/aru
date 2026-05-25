@@ -2,7 +2,7 @@
 
 Previously, only serialization was covered (to_dict/from_dict roundtrip in
 ``test_cwd_awareness.py::test_session_persists_worktree_state``). The actual
-re-entry branch at ``run_cli`` startup had no test.
+re-entry branch at ``run_tui`` startup had no test.
 
 This module extracts the re-entry logic into the public
 ``_restore_worktree_from_session`` helper and exercises all four outcomes:

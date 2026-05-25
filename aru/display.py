@@ -9,7 +9,6 @@ import time
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.markdown import Markdown
 from rich.measure import Measurement
-from rich.rule import Rule
 from rich.spinner import Spinner
 from rich.text import Text
 
@@ -86,58 +85,6 @@ def format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
-
-
-def _sanitize_input(text: str) -> str:
-    """Remove lone UTF-16 surrogates that Windows clipboard can introduce."""
-    return text.encode("utf-8", errors="replace").decode("utf-8")
-
-
-def _render_input_separator() -> None:
-    """Print a green separator line above the input prompt."""
-    console.print(Rule(style=f"dim {neon_green}"))
-
-
-def _render_home(session, skip_permissions: bool) -> None:
-    """Render a clean home screen inspired by Claude Code."""
-    import os
-
-    from rich.table import Table
-
-    from aru import __version__
-
-    logo = _build_logo_with_shadow(aru_logo)
-    console.print(logo)
-    console.print(
-        Text.from_markup(f"  [dim]A coding agent powered by OpenSource[/dim]  [bold {neon_green}]v{__version__}[/bold {neon_green}]"),
-    )
-    console.print()
-
-    cmds = Table(show_header=False, box=None, padding=(0, 2), expand=False)
-    cmds.add_column(style="bold cyan", min_width=12)
-    cmds.add_column(style="dim")
-    cmds.add_row("/help", "Show all commands")
-    console.print(cmds)
-    console.print()
-
-    mode_label = "[bold red]🔥 YOLO mode — permissions bypassed[/bold red]" if skip_permissions else "[green]safe mode[/green]"
-    console.print(
-        Text.from_markup(
-            f"  [dim]model:[/dim] [bold]{session.model_display}[/bold] [dim]({session.model_id})[/dim]"
-            f"  [dim]|[/dim]  {mode_label}"
-        )
-    )
-    # Prefer ctx.cwd so the "cwd:" line reflects the active worktree (Tier 3 #2).
-    # Falls back to os.getcwd() when no ctx is installed (pre-init, tests).
-    try:
-        from aru.runtime import get_cwd as _get_cwd
-        _cwd_display = _get_cwd()
-    except Exception:
-        _cwd_display = os.getcwd()
-    console.print(
-        Text.from_markup(f"  [dim]cwd:[/dim]   {_cwd_display}")
-    )
-    console.print()
 
 
 THINKING_PHRASES = [

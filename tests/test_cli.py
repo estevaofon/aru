@@ -9,164 +9,15 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from aru.cli import (
-    _sanitize_input,
-    _resolve_mentions,
     AgentRunResult,
     PlanStep,
     parse_plan_steps,
     Session,
     SessionStore,
-    PasteState,
     DEFAULT_MODEL,
     SLASH_COMMANDS,
-    _MENTION_RE,
 )
 from aru.providers import MODEL_ALIASES
-
-
-# ── _sanitize_input ─────────────────────────────────────────────────
-
-class TestSanitizeInput:
-    def test_normal_text(self):
-        assert _sanitize_input("hello world") == "hello world"
-
-    def test_unicode_text(self):
-        assert _sanitize_input("café résumé") == "café résumé"
-
-    def test_empty_string(self):
-        assert _sanitize_input("") == ""
-
-    def test_replaces_invalid_surrogates(self):
-        # Simulate broken surrogates — should not raise
-        result = _sanitize_input("test\x00data")
-        assert isinstance(result, str)
-
-
-# ── _resolve_mentions ────────────────────────────────────────────────
-
-class TestResolveMentions:
-    def test_no_mentions(self, tmp_path):
-        mr = _resolve_mentions("hello world", str(tmp_path))
-        assert mr.text == "hello world"
-        assert mr.count == 0
-        assert mr.file_messages == []
-
-    def test_resolves_file_mention(self, tmp_path):
-        (tmp_path / "config.py").write_text("DEBUG = True")
-        mr = _resolve_mentions("check @config.py", str(tmp_path))
-        # Mentions are now real tool_use/tool_result block pairs
-        assert mr.count == 1
-        assert len(mr.file_messages) == 2  # assistant tool_use + tool tool_result
-        assistant_blocks = mr.file_messages[0]["content"]
-        tool_blocks = mr.file_messages[1]["content"]
-        assert assistant_blocks[0]["type"] == "tool_use"
-        assert assistant_blocks[0]["name"] == "read_file"
-        # Must match the real read_file signature (file_path, not path)
-        # or the model will copy the wrong arg name in subsequent real calls.
-        assert assistant_blocks[0]["input"]["file_path"] == "config.py"
-        assert tool_blocks[0]["type"] == "tool_result"
-        assert "DEBUG = True" in tool_blocks[0]["content"]
-        # tool_use_id pairing
-        assert assistant_blocks[0]["id"] == tool_blocks[0]["tool_use_id"]
-
-    def test_nonexistent_file_ignored(self, tmp_path):
-        mr = _resolve_mentions("check @missing.py", str(tmp_path))
-        assert mr.text == "check @missing.py"
-        assert mr.count == 0
-
-    def test_deduplicates_mentions(self, tmp_path):
-        (tmp_path / "file.py").write_text("code")
-        mr = _resolve_mentions("@file.py and @file.py", str(tmp_path))
-        assert mr.count == 1
-        assert len(mr.file_messages) == 2  # one pair
-
-    def test_multiple_files(self, tmp_path):
-        (tmp_path / "a.py").write_text("aaa")
-        (tmp_path / "b.py").write_text("bbb")
-        mr = _resolve_mentions("@a.py and @b.py", str(tmp_path))
-        assert mr.count == 2
-        assert len(mr.file_messages) == 4  # two pairs
-        # Collect all tool_result content from the tool-role messages
-        all_content = " ".join(
-            b.get("content", "")
-            for m in mr.file_messages
-            if m["role"] == "tool"
-            for b in m["content"]
-            if b.get("type") == "tool_result"
-        )
-        assert "aaa" in all_content
-        assert "bbb" in all_content
-
-    def test_mention_regex_pattern(self):
-        matches = _MENTION_RE.findall("check @file.py now")
-        assert "file.py" in matches
-
-    def test_mention_not_in_email(self):
-        matches = _MENTION_RE.findall("user@email.com")
-        assert "email.com" not in matches
-
-    def test_mention_tool_use_input_matches_real_read_file_signature(self, tmp_path):
-        """Synthetic @mention tool_use blocks must use the REAL read_file arg names.
-
-        Regression: an earlier version used `{"path": rel_path}` as the synthetic
-        input, which made the model see its own prior "tool calls" in history
-        using `path=...` and copy that pattern. The real `read_file` signature
-        is `file_path: str`, so the model's real calls hit Pydantic validation
-        errors: `Unexpected keyword argument 'path'`.
-        """
-        import inspect
-        from aru.tools.codebase import read_file
-
-        # Introspect the real signature — first positional arg name
-        sig_params = list(inspect.signature(read_file).parameters.keys())
-        real_arg_name = sig_params[0]
-
-        (tmp_path / "foo.py").write_text("data")
-        mr = _resolve_mentions("@foo.py", str(tmp_path))
-        tool_use_input = mr.file_messages[0]["content"][0]["input"]
-
-        assert real_arg_name in tool_use_input, (
-            f"Synthetic @mention tool_use uses input keys {list(tool_use_input)}, "
-            f"but the real read_file signature expects '{real_arg_name}'. "
-            f"The model will copy the wrong arg name from history — fix "
-            f"aru/completers.py:_resolve_mentions to use the real arg name."
-        )
-
-    def test_mention_arg_name_derived_dynamically_via_introspection(self, tmp_path):
-        """The mention forgery must derive the arg name from inspect.signature.
-
-        Regression guard: if someone reverts to a hardcoded key (e.g.
-        `{"file_path": rel_path}` literal), this test still passes — but
-        if `read_file` is renamed, we want the test to catch the drift.
-        So we monkey-patch the cached introspection result and verify the
-        mention uses whatever the introspection returned.
-
-        This proves the arg name is *actually* derived, not accidentally
-        matching a hardcoded value.
-        """
-        from aru import completers
-
-        # Clear the lru_cache and patch the introspection to return a fake name
-        completers._read_file_arg_name.cache_clear()
-        original = completers._read_file_arg_name.__wrapped__
-
-        def fake_arg_name():
-            return "xXx_fake_arg_xXx"
-
-        completers._read_file_arg_name = lambda: fake_arg_name()  # type: ignore[assignment]
-        try:
-            (tmp_path / "bar.py").write_text("data")
-            mr = _resolve_mentions("@bar.py", str(tmp_path))
-            tool_use_input = mr.file_messages[0]["content"][0]["input"]
-            assert "xXx_fake_arg_xXx" in tool_use_input, (
-                "The mention forgery ignored the introspection result — "
-                "it's probably hardcoding the arg name instead of deriving it."
-            )
-        finally:
-            # Restore
-            completers._read_file_arg_name = original  # type: ignore[assignment]
-            from functools import lru_cache
-            completers._read_file_arg_name = lru_cache(maxsize=1)(completers._read_file_arg_name)
 
 
 # ── PlanStep ─────────────────────────────────────────────────────────
@@ -550,47 +401,6 @@ class TestSessionStore:
     def test_load_last_empty(self, tmp_path):
         store = SessionStore(base_dir=str(tmp_path))
         assert store.load_last() is None
-
-
-# ── PasteState ───────────────────────────────────────────────────────
-
-class TestPasteState:
-    def test_initial_state(self):
-        ps = PasteState()
-        assert ps.pasted_content is None
-        assert ps.line_count == 0
-
-    def test_set(self):
-        ps = PasteState()
-        ps.set("line1\nline2\nline3")
-        assert ps.pasted_content == "line1\nline2\nline3"
-        assert ps.line_count == 3
-
-    def test_clear(self):
-        ps = PasteState()
-        ps.set("content\nhere")
-        ps.clear()
-        assert ps.pasted_content is None
-        assert ps.line_count == 0
-
-    def test_build_message_with_annotation(self):
-        ps = PasteState()
-        ps.set("code here")
-        result = ps.build_message("review this")
-        assert "review this" in result
-        assert "code here" in result
-        assert "```" in result
-
-    def test_build_message_no_annotation(self):
-        ps = PasteState()
-        ps.set("just code")
-        result = ps.build_message("")
-        assert result == "just code"
-
-    def test_build_message_no_paste(self):
-        ps = PasteState()
-        result = ps.build_message("normal text")
-        assert result == "normal text"
 
 
 # ── Constants ────────────────────────────────────────────────────────

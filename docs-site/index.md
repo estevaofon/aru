@@ -76,7 +76,7 @@ Pronto. Veja o [Início Rápido](comecando/inicio-rapido.md) para mais detalhes.
 ## Como funciona
 
 ```text
-main.py → cli.run_cli() → REPL
+main.py → cli.main() → TUI (Textual)
                            ├─ build      (conversa + ferramentas, self-triggers plan mode)
                            ├─ plan       (read-only, gera plano em Markdown)
                            ├─ executor   (executa plano passo a passo)

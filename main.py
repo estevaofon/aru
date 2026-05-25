@@ -23,23 +23,8 @@ def main():
         else:
             resume_id = "last"
 
-    # REPL opt-in — TUI is the default interactive mode.
-    #
-    # ``aru.cli`` transitively imports ``aru.completers`` which in turn
-    # imports ``prompt_toolkit`` (~580 ms on cold cache) plus a handful
-    # of Agno REPL utilities. None of that is needed on the TUI path,
-    # so we defer the import to inside the branch that actually uses
-    # it. Same story for ``aru.tui`` — keep it out of the REPL path.
-    # Net effect: TUI cold-start drops by ~2.3 s, REPL cold-start
-    # unchanged.
-    if "--repl" in args:
-        from aru.cli import run_cli
-        try:
-            asyncio.run(run_cli(skip_permissions=skip_permissions, resume_id=resume_id))
-        except (KeyboardInterrupt, asyncio.CancelledError, SystemExit):
-            pass  # Handled by cli.main() or run_cli's own exit logic
-        return
-
+    # The Textual TUI is the only interactive interface. ``aru.tui`` is
+    # imported lazily here so importing this module stays cheap.
     from aru.tui import run_tui
     try:
         asyncio.run(run_tui(skip_permissions=skip_permissions, resume_id=resume_id))

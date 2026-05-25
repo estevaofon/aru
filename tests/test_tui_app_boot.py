@@ -201,7 +201,7 @@ def test_runtime_ctx_has_tui_slots():
 
 
 def test_main_wires_tui_flag(monkeypatch):
-    """main() should route `--tui` to run_tui without invoking run_cli.
+    """main() should route `--tui` to run_tui (the only interactive interface).
 
     We stub asyncio.run so main() can observe the call synchronously
     (main is a sync function; we don't want pytest's event loop here).
@@ -209,13 +209,10 @@ def test_main_wires_tui_flag(monkeypatch):
     import asyncio as _asyncio
     import sys
 
-    called = {"run_tui": 0, "run_cli": 0, "run_oneshot": 0}
+    called = {"run_tui": 0, "run_oneshot": 0}
 
     async def fake_run_tui(**kwargs):
         called["run_tui"] += 1
-
-    async def fake_run_cli(**kwargs):
-        called["run_cli"] += 1
 
     async def fake_run_oneshot(*args, **kwargs):
         called["run_oneshot"] += 1
@@ -225,8 +222,6 @@ def test_main_wires_tui_flag(monkeypatch):
         name = getattr(coro, "__qualname__", "") or getattr(coro, "cr_code", object()).__repr__()
         if "run_tui" in name:
             called["run_tui"] += 1
-        elif "run_cli" in name:
-            called["run_cli"] += 1
         elif "run_oneshot" in name:
             called["run_oneshot"] += 1
         # Consume the coro so no RuntimeWarning leaks.
@@ -234,7 +229,6 @@ def test_main_wires_tui_flag(monkeypatch):
 
     from aru import cli as cli_mod
 
-    monkeypatch.setattr(cli_mod, "run_cli", fake_run_cli)
     monkeypatch.setattr(cli_mod, "run_oneshot", fake_run_oneshot)
     monkeypatch.setattr("aru.tui.run_tui", fake_run_tui)
     monkeypatch.setattr(cli_mod.asyncio, "run", fake_asyncio_run)
@@ -244,22 +238,19 @@ def test_main_wires_tui_flag(monkeypatch):
     cli_mod.main()
 
     assert called["run_tui"] == 1
-    assert called["run_cli"] == 0
     assert called["run_oneshot"] == 0
 
 
 def test_main_without_any_flag_routes_to_tui(monkeypatch):
-    """No args means main() launches the TUI (new default)."""
+    """No args means main() launches the TUI (the only interactive interface)."""
     import sys
 
-    called = {"run_tui": 0, "run_cli": 0}
+    called = {"run_tui": 0}
 
     def fake_asyncio_run(coro):
         name = getattr(coro, "__qualname__", "")
         if "run_tui" in name:
             called["run_tui"] += 1
-        elif "run_cli" in name:
-            called["run_cli"] += 1
         coro.close()
 
     from aru import cli as cli_mod
@@ -270,29 +261,3 @@ def test_main_without_any_flag_routes_to_tui(monkeypatch):
     cli_mod.main()
 
     assert called["run_tui"] == 1
-    assert called["run_cli"] == 0
-
-
-def test_main_with_repl_flag_routes_to_repl(monkeypatch):
-    """`--repl` opts into the classic REPL instead of the default TUI."""
-    import sys
-
-    called = {"run_tui": 0, "run_cli": 0}
-
-    def fake_asyncio_run(coro):
-        name = getattr(coro, "__qualname__", "")
-        if "run_tui" in name:
-            called["run_tui"] += 1
-        elif "run_cli" in name:
-            called["run_cli"] += 1
-        coro.close()
-
-    from aru import cli as cli_mod
-    monkeypatch.setattr(cli_mod.asyncio, "run", fake_asyncio_run)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(sys, "argv", ["aru", "--repl"])
-
-    cli_mod.main()
-
-    assert called["run_cli"] == 1
-    assert called["run_tui"] == 0

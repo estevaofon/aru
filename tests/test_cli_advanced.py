@@ -14,13 +14,8 @@ from aru.cli import (
     _format_tool_label,
     create_general_agent,
     Session,
-    SlashCommandCompleter,
-    FileMentionCompleter,
-    AruCompleter,
-    _create_prompt_session,
-    PasteState,
 )
-from aru.config import AgentConfig, CustomCommand
+from aru.config import AgentConfig
 
 
 # ── StatusBar ────────────────────────────────────────────────────────
@@ -282,126 +277,6 @@ class TestCreateGeneralAgent:
         session = Session()
         agent = await create_general_agent(session)
         assert len(agent.tools) > 0
-
-
-# ── Completers ───────────────────────────────────────────────────────
-
-
-class TestSlashCommandCompleter:
-    def test_completes_slash_commands(self):
-        completer = SlashCommandCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("/pla")
-        completions = list(completer.get_completions(doc, None))
-        assert len(completions) > 0
-        assert any("/plan" in c.text for c in completions)
-
-    def test_no_completions_without_slash(self):
-        completer = SlashCommandCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("hello")
-        completions = list(completer.get_completions(doc, None))
-        assert len(completions) == 0
-
-    def test_custom_commands(self):
-        custom_cmd = CustomCommand(
-            name="deploy",
-            description="Deploy app",
-            template="deploy script",
-            source_path=".agents/commands/deploy.md"
-        )
-        completer = SlashCommandCompleter(custom_commands={"deploy": custom_cmd})
-        
-        from prompt_toolkit.document import Document
-        doc = Document("/dep")
-        completions = list(completer.get_completions(doc, None))
-        assert any("/deploy" in c.text for c in completions)
-
-
-class TestFileMentionCompleter:
-    def test_no_completions_without_at(self):
-        completer = FileMentionCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("hello world")
-        completions = list(completer.get_completions(doc, None))
-        assert len(completions) == 0
-
-    def test_completions_with_at(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "test.py").write_text("code")
-        (tmp_path / "readme.md").write_text("docs")
-        
-        completer = FileMentionCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("check @test")
-        completions = list(completer.get_completions(doc, None))
-        assert any("test.py" in c.text for c in completions)
-
-    def test_ignores_hidden_files(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / ".hidden").write_text("secret")
-        (tmp_path / "visible.py").write_text("code")
-        
-        completer = FileMentionCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("@")
-        completions = list(completer.get_completions(doc, None))
-        assert not any(".hidden" in c.text for c in completions)
-
-
-class TestAruCompleter:
-    def test_delegates_to_slash_completer(self):
-        completer = AruCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("/help")
-        completions = list(completer.get_completions(doc, None))
-        assert len(completions) > 0
-
-    def test_delegates_to_mention_completer(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "file.py").write_text("code")
-        
-        completer = AruCompleter()
-        from prompt_toolkit.document import Document
-        doc = Document("@file")
-        completions = list(completer.get_completions(doc, None))
-        assert len(completions) > 0
-
-
-# ── _create_prompt_session ───────────────────────────────────────────
-
-
-class TestCreatePromptSession:
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="prompt_toolkit requires actual terminal on Windows"
-    )
-    def test_creates_session(self):
-        paste_state = PasteState()
-        session = _create_prompt_session(paste_state)
-        assert session is not None
-        assert session.completer is not None
-
-    @pytest.mark.skipif(
-        os.name == "nt",
-        reason="prompt_toolkit requires actual terminal on Windows"
-    )
-    def test_session_with_custom_config(self):
-        paste_state = PasteState()
-        custom_cmd = CustomCommand(
-            name="test",
-            description="Test",
-            template="test",
-            source_path=".agents/commands/test.md"
-        )
-        config = AgentConfig(
-            readme_md="",
-            agents_md="",
-            commands={"test": custom_cmd},
-            skills={}
-        )
-        session = _create_prompt_session(paste_state, config)
-        assert session is not None
 
 
 # ── Integration Tests ────────────────────────────────────────────────

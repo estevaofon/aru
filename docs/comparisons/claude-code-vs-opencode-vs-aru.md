@@ -190,8 +190,7 @@ tools), 4 screens modais (choice/confirm/search/text_input), keybindings
 (Ctrl+Q/L/A/P/F + Up/Down history), slash commands locais sem round-trip,
 `@file` mention com `SlashCompleter`, recovery de terminal pós-sleep
 (Ctrl+R), shell escape (commit recente). Configuração via `aru.json` +
-`AGENTS.md` + `.agents/commands/`. REPL clássico ainda disponível via
-`--repl`. Funcional e bem implementado, mas ainda atrás dos dois rivais em
+`AGENTS.md` + `.agents/commands/`. Funcional e bem implementado, mas ainda atrás dos dois rivais em
 variedade de modos (sem Vim mode, voice, copy-on-select, virtualização
 avançada, fila de comandos visível). A TUI é boa; o ambiente em volta dela
 tem menos refinamento.

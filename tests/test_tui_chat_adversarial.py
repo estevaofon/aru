@@ -14,9 +14,10 @@ eager-stargazing-quill.md``:
 2. **Reference-link correctness** — the G1 guard (``_REF_DEF_RE``) routes
    a buffer containing a reference definition through the naïve path so
    ``[text][ref]`` resolves to its URL.
-3. **Latency envelope** — a 40 KB code-block-dense stream keeps the
-   per-flush pause bounded. Marked ``slow``; a coarse assertion that
-   guards against regression without depending on CI hardware specifics.
+3. **Bounded parse work** — a 40 KB code-block-dense stream rendered at
+   growing checkpoints keeps cumulative ``_markdown_to_text`` work
+   ~linear in the document size (prefix cache), not quadratic. Counts
+   bytes parsed, not wall-clock — deterministic on any hardware.
 4. **Cache behaviour** — counting calls to ``_markdown_to_text`` during
    a multi-checkpoint pass shows most flushes re-parse only a small
    slice (the tail), not the whole buffer.
@@ -25,7 +26,6 @@ eager-stargazing-quill.md``:
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -188,45 +188,78 @@ async def test_reference_definition_forces_naive_path():
 
 
 @pytest.mark.asyncio
-@pytest.mark.slow
-async def test_streaming_latency_stays_bounded():
-    """40 KB code-block-dense stream: no single flush exceeds 500 ms.
+async def test_streaming_parse_work_stays_linear(monkeypatch):
+    """A 40 KB dense-code reply rendered flush-by-flush keeps cumulative
+    markdown-parse work ~linear in the document size — the prefix cache
+    must stop every flush from re-parsing the whole buffer.
 
-    Streams in 500-byte deltas through the full ``ChatPane`` pipeline
-    (append → debounce → watch_buffer → schedule render). Records the
-    wall-clock time of each ``pilot.pause(0.01)`` call between deltas.
-    Assert the 95th percentile is ≤ 500 ms — a coarse regression guard
-    that survives typical CI jitter but catches a real return of the
-    O(N) per-flush behaviour.
+    Deterministic replacement for the old wall-clock latency test (which
+    timed ``pilot.pause`` and flaked under load). We count the *bytes*
+    handed to ``_markdown_to_text`` while rendering at growing,
+    append-only checkpoints — the same signal as
+    ``test_incremental_reduces_parse_work`` but across a long stream and
+    asserting the global O(N) bound. A broken prefix cache (whole-buffer
+    parse per flush) makes the total quadratic and trips the guard on any
+    hardware — no stopwatch involved.
     """
     from aru.tui.app import AruApp
-    from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets import chat as chat_mod
+    from aru.tui.widgets.chat import (
+        ChatMessageWidget,
+        ChatPane,
+        _find_last_stable_split,
+    )
 
     content = _synthesise_markdown(40_000, dense_code=True)
+
+    sizes: list[int] = []
+    original = chat_mod._markdown_to_text
+
+    def counting(raw: str, width: int = 100):
+        sizes.append(len(raw))
+        return original(raw, width)
+
+    monkeypatch.setattr(chat_mod, "_markdown_to_text", counting)
+
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         chat = app.query_one(ChatPane)
         chat.start_assistant_message()
+        widget = chat._active_assistant
+        assert widget is not None
 
-        samples: list[float] = []
-        step = 500
-        for i in range(0, len(content), step):
-            chat.append_assistant_delta(content[i : i + step])
-            t0 = time.perf_counter()
-            await pilot.pause(0.01)
-            samples.append(time.perf_counter() - t0)
+        width = 100
+        # Claim the render task so a stray watch-triggered render can't
+        # spawn a competing parse and double-count (mirrors test 4).
+        widget._md_render_task = asyncio.current_task()
+        try:
+            sizes.clear()  # ignore setup chatter
+            # Simulate streaming: render at growing 2 KB checkpoints, each
+            # extending the previous. Drive _render_incremental directly so
+            # the outcome is deterministic (no debounce / coalesce timing).
+            checkpoints = list(range(8_192, len(content), 2_000)) + [len(content)]
+            for cp_len in checkpoints:
+                cp = content[:cp_len]
+                split_idx = _find_last_stable_split(cp)
+                if split_idx <= 0:
+                    continue
+                widget.set_reactive(ChatMessageWidget.buffer, cp)
+                await widget._render_incremental(cp, split_idx, width)
+        finally:
+            widget._md_render_task = None
 
-        chat.finalize_assistant_message()
-        await pilot.pause()
-
-    samples.sort()
-    if not samples:
-        pytest.skip("no samples — payload too small")
-    p95 = samples[int(len(samples) * 0.95)]
-    assert p95 <= 0.5, (
-        f"95th percentile per-flush pause {p95*1000:.0f}ms exceeds 500ms "
-        f"(max={max(samples)*1000:.0f}ms, mean={sum(samples)/len(samples)*1000:.0f}ms)"
+    assert sizes, "no parses recorded — checkpoints never produced a split"
+    total_parsed = sum(sizes)
+    n = len(content)
+    # Incremental cache → cumulative parse ≈ N (+ small per-flush tails),
+    # roughly 1–2x N. A whole-buffer-per-flush regression is Σ(checkpoint
+    # sizes) ≈ 8–10x N. 4x is a wide, hardware-independent line between
+    # the two regimes.
+    assert total_parsed <= 4 * n, (
+        f"cumulative markdown parse = {total_parsed} bytes (> 4x the "
+        f"{n}-byte document) — prefix cache likely broken, an O(N)-per-flush "
+        f"regression. per-flush sizes: {sizes}"
     )
 
 
@@ -303,60 +336,79 @@ async def test_incremental_reduces_parse_work(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.slow
-async def test_giant_unclosed_fence_does_not_freeze():
-    """A single 30 KB unclosed ```python fence streams without freezing.
+async def test_giant_unclosed_fence_uses_escape_hatch(monkeypatch):
+    """A giant unclosed ```python fence must engage the escape hatch —
+    rendered as flat ``Text`` — instead of running markdown-it + Pygments
+    on the whole growing buffer every flush.
 
-    This is the "fall-through to naïve" case that the 4-layer fix could
-    not speed up — ``_find_last_stable_split`` returns -1 because every
-    blank line is inside the open fence, so the incremental prefix cache
-    cannot activate. The escape hatch (layer 6) instead renders the
-    fence content as flat ``Text``, skipping Pygments on every flush.
-
-    Asserts P95 per-flush pause ≤ 500 ms and no single pause > 1000 ms.
-    Without the escape hatch, Pygments on a 30 KB Python buffer costs
-    ~300 ms per flush — with a stream of ~60 flushes that's enough for
-    the max-pause guard to fire.
+    Deterministic replacement for the old wall-clock freeze test. Rather
+    than timing ``pilot.pause`` (which flaked under load) we drive the
+    real render-path selection (``_do_markdown_render``) at growing
+    checkpoints and assert (a) the escape hatch (``_render_tail_escape``)
+    is chosen on every flush, and (b) ``_markdown_to_text`` is never
+    handed the giant fence body. A regression removing the escape hatch
+    re-parses the whole buffer per flush — caught here by a large parse
+    input, not a hardware-dependent stopwatch.
     """
     from aru.tui.app import AruApp
-    from aru.tui.widgets.chat import ChatPane
+    from aru.tui.widgets import chat as chat_mod
+    from aru.tui.widgets.chat import ChatMessageWidget, ChatPane
 
-    # Single giant fenced block with no prose or inner blank lines —
-    # defeats _find_last_stable_split entirely.
+    # One giant fenced block, no inner blank lines and no closing fence —
+    # defeats _find_last_stable_split entirely, so only the escape hatch
+    # stands between the user and a per-flush whole-buffer Pygments pass.
     body = "".join(f"def func_{i}(): return {i}\n" for i in range(600))
     content = "```python\n" + body  # NO closing fence
     assert len(content) >= 15_000
+
+    sizes: list[int] = []
+    original = chat_mod._markdown_to_text
+
+    def counting(raw: str, width: int = 100):
+        sizes.append(len(raw))
+        return original(raw, width)
+
+    monkeypatch.setattr(chat_mod, "_markdown_to_text", counting)
 
     app = AruApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         chat = app.query_one(ChatPane)
         chat.start_assistant_message()
+        widget = chat._active_assistant
+        assert widget is not None
 
-        samples: list[float] = []
-        step = 500
-        for i in range(0, len(content), step):
-            chat.append_assistant_delta(content[i : i + step])
-            t0 = time.perf_counter()
-            await pilot.pause(0.01)
-            samples.append(time.perf_counter() - t0)
+        escape_calls = {"n": 0}
+        original_escape = widget._render_tail_escape
 
-        # Don't finalize — we're measuring the mid-stream state which is
-        # what the user sees during a long code dump.
+        async def counting_escape(tail, fence_start, width):
+            escape_calls["n"] += 1
+            return await original_escape(tail, fence_start, width)
 
-    samples.sort()
-    if not samples:
-        pytest.skip("no samples — payload too small")
-    p95 = samples[int(len(samples) * 0.95)]
-    max_pause = max(samples)
-    assert p95 <= 0.5, (
-        f"P95 per-flush pause {p95*1000:.0f}ms exceeds 500ms — escape "
-        f"hatch not engaged or ineffective. max={max_pause*1000:.0f}ms, "
-        f"mean={sum(samples)/len(samples)*1000:.0f}ms"
-    )
-    assert max_pause <= 1.0, (
-        f"max per-flush pause {max_pause*1000:.0f}ms exceeds 1000ms — "
-        f"one or more flushes hit the freeze regime"
+        monkeypatch.setattr(widget, "_render_tail_escape", counting_escape)
+
+        # All checkpoints sit above _INCREMENTAL_MIN_BYTES (8192) so the
+        # incremental/escape decision actually runs (below it the cheap
+        # whole-buffer path is correct and expected).
+        checkpoints = [9_000, 12_000, len(content)]
+        for cp_len in checkpoints:
+            sizes.clear()  # measure only THIS flush's parse work
+            widget.set_reactive(ChatMessageWidget.buffer, content[:cp_len])
+            widget._pending_md_render = False
+            widget._md_render_task = asyncio.current_task()
+            try:
+                await widget._do_markdown_render()
+            finally:
+                widget._md_render_task = None
+            big = [s for s in sizes if s >= widget._ESCAPE_HATCH_FENCE_BYTES]
+            assert not big, (
+                f"at {cp_len}B the fence reached _markdown_to_text with {big} "
+                f"bytes — escape hatch not engaged (would freeze under load)"
+            )
+
+    assert escape_calls["n"] == len(checkpoints), (
+        f"escape hatch engaged on {escape_calls['n']}/{len(checkpoints)} "
+        f"flushes — expected every flush"
     )
 
 

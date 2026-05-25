@@ -9,10 +9,8 @@ import pytest
 from aru.cli import (
     Session,
     SessionStore,
-    TIPS,
     SLASH_COMMANDS,
     DEFAULT_MODEL,
-    _render_home,
 )
 
 
@@ -195,16 +193,6 @@ class TestGlobalConstants:
         assert "/" in DEFAULT_MODEL
         assert "claude" in DEFAULT_MODEL.lower()
 
-    def test_tips_is_list(self):
-        """Test that TIPS is a non-empty list."""
-        assert isinstance(TIPS, list)
-        assert len(TIPS) > 0
-
-    def test_tips_contain_strings(self):
-        """Test that all tips are strings."""
-        for tip in TIPS:
-            assert isinstance(tip, str)
-
     def test_slash_commands_structure(self):
         """Test SLASH_COMMANDS has correct structure."""
         assert isinstance(SLASH_COMMANDS, list)
@@ -221,25 +209,6 @@ class TestGlobalConstants:
         for cmd, desc, usage in SLASH_COMMANDS:
             assert len(desc) > 0
             assert len(usage) > 0
-
-
-# ── _render_home ───────────────────────────────────────────────────────────
-
-
-class TestRenderHome:
-    """Test the home screen rendering."""
-
-    def test_render_home_does_not_raise(self):
-        """Test that _render_home runs without errors."""
-        session = Session()
-        # Should not raise any exception
-        _render_home(session, skip_permissions=False)
-
-    def test_render_home_with_skip_permissions(self):
-        """Test rendering with skip_permissions=True."""
-        session = Session()
-        _render_home(session, skip_permissions=True)
-        # If we get here without error, test passes
 
 
 # ── Additional Session serialization edge cases ────────────────────────────

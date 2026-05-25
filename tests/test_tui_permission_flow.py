@@ -178,9 +178,14 @@ async def test_inline_prompt_hides_input_bar_and_restores_on_answer():
         inp = app.query_one("#input", PromptArea)
         assert not inp.has_class("-hidden"), "input should be visible at rest"
         task = asyncio.create_task(worker())
+        # Wait for BOTH the prompt to mount AND the input bar to pick up the
+        # ``-hidden`` class. They land on separate event-loop ticks, so
+        # polling only for the prompt and asserting the hide immediately
+        # races under a loaded suite (the hide settles a tick later).
         for _ in range(50):
             await pilot.pause(0.05)
-            if list(app.query_one(ChatPane).query(InlineChoicePrompt)):
+            prompt_up = list(app.query_one(ChatPane).query(InlineChoicePrompt))
+            if prompt_up and inp.has_class("-hidden"):
                 break
         # While the prompt is live, the input bar is hidden.
         assert inp.has_class("-hidden"), (

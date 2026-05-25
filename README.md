@@ -68,16 +68,19 @@ Key bindings (TUI):
 Local slash commands inside the TUI: `/help`, `/clear`, `/quit`,
 `/plan`. Any other input is sent to the agent.
 
-### Classic REPL (opt-in)
+### Non-interactive (one-shot)
 
-Prefer the single-line prompt? Pass `--repl` to use the classic REPL:
+For scripting and pipes, pass a prompt directly instead of launching the
+TUI:
 
 ```bash
-aru --repl
+aru "fix the failing test in auth"   # one-shot, with tools
+aru --print "explain this module"    # text-only, no tools
+echo "summarize TODOs" | aru          # piped stdin
 ```
 
-Both modes share the same sessions, plugins, permissions, and tools —
-only presentation differs.
+One-shot mode shares the same sessions, plugins, permissions, and tools
+as the TUI — only presentation differs.
 
 ## Usage
 
@@ -658,7 +661,7 @@ Once a plan is stored, every following turn prepends a `<system-reminder>` listi
 ```
 aru-code/
 ├── aru/
-│   ├── cli.py              # Main REPL loop, argument parsing, and entry point
+│   ├── cli.py              # Argument parsing, one-shot execution, and entry point
 │   ├── agent_factory.py    # Single factory — builds Agno Agents from catalog specs
 │   ├── commands.py         # Slash commands, help display, shell execution
 │   ├── completers.py       # Input completions, paste detection, @file mentions

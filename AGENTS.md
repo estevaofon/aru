@@ -1,15 +1,14 @@
 # Aru — AI Coding Assistant
 
-Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI (default) and a classic REPL (`--repl`) where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (19 tools in the full set: 13 core + 5 task-management + 1 skill invocation).
+Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI for interactive use, plus a non-interactive one-shot mode (`aru "prompt"`), where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (19 tools in the full set: 13 core + 5 task-management + 1 skill invocation).
 
 ## Architecture
 
 ```
-main.py → cli.main() ─┬─ run_tui()   (default interactive mode, Textual)
-                      ├─ run_cli()   (--repl, classic REPL loop)
-                      └─ run_oneshot() (aru "prompt" / --print / piped stdin)
+main.py → cli.main() ─┬─ run_tui()     (interactive mode, Textual)
+                      └─ run_oneshot()  (aru "prompt" / --print / piped stdin)
 
-Both interactive modes share: Build Agent (primary), Plan Agent
+Both entry points share: Build Agent (primary), Plan Agent
 (read-only), Executor Agent (plan step runner), Explorer Agent
 (subagent via delegate_task).
 ```
@@ -20,19 +19,19 @@ Agents are described by `AgentSpec` entries in `agents/catalog.py` and instantia
 
 ```
 aru/
-├── cli.py              # Main REPL loop, argument parsing, entry point
+├── cli.py              # Argument parsing, one-shot execution, entry point (launches TUI)
 ├── agent_factory.py    # Agent instantiation from AgentSpec (catalog-driven)
 ├── runtime.py          # RuntimeContext via contextvars; fork_ctx() for sub-agents
 ├── runner.py           # Agent execution orchestration (uses StreamSink)
-├── streaming.py        # StreamSink protocol + run_stream (shared REPL/TUI loop)
-├── sinks.py            # RichLiveSink — REPL StreamSink (Rich Live + StreamingDisplay)
+├── streaming.py        # StreamSink protocol + run_stream (shared one-shot/TUI loop)
+├── sinks.py            # RichLiveSink — Rich-console StreamSink (Rich Live + StreamingDisplay; one-shot mode)
 ├── events.py           # Typed pydantic event schemas for plugin_manager.publish
-├── ui.py               # UIAdapter protocol + ReplUI (ctx.ui in REPL mode)
+├── ui.py               # UIAdapter protocol + ReplUI (Rich-console ctx.ui; used outside the TUI)
 ├── tui/
 │   ├── app.py          # Textual TUI shell (aru --tui) — AruApp + run_tui
 │   ├── ui.py           # TuiUI — UIAdapter backed by Textual ModalScreens
 │   ├── sinks.py        # TextualBusSink — StreamSink routing to ChatPane
-│   ├── slash_bridge.py # Reuse REPL handle_* handlers in TUI (E6b)
+│   ├── slash_bridge.py # Reuse commands.py handle_* handlers in TUI (E6b)
 │   ├── log_bridge.py   # Forward agno/aru ERROR log records into ChatPane (Textual hijacks stderr)
 │   ├── sanitize.py     # Strip C0 control bytes from agent/tool/file content before it reaches the terminal
 │   ├── themes.py       # Curated theme presets (dark/light/nord/gruvbox/dracula/solarized) + apply_theme
@@ -169,11 +168,12 @@ pre-highlighted, plus a manual-id escape hatch; providers with no static list
 becomes the session model. The command handler
 `commands.handle_connect_command(args, session)` is UI-agnostic — all prompts
 go through `ctx.ui` (`ask_choice` / `ask_text(..., password=True)`), so it
-drives both TUI modals and the REPL. The
+works through whatever `UIAdapter` is installed (the TUI's `TuiUI`, or the
+Rich-console `ReplUI` fallback). The
 TUI dispatches it from a worker thread (`app._slash_connect` →
 `asyncio.to_thread`) because `ctx.ui` modal prompts must not block the event
 loop. Subcommands: `/connect [provider]`, `/connect list`, `/connect logout`.
-**The REPL path is not wired (it is legacy); `/connect` is TUI-only.**
+**`/connect` is wired in the TUI only (one-shot mode does not process slash commands).**
 
 ### `tool_policy.py` — Unified Tool-Policy Gate
 
@@ -236,7 +236,7 @@ Exposes `invoke_skill(name, arguments)` to primary agents. The tool looks up a s
 
 This is the primary mechanism for **multi-skill workflows** where one skill needs to hand off to the next (e.g. a `brainstorming` skill whose terminal state is "now load `writing-plans`"). Without this tool, such workflows require the user to re-type slash commands for each phase, and the agent improvises the next phase from memory without the target SKILL.md actually being in context.
 
-`invoke_skill.__doc__` is updated at startup via `_update_invoke_skill_docstring(config.skills)` (called from `cli.py:run_cli` and `run_oneshot`) so the LLM-facing schema lists available skill names + descriptions. Skills with `disable_model_invocation: true` in their frontmatter are hidden and refused by the tool.
+`invoke_skill.__doc__` is updated at startup via `_update_invoke_skill_docstring(config.skills)` (called from `cli.py:run_oneshot` and `aru.tui.run_tui`) so the LLM-facing schema lists available skill names + descriptions. Skills with `disable_model_invocation: true` in their frontmatter are hidden and refused by the tool.
 
 The tool is part of `GENERAL_TOOLS` / `EXECUTOR_TOOLS` but intentionally excluded from `_DEFAULT_SUBAGENT_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, and `_PLAN_MODE_BLOCKED_TOOLS` (loading text is side-effect-free; mutating tools stay blocked in plan mode independently).
 
@@ -349,19 +349,19 @@ The project uses a local `.venv` virtual environment. When using the `bash` tool
 - Sessions persisted as JSON in `.aru/sessions/`
 - Project language: Portuguese comments in some places; code in English
 
-## TUI architecture (default interactive mode)
+## TUI architecture (interactive mode)
 
-The Textual TUI is the default interactive mode. The classic REPL is
-still available via ``aru --repl`` and lives side-by-side with the TUI.
-Both modes share 100% of the agent/tool/permission/session machinery;
-only presentation differs.
+The Textual TUI is the interactive mode. The non-interactive one-shot
+path (``aru "prompt"``) shares 100% of the agent/tool/permission/session
+machinery; only presentation differs.
 
 **Entry points.** ``aru`` with no positional args (via ``cli.main`` /
-``main.py``) routes to ``aru.tui.run_tui`` which performs the same
-bootstrap as the REPL (``init_ctx``, config, session, plugin manager,
-permission rules) and then awaits ``AruApp.run_async()``. ``aru --repl``
-selects ``run_cli`` instead. ``aru --tui`` is still accepted for
-backwards compatibility but is now a no-op since TUI is the default.
+``main.py``) routes to ``aru.tui.run_tui`` which performs the full
+bootstrap (``init_ctx``, config, session, plugin manager, permission
+rules) and then awaits ``AruApp.run_async()``. A positional prompt
+(``aru "..."``), ``--print``, or piped stdin routes to ``run_oneshot``.
+``aru --repl`` / ``aru --tui`` are still accepted but are no-ops (the
+TUI is the only interactive interface).
 
 **Event bus.** Typed pydantic models in ``aru/events.py`` describe every
 ``plugin_manager.publish(...)`` payload. The manager coerces BaseModel →
@@ -375,7 +375,7 @@ event loop (tool events, content deltas, max-tokens recovery). The same
 loop drives two presentations:
 
 * ``RichLiveSink`` (``aru/sinks.py``) — wraps Rich ``Live`` +
-  ``StreamingDisplay``. Used by ``run_agent_capture`` (REPL).
+  ``StreamingDisplay``. Used by ``run_agent_capture`` (one-shot / non-TUI default sink).
 * ``TextualBusSink`` (``aru/tui/sinks.py``) — publishes into a
   ``ChatPane`` via ``call_from_thread``. Used by
   ``run_agent_capture_tui``.
@@ -412,7 +412,7 @@ agent as a user message.
 ## Plugin migration — cwd-aware tools (Tier 3 #2)
 
 After the cwd-aware refactor, the process cwd (``os.getcwd()``) stays pinned at
-the session's ``project_root`` for the lifetime of the REPL — even when the user
+the session's ``project_root`` for the lifetime of the session — even when the user
 runs ``/worktree enter`` or a sub-agent is spawned via
 ``delegate_task(worktree=...)``. The per-scope working directory lives on
 ``ctx.cwd`` and is isolated across ``fork_ctx()``.
