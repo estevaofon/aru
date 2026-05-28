@@ -1,5 +1,4 @@
 {
-    "default_model": "alibabacloud/qwen3.6-plus",
     "model_aliases": {
         "nemotron": "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "minimax": "openrouter/minimax/minimax-m2.5",

@@ -1046,6 +1046,12 @@ class AruApp(App):
             session.model_ref = resolved_ref if "/" in resolved_ref else (
                 MODEL_ALIASES.get(resolved_ref, resolved_ref)
             )
+            # Persist as MRU so it becomes the default on next launch.
+            try:
+                from aru import state as _state
+                _state.record_model(session.model_ref)
+            except Exception:
+                pass
             if self.ctx is not None:
                 self.ctx.model_id = session.model_id
                 small_ref = config_aliases.get("small")
@@ -2639,8 +2645,21 @@ async def run_tui(
             session = store.load(resume_id) or Session()
     else:
         session = Session()
+        # Precedence for the fresh-session model: explicit aru.json
+        # ``default_model`` wins (the user told us in writing), otherwise
+        # fall back to the most-recent ``/connect`` / ``/model`` choice
+        # persisted in ~/.aru/state.json. Built-in default kicks in only
+        # when neither source provides a usable ref.
         if config.default_model:
             session.model_ref = config.default_model
+        else:
+            try:
+                from aru import state as _state
+                last = _state.get_last_model()
+            except Exception:
+                last = None
+            if last:
+                session.model_ref = last
     ctx.session = session
 
     # Update RuntimeContext with the session's model and resolve the

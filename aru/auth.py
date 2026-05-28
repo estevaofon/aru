@@ -13,6 +13,9 @@ Schema (``info``) — a tagged union on ``type`` so future auth methods
      "provider_type": "openai", "default_model": "...",  # custom provider
      "context_limit": 128000}
     {"type": "local", "base_url": "http://..."}   # keyless (e.g. Ollama)
+    {"type": "oauth", "refresh": "...",            # ChatGPT (Codex) — wired
+     "access": "...", "expires": 1735689600000,   # by /connect → "ChatGPT
+     "accountId": "acc-..."}                      # Pro/Plus (browser)"
 
 Consumption lives in :func:`aru.providers.apply_stored_credentials`, which
 layers these onto the in-memory provider registry at startup (and again

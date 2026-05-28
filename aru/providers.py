@@ -46,6 +46,12 @@ class ProviderConfig:
     # interactively wins over a stale shell env var. Left None for providers
     # configured only through env vars (the legacy path).
     api_key: str | None = None
+    # True iff the stored credential is a ChatGPT (Codex) OAuth token —
+    # set by ``apply_stored_credentials`` when it sees ``{"type": "oauth"}``.
+    # Triggers the Codex-Responses code path in ``_create_provider_model``
+    # (custom base_url + httpx auth that refreshes on the fly). Only ever
+    # applies to the built-in ``openai`` provider today.
+    codex_oauth: bool = False
 
 
 # Built-in providers with sensible defaults
@@ -90,6 +96,15 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
             "gpt-4.1-mini": {"id": "gpt-4.1-mini", "max_tokens": 4096},
             "gpt-4.1-nano": {"id": "gpt-4.1-nano", "max_tokens": 4096},
             "o3-mini": {"id": "o3-mini", "max_tokens": 4096},
+            # GPT-5 family — the only models the Codex backend will accept on
+            # an OAuth (ChatGPT Plus/Pro) credential. Numbers mirror the
+            # OpenCode `codex.ts` ALLOWED_MODELS set.
+            "gpt-5.5":              {"id": "gpt-5.5",              "max_tokens": 128_000, "context_window": 400_000},
+            "gpt-5.4":              {"id": "gpt-5.4",              "max_tokens": 64_000,  "context_window": 272_000},
+            "gpt-5.4-mini":         {"id": "gpt-5.4-mini",         "max_tokens": 64_000,  "context_window": 272_000},
+            "gpt-5.3-codex":        {"id": "gpt-5.3-codex",        "max_tokens": 64_000,  "context_window": 272_000},
+            "gpt-5.3-codex-spark":  {"id": "gpt-5.3-codex-spark",  "max_tokens": 64_000,  "context_window": 272_000},
+            "gpt-5.2":              {"id": "gpt-5.2",              "max_tokens": 64_000,  "context_window": 272_000},
         },
     ),
     "ollama": ProviderConfig(
@@ -724,6 +739,165 @@ def _make_cached_openai_chat_class(mark_recent_messages: bool = False):
     return CachedOpenAIChat
 
 
+def _make_codex_responses_class():
+    """Build the :class:`OpenAIResponses` subclass used for Codex OAuth.
+
+    The Codex backend at ``/backend-api/codex/responses`` accepts the
+    Responses API shape with two notable deviations from public OpenAI:
+
+    1. The system prompt MUST arrive as the top-level ``instructions`` field
+       — the server rejects requests with ``400 "Instructions are required"``
+       when only a ``system``-role message is present in ``input``.
+       OpenCode handles this in ``session/llm/request.ts`` via
+       ``if (isOpenaiOauth) options.instructions = system.join("\\n")`` plus
+       a parallel filter that drops system messages from ``input``.
+
+    2. ``max_output_tokens`` is left unset (the Codex CLI doesn't cap
+       output; the server applies its own ceiling). That's already handled
+       at construction time by not populating the field.
+
+    The subclass is built lazily so importing :mod:`aru.providers` doesn't
+    pull in Agno's OpenAIResponses class unless we actually need it.
+    """
+    from agno.models.openai import OpenAIResponses
+
+    class CodexOpenAIResponses(OpenAIResponses):
+        """OpenAIResponses pre-shaped for the ChatGPT Codex backend."""
+
+        @staticmethod
+        def _extract_instructions(messages) -> str | None:
+            """Concatenate all system-role messages into a single string.
+
+            Returns ``None`` when there are no non-empty system messages —
+            callers should omit the ``instructions`` key in that case so
+            the server can default to its own (which it never does, but at
+            least the failure mode is clear).
+            """
+            parts: list[str] = []
+            for m in messages or []:
+                if getattr(m, "role", None) != "system":
+                    continue
+                # Message content can be a str or a list of content blocks.
+                content = getattr(m, "content", None)
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    text = "\n".join(
+                        (b.get("text") if isinstance(b, dict) else "") or ""
+                        for b in content
+                    )
+                else:
+                    text = ""
+                text = text.strip()
+                if text:
+                    parts.append(text)
+            return "\n\n".join(parts) if parts else None
+
+        def _format_messages(
+            self, messages, compress_tool_results: bool = False, tools=None
+        ):
+            # Codex's endpoint rejects system messages inside `input`. The
+            # system prompt is handled separately via get_request_params →
+            # instructions=…, so strip system-role messages here.
+            non_system = [
+                m for m in (messages or []) if getattr(m, "role", None) != "system"
+            ]
+            return super()._format_messages(non_system, compress_tool_results, tools)
+
+        def get_request_params(
+            self,
+            messages=None,
+            response_format=None,
+            tools=None,
+            tool_choice=None,
+        ):
+            params = super().get_request_params(
+                messages=messages,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            instructions = self._extract_instructions(messages)
+            if instructions:
+                params["instructions"] = instructions
+            return params
+
+    return CodexOpenAIResponses
+
+
+def _create_codex_responses_model(
+    *,
+    model_id: str,
+    max_tokens: int,
+    reasoning_params: dict[str, Any],
+    kwargs: dict[str, Any],
+):
+    """Build a Codex-shaped OpenAIResponses model for the ChatGPT backend.
+
+    Three customisations on top of the stock class:
+
+    * ``base_url`` points at ``https://chatgpt.com/backend-api/codex`` so the
+      SDK's ``/responses`` suffix lands on the Codex endpoint.
+    * ``api_key`` is the OAuth dummy — :class:`CodexAuth` strips it from the
+      outgoing request and writes a fresh ``Authorization: Bearer …`` header
+      after refreshing the access token when needed.
+    * ``http_client`` is an ``httpx.AsyncClient`` carrying the auth (Agno's
+      OpenAIResponses uses async by default; the sync helper falls back to
+      Agno's global client, which we extend through ``default_headers``).
+    * The model class is a tiny :class:`OpenAIResponses` subclass that lifts
+      system messages out of ``input`` and into the top-level
+      ``instructions`` field, which the Codex backend mandates.
+    """
+    import httpx
+    from aru.codex_oauth import CODEX_API_BASE, CodexAuth, OAUTH_DUMMY_KEY
+
+    # Codex tags requests with these. ``originator`` and ``User-Agent`` are
+    # static; ``Authorization`` / ``ChatGPT-Account-Id`` are dynamic and live
+    # in CodexAuth so token refresh updates them in lockstep.
+    try:
+        from aru import __version__ as _aru_version
+    except Exception:  # pragma: no cover
+        _aru_version = "0.0.0"
+    default_headers = {
+        "originator": "aru",
+        "User-Agent": f"aru/{_aru_version}",
+    }
+
+    auth = CodexAuth()
+    async_http_client = httpx.AsyncClient(
+        auth=auth,
+        timeout=httpx.Timeout(120.0, connect=10.0),
+    )
+
+    params: dict[str, Any] = {
+        "id": model_id,
+        "api_key": OAUTH_DUMMY_KEY,
+        "base_url": CODEX_API_BASE,
+        "default_headers": default_headers,
+        "http_client": async_http_client,
+        # Codex is stateless multi-turn: store=False instructs the server to
+        # skip persistence; Agno's OpenAIResponses then auto-adds
+        # ``reasoning.encrypted_content`` to ``include`` so the model can
+        # keep its chain-of-thought across turns. Mirrors OpenCode's
+        # ``provider/transform.ts`` (``store: false`` for any openai-shaped
+        # provider).
+        "store": False,
+    }
+    # max_output_tokens is the Responses API analogue of max_tokens. We don't
+    # set it for Codex models — the codex CLI runs them uncapped and the
+    # server applies its own ceiling, mirroring OpenCode's chat.params hook.
+    _ = max_tokens
+
+    # Carry over reasoning params (reasoning_effort etc.) the regular
+    # OpenAIResponses class understands. Effort comes in via reasoning_params
+    # as ``{"reasoning_effort": "..."}`` or ``{"extra_body": {...}}``.
+    for key, value in (reasoning_params or {}).items():
+        params[key] = value
+    params.update(kwargs)
+    CodexCls = _make_codex_responses_class()
+    return CodexCls(**params)
+
+
 def _create_provider_model(
     provider_type: str,
     provider: ProviderConfig,
@@ -754,6 +928,19 @@ def _create_provider_model(
         return Claude(**params)
 
     elif provider_type == "openai":
+        # Route ChatGPT (Codex) OAuth credentials through the Responses API
+        # against ``https://chatgpt.com/backend-api/codex``. The Chat
+        # Completions path doesn't reach that endpoint, so an OAuth-typed
+        # credential always picks the Responses class regardless of the
+        # caller's ``cache_system_prompt`` preference (caching is server-side
+        # on the Codex backend anyway).
+        if provider.codex_oauth:
+            return _create_codex_responses_model(
+                model_id=model_id,
+                max_tokens=max_tokens,
+                reasoning_params=r_params,
+                kwargs=kwargs,
+            )
         api_key = _resolve_api_key(provider)
         params = {"id": model_id, "max_tokens": max_tokens}
         if api_key:
@@ -901,6 +1088,22 @@ def apply_stored_credentials() -> None:
     for key, info in data.items():
         if not isinstance(info, dict):
             continue
+        cred_type = info.get("type", "api")
+
+        # ChatGPT (Codex) OAuth — flip the codex_oauth flag and pick a sane
+        # default model. The actual access token lives in auth.json; we only
+        # surface "we have a credential" to the registry here.
+        if cred_type == "oauth":
+            existing = _providers.get(key)
+            if existing is not None:
+                existing.codex_oauth = True
+                # Reset any stale api_key so the OAuth path always wins over
+                # a previously-typed manual key sitting in memory.
+                existing.api_key = None
+                if not existing.default_model or not existing.default_model.startswith("gpt-5"):
+                    existing.default_model = "gpt-5.4"
+            continue
+
         api_key = info.get("key")
         base_url = info.get("base_url")
         default_model = info.get("default_model") or None
@@ -917,6 +1120,9 @@ def apply_stored_credentials() -> None:
                 existing.base_url = base_url
             if default_model:
                 existing.default_model = default_model
+            # An ``api``-typed credential supersedes any prior oauth flag so
+            # the user can swap login modes via /connect without restarting.
+            existing.codex_oauth = False
         else:
             provider_type = info.get("provider_type", "openai")
             _providers[key] = ProviderConfig(
@@ -939,11 +1145,13 @@ def forget_credential(provider_key: str) -> None:
     """Clear an in-memory stored key so the provider falls back to its env var.
 
     Paired with ``auth.remove_credential`` on ``/connect logout`` — the file
-    write removes persistence, this drops the live override.
+    write removes persistence, this drops the live override (both the API
+    key path and the Codex OAuth path).
     """
     provider = _providers.get(provider_key)
     if provider is not None:
         provider.api_key = None
+        provider.codex_oauth = False
 
 
 # ---------------------------------------------------------------------------

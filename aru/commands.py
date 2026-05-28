@@ -222,6 +222,28 @@ def _connect_login(ui, preselect: str, session):
     provider = get_provider(provider_key)
     display_name = provider.name if provider else provider_key
     hint = _PROVIDER_KEY_HINTS.get(provider_key)
+
+    # OpenAI: offer ChatGPT Pro/Plus (OAuth) before falling through to the
+    # plain API-key path. Mirrors OpenCode's "auth login → ChatGPT Pro/Plus
+    # (browser)" option, which routes requests through the user's existing
+    # subscription instead of pay-as-you-go credits.
+    if provider_key == "openai":
+        idx = ui.ask_choice(
+            [
+                "ChatGPT Pro/Plus (browser sign-in)",
+                "API key",
+            ],
+            title="How do you want to connect to OpenAI?",
+            default=0,
+            cancel_value=None,
+        )
+        if idx is None:
+            ui.notify("Connect cancelled.", "warn")
+            return None
+        if idx == 0:
+            return _connect_openai_oauth(ui, session)
+        # else fall through to the API-key branch below
+
     if hint:
         ui.print(hint)
 
@@ -248,6 +270,69 @@ def _connect_login(ui, preselect: str, session):
         ui.print(f"Connected {display_name} — key stored in {auth.auth_path()}.")
 
     return _select_model(ui, provider_key, session)
+
+
+def _connect_openai_oauth(ui, session):
+    """Drive the Codex (ChatGPT Pro/Plus) OAuth flow and persist the tokens.
+
+    Bootstraps the local callback server on port 1455, opens the OpenAI
+    consent page in the user's default browser, blocks until they finish,
+    then writes ``{"type": "oauth", …}`` into ``~/.aru/auth.json`` and asks
+    the user to pick one of the GPT-5 models the Codex backend accepts. If
+    port 1455 is already in use (e.g. OpenCode is mid-login), reports a
+    friendly error and returns ``None`` instead of crashing.
+    """
+    import time
+    import webbrowser
+
+    from aru import auth
+    from aru.providers import apply_stored_credentials
+    from aru import codex_oauth
+
+    try:
+        flow = codex_oauth.start_codex_oauth_flow()
+    except OSError as exc:
+        ui.notify(
+            f"Couldn't start the OAuth callback server on port "
+            f"{codex_oauth.OAUTH_PORT}: {exc}. Close anything else listening "
+            "on that port and try again.",
+            "error",
+        )
+        return None
+
+    ui.print(
+        "Opening your browser to sign in to ChatGPT…\n"
+        "If it doesn't open automatically, visit this URL:\n"
+        f"  {flow.authorize_url}"
+    )
+    try:
+        webbrowser.open(flow.authorize_url, new=2)
+    except Exception:  # noqa: BLE001 — non-fatal; user can copy the URL
+        pass
+
+    try:
+        tokens = codex_oauth.await_codex_callback(flow)
+    except TimeoutError as exc:
+        ui.notify(str(exc), "warn")
+        return None
+    except Exception as exc:  # noqa: BLE001
+        ui.notify(f"OAuth failed: {exc}", "error")
+        return None
+
+    account_id = codex_oauth.extract_account_id(tokens)
+    info = {
+        "type": "oauth",
+        "refresh": tokens.get("refresh_token", ""),
+        "access": tokens.get("access_token", ""),
+        "expires": int(time.time() * 1000) + int(tokens.get("expires_in", 3600)) * 1000,
+    }
+    if account_id:
+        info["accountId"] = account_id
+    auth.set_credential("openai", info)
+    apply_stored_credentials()
+    ui.print("Connected ChatGPT — Codex OAuth token stored.")
+
+    return _select_model(ui, "openai", session)
 
 
 def _connect_custom(ui, session):
@@ -296,9 +381,15 @@ def _connect_custom(ui, session):
     # The custom setup already asked for a model id — honour it directly
     # instead of re-prompting. Otherwise offer the (free-text) selector.
     if default_model and session is not None:
-        session.model_ref = f"{pid}/{default_model}"
-        ui.print(f"Model set to {pid}/{default_model}.")
-        return f"{pid}/{default_model}"
+        ref = f"{pid}/{default_model}"
+        session.model_ref = ref
+        try:
+            from aru import state as _state
+            _state.record_model(ref)
+        except Exception:
+            pass
+        ui.print(f"Model set to {ref}.")
+        return ref
     return _select_model(ui, pid, session)
 
 
@@ -311,11 +402,19 @@ def _list_provider_models(provider) -> list[str]:
     The registry carries both clean aliases and dated ids that map to the
     same model (e.g. ``claude-sonnet-4-5`` and ``claude-sonnet-4-5-20250929``).
     Keep the first occurrence — the clean alias — so the picker stays tidy.
+
+    For an OpenAI provider connected via Codex OAuth, the list is restricted
+    to GPT-5 family models — the Codex backend rejects everything else, so
+    showing gpt-4o in the picker would only set the user up for a confusing
+    401 on the next turn.
     """
+    is_codex_oauth = getattr(provider, "codex_oauth", False)
     seen_ids: set[str] = set()
     out: list[str] = []
     for name, cfg in provider.models.items():
         mid = cfg.get("id", name) if isinstance(cfg, dict) else name
+        if is_codex_oauth and not mid.startswith("gpt-5"):
+            continue
         if mid in seen_ids:
             continue
         seen_ids.add(mid)
@@ -382,6 +481,12 @@ def _select_model(ui, provider_key: str, session):
         return None
     new_ref = f"{provider_key}/{chosen}"
     session.model_ref = new_ref
+    # Persist as the most-recent model so the next aru launch defaults to it.
+    try:
+        from aru import state as _state
+        _state.record_model(new_ref)
+    except Exception:  # pragma: no cover — never fail the connect flow over state
+        pass
     ui.print(f"Model set to {new_ref}.")
     return new_ref
 
@@ -403,6 +508,9 @@ def _connect_list(ui) -> None:
             itype = info.get("type", "api")
             if itype == "local":
                 detail = info.get("base_url", "")
+            elif itype == "oauth":
+                acct = info.get("accountId")
+                detail = f"ChatGPT account {acct}" if acct else "ChatGPT subscription"
             else:
                 detail = _mask_key(info.get("key", ""))
             lines.append(f"  • {name} ({key})  [{itype}]  {detail}")
@@ -455,6 +563,13 @@ def _connect_logout(ui, arg: str) -> None:
 
     auth.remove_credential(target)
     forget_credential(target)
+    # Also drop this provider from the recent-models MRU so the next launch
+    # doesn't pick up a model whose credentials we just removed.
+    try:
+        from aru import state as _state
+        _state.forget_provider(target)
+    except Exception:
+        pass
     provider = get_provider(target)
     name = provider.name if provider else target
     note = ""

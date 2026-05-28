@@ -125,7 +125,9 @@ def test_connect_model_menu_manual_entry(monkeypatch):
 
 
 def test_connect_empty_key_cancels(monkeypatch):
-    ui = StubUI(texts=[""])
+    # /connect openai now opens an OAuth-vs-key picker first (idx 1 == API
+    # key). Then the empty key string cancels the flow.
+    ui = StubUI(choices=[1], texts=[""])
     _use_ui(monkeypatch, ui)
 
     result = commands.handle_connect_command("openai", session=Session())

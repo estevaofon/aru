@@ -73,6 +73,8 @@ aru/
 ├── config.py           # Loads AGENTS.md, .agents/commands/, .agents/skills/
 ├── providers.py        # Multi-provider LLM abstraction (anthropic, openai, ollama, groq, etc.)
 ├── auth.py             # Credential store (~/.aru/auth.json, 0600) — backs the /connect command
+├── codex_oauth.py      # ChatGPT Pro/Plus PKCE OAuth flow + CodexAuth httpx adapter (Codex Responses endpoint)
+├── state.py            # MRU model list (~/.aru/state.json) — last /connect or /model becomes default on relaunch
 ├── permissions.py      # Granular permission system (allow/ask/deny per tool+pattern)
 ├── tool_policy.py      # Single tool-policy decision (plan mode + skill disallowed). Shared by wrapper and permissions.
 ├── plugin_cache.py     # Plugin install/cache/discovery system (/plugin command backend)
@@ -153,13 +155,14 @@ Granular per-tool rules with three outcomes: `allow`, `ask`, `deny`. Configured 
 `/connect` is the interactive way to wire up a provider (OpenCode `auth login`
 parity) so users don't hand-edit `aru.json` for an API key. `auth.py` is the
 pure storage layer: a flat `{ "<provider>": <info> }` map in `~/.aru/auth.json`
-written `0600`, with a `type` discriminator (`api` / `local`; OAuth reserved
-for later). `providers.apply_stored_credentials()` layers these onto the
-in-memory registry — setting `ProviderConfig.api_key` for built-ins (which
-`_resolve_api_key` prefers over `api_key_env`) and registering a fresh
-OpenAI-compatible provider for custom endpoints. It runs at TUI bootstrap
-(`run_tui`) and again right after `/connect` so a new key is live on the next
-turn without a restart.
+written `0600`, with a `type` discriminator (`api` / `local` / `oauth`).
+`providers.apply_stored_credentials()` layers these onto the in-memory
+registry — setting `ProviderConfig.api_key` for built-ins (which
+`_resolve_api_key` prefers over `api_key_env`), registering a fresh
+OpenAI-compatible provider for custom endpoints, or flipping
+`ProviderConfig.codex_oauth=True` for ChatGPT OAuth (see below). It runs at
+TUI bootstrap (`run_tui`) and again right after `/connect` so a new key is
+live on the next turn without a restart.
 
 The flow mirrors OpenCode: select a provider → paste the key → **select a
 model** (a menu of the provider's registry models with the default
@@ -174,6 +177,54 @@ TUI dispatches it from a worker thread (`app._slash_connect` →
 `asyncio.to_thread`) because `ctx.ui` modal prompts must not block the event
 loop. Subcommands: `/connect [provider]`, `/connect list`, `/connect logout`.
 **`/connect` is wired in the TUI only (one-shot mode does not process slash commands).**
+
+Whatever model the user picks after `/connect` (and after `/model`) is
+recorded by `aru.state` (`~/.aru/state.json`) as the head of a small MRU
+list. On the next launch — TUI or one-shot — `run_tui` / `run_oneshot`
+read that file before falling back to `config.default_model`, so users
+don't have to re-pick their model every session. `/connect logout` also
+prunes the disconnected provider from the MRU so we don't resurrect a
+broken credential on relaunch.
+
+### `codex_oauth.py` — ChatGPT Pro/Plus sign-in for OpenAI
+
+`/connect openai` now offers a two-way picker — *ChatGPT Pro/Plus (browser
+sign-in)* vs *API key* — mirroring OpenCode's `auth login → ChatGPT Pro/Plus
+(browser)`. The OAuth path lets users with an active ChatGPT subscription
+route requests through their plan instead of pay-as-you-go API credits.
+
+Implementation:
+
+* **PKCE flow** against `https://auth.openai.com` using the Codex CLI's
+  published `client_id` (stable). A local server on port 1455 receives
+  `/auth/callback?code=…&state=…`, validates the CSRF `state`, exchanges
+  the code at `/oauth/token`, and extracts the ChatGPT account id from the
+  JWT `id_token` claims (root → nested → `organizations[0].id`).
+* **Persistence**: `~/.aru/auth.json` carries
+  `{"type": "oauth", "refresh", "access", "expires", "accountId"}`.
+* **Provider wiring**: `apply_stored_credentials` flips
+  `ProviderConfig.codex_oauth=True` for the `openai` entry. In that mode,
+  `_create_provider_model` returns an Agno `OpenAIResponses` pointed at
+  `https://chatgpt.com/backend-api/codex` with `api_key=OAUTH_DUMMY_KEY` and
+  a custom `httpx.AsyncClient` whose `auth=CodexAuth()` strips the SDK's
+  default `Authorization` header and writes `Bearer <access>` +
+  `ChatGPT-Account-Id` + `originator: aru` per request.
+* **Transparent refresh**: `CodexAuth` (an `httpx.Auth` subclass) checks
+  `expires` on every request and calls `refresh_codex_tokens()` when within
+  a 60s margin of expiry. The refreshed tokens are re-written to
+  `auth.json` so future processes inherit the new state.
+* **Model filtering**: the post-connect picker (and any future picker on a
+  Codex-OAuth `openai` provider) only lists `gpt-5*` ids — the Codex
+  backend rejects anything else. Switching back to an API key
+  (`/connect openai → API key`) clears the flag and restores the full
+  model list.
+
+`codex_oauth.start_codex_oauth_flow()` / `await_codex_callback(flow)` are
+the only entry points the command handler talks to; the browser is opened
+via `webbrowser.open` and a `TimeoutError` after 5 minutes (or the user
+explicitly cancelling at the consent screen) returns without writing
+anything. Test coverage lives in `tests/test_codex_oauth.py` and
+`tests/test_connect_oauth.py`.
 
 ### `tool_policy.py` — Unified Tool-Policy Gate
 

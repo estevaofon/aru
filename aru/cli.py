@@ -179,8 +179,20 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
     from aru.tools.skill import _update_invoke_skill_docstring
     _update_invoke_skill_docstring(config.skills)
     session = Session()
+    # Same precedence as run_tui: aru.json default_model wins, otherwise
+    # fall back to the most-recent /connect or /model selection persisted
+    # in ~/.aru/state.json. Built-in default kicks in only when neither
+    # source provides a usable ref.
     if config.default_model:
         session.model_ref = config.default_model
+    else:
+        try:
+            from aru import state as _state
+            last = _state.get_last_model()
+        except Exception:
+            last = None
+        if last:
+            session.model_ref = last
 
     ctx.session = session
     ctx.model_id = session.model_id
