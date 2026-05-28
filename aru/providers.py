@@ -465,6 +465,22 @@ def resolve_model_ref(model_ref: str) -> tuple[str, str]:
     return provider_key, model_name
 
 
+def default_small_model_ref(session_model_ref: str) -> str:
+    """Default model ref for sub-agents when no ``small`` alias is set.
+
+    Mirrors Codex's ``build_agent_shared_config`` (multi_agents_common.rs):
+    the spawned agent inherits the parent's effective model. Keeps the
+    sub-agent on the same provider (preserves credentials + cache lineage)
+    and avoids the cross-provider failure mode where a hard-coded "small
+    model" is rejected by the parent's backend — e.g. ``gpt-4o-mini`` on
+    a ChatGPT Plus/Pro OAuth credential whose Codex endpoint only accepts
+    ``gpt-5*`` ids. Users who want a cheaper sub-agent model can still set
+    ``model_aliases.small`` in aru.json; that override wins at every call
+    site before this helper runs.
+    """
+    return session_model_ref
+
+
 def _get_actual_model_id(provider: ProviderConfig, model_name: str) -> str:
     """Get the actual model ID to send to the API.
 

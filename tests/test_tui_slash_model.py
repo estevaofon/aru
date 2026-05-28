@@ -55,9 +55,9 @@ async def test_slash_model_resolves_user_alias_to_full_ref():
     assert "anthropic" not in session.model_display.lower()
     # Runtime context must follow the session.
     assert ctx.model_id == session.model_id
-    # Small model should default to the same provider family (OpenRouter
-    # is not in _small_defaults so it falls back to the session ref).
-    assert ctx.small_model_ref
+    # Sub-agent inherits the session's model (mirrors Codex's
+    # build_agent_shared_config — child = parent unless overridden).
+    assert ctx.small_model_ref == session.model_ref
 
 
 @pytest.mark.asyncio

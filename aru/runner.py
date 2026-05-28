@@ -185,6 +185,108 @@ def _build_plan_reminder(session) -> str | None:
     return "\n".join(lines)
 
 
+def _build_permission_mode_reminder() -> str | None:
+    """Surface the active permission mode to the model when it's non-default.
+
+    GPT-5 / Codex-trained models default to asking "should I commit?",
+    "want me to run X?" before mutating actions — that posture matches the
+    Codex CLI's default-approval gate, but it's the wrong posture inside
+    Aru's YOLO mode where every gate is already pre-approved. The harness
+    *can* see ``ctx.permission_mode``; the model can't unless we tell it.
+    Without this nudge the user has to re-type "go" / "do it" after every
+    proposal, which is exactly what YOLO is supposed to skip. Same shape
+    as ``_build_plan_reminder`` so the model treats it as authoritative.
+
+    Returns ``None`` for ``default`` mode — the model's built-in caution
+    is correct there and an extra reminder would just consume cache space
+    on every turn for no behavioural change.
+    """
+    try:
+        from aru.runtime import get_ctx
+        mode = get_ctx().permission_mode
+    except LookupError:
+        return None
+    if mode == "yolo":
+        # Wording mirrors Codex's gpt_5_2_prompt.md sections "Autonomy and
+        # Persistence" and "Task execution" verbatim where possible. Those
+        # phrases ("persist until… end-to-end within the current turn",
+        # "keep going until… completely resolved", "persevere even when
+        # function calls fail", "only terminate your turn when you are
+        # sure") are training-time triggers for GPT-5 — the model was
+        # tuned to switch into autonomous-resolution mode when it sees
+        # them. Our previous wording was generic and didn't activate that
+        # posture, which is why the model kept doing report-and-pause.
+        return (
+            "<system-reminder>\n"
+            "YOLO MODE ACTIVE — equivalent to Codex `approval-policy: "
+            "never`. Every tool call is pre-approved.\n"
+            "\n"
+            "## Autonomy and Persistence\n"
+            "\n"
+            "Persist until the task is fully handled end-to-end within "
+            "the current turn whenever feasible: do not stop at analysis "
+            "or partial fixes; carry changes through implementation, "
+            "verification, and a clear explanation of outcomes unless the "
+            "user explicitly pauses or redirects you. Assume the user "
+            "wants you to make code changes or run tools to solve the "
+            "problem — it is bad to output your proposed solution in a "
+            "message and stop; go ahead and actually implement the "
+            "change. If you encounter challenges or blockers, you should "
+            "attempt to resolve them yourself.\n"
+            "\n"
+            "## Task execution\n"
+            "\n"
+            "You must keep going until the query or task is completely "
+            "resolved before ending your turn and yielding back to the "
+            "user. Persevere even when function calls fail. Only "
+            "terminate your turn when you are sure that the problem is "
+            "solved. Autonomously resolve the query to the best of your "
+            "ability, using the tools available to you, before coming "
+            "back to the user.\n"
+            "\n"
+            "If a review, test run, plan step, or check surfaces concrete "
+            "follow-up work that is clearly in scope, resolve it in the "
+            "same turn. \"More work I identified\" is NOT a blocker — it "
+            "is the next thing to do.\n"
+            "\n"
+            "## What never to do in this mode\n"
+            "\n"
+            "- NEVER ask permission. No \"posso fazer o commit?\", \"want "
+            "me to run the tests?\", \"shall I edit X?\", \"Se quiser, "
+            "faço…\".\n"
+            "- NEVER report-and-pause. Phrases like \"Próximo passo "
+            "objetivo é…\", \"Next step is…\", \"I will now…\" are "
+            "forbidden as turn-end content. If you write them you must "
+            "execute them in the same turn.\n"
+            "- NEVER propose options and wait. Pick the most reasonable "
+            "one and do it.\n"
+            "\n"
+            "## When the turn legitimately ends\n"
+            "\n"
+            "(a) The task is completely resolved and verified.\n"
+            "(b) You hit a real blocker — information only the user has, "
+            "an ambiguity that flips the entire approach, or an external "
+            "system you cannot reach.\n"
+            "(c) The plan / task list is exhausted with every item "
+            "terminal (completed / skipped / failed).\n"
+            "\n"
+            "End your turn by reporting what you DID, not by previewing "
+            "what should happen next.\n"
+            "</system-reminder>"
+        )
+    if mode == "acceptEdits":
+        return (
+            "<system-reminder>\n"
+            "AUTO-ACCEPT EDITS ACTIVE — file edits are pre-approved. Do NOT "
+            "ask before writing/editing files. Bash and other non-edit "
+            "actions still gate normally; for those you may pause if the "
+            "command is destructive or ambiguous. For routine edits, "
+            "execute without confirmation.\n"
+            "</system-reminder>"
+        )
+    return None
+
+
 def _consume_plan_rejection_feedback(session) -> str | None:
     """Read-and-clear plan rejection feedback stored on the session.
 
@@ -404,6 +506,10 @@ async def run_agent_capture(agent, message: str, session=None, lightweight: bool
             reminder = _build_plan_reminder(session)
             if reminder:
                 msg_parts.append(reminder)
+
+            mode_reminder = _build_permission_mode_reminder()
+            if mode_reminder:
+                msg_parts.append(mode_reminder)
 
             warning = session.check_budget_warning()
             if warning:

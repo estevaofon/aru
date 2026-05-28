@@ -277,21 +277,14 @@ Qualquer API compatível com OpenAI funciona via `"type": "openai"`:
 
 ## Sub-agents
 
-Quando o aru usa `delegate_task` para criar sub-agents, ele automaticamente escolhe um model menor/mais rápido do mesmo provider:
+Por padrão o sub-agent criado via `delegate_task` (e o explorer) herda o **mesmo model do main agent** — mesmo design do Codex (`build_agent_shared_config` em `multi_agents_common.rs`). Mantém o sub-agent no mesmo provider/credencial, preserva o cache lineage e evita falhas tipo "modelo X não suportado" quando o backend do main agent (ex.: ChatGPT Plus OAuth, que só aceita `gpt-5*`) rejeita um small model hard-coded.
 
-| Provider do main agent | Sub-agent model |
-|---|---|
-| `anthropic/*` | `anthropic/claude-haiku-4-5` |
-| `openai/*` | `openai/gpt-4o-mini` |
-| `groq/*` | `groq/llama-3.1-8b-instant` |
-| Outros | Mesmo model do main agent |
-
-Para override, use a key `"small"` em `models`:
+Para usar um model menor/mais barato nos sub-agents, defina a alias `"small"` em `model_aliases`:
 
 ```json
 {
-  "models": {
-    "small": "ollama/phi3"
+  "model_aliases": {
+    "small": "anthropic/claude-haiku-4-5"
   }
 }
 ```

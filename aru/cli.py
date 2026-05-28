@@ -198,16 +198,8 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
     ctx.model_id = session.model_id
     small_ref = config.model_aliases.get("small") if config else None
     if not small_ref:
-        from aru.providers import resolve_model_ref
-        provider_key, _ = resolve_model_ref(session.model_ref)
-        _small_defaults = {
-            "anthropic": "anthropic/claude-haiku-4-5",
-            "openai": "openai/gpt-4o-mini",
-            "groq": "groq/llama-3.1-8b-instant",
-            "deepseek": "deepseek/deepseek-chat",
-            "ollama": "ollama/llama3.1",
-        }
-        small_ref = _small_defaults.get(provider_key, session.model_ref)
+        from aru.providers import default_small_model_ref
+        small_ref = default_small_model_ref(session.model_ref)
     ctx.small_model_ref = small_ref
 
     extra_instructions = config.get_extra_instructions()

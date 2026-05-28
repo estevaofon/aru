@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
-from aru.providers import MODEL_ALIASES, get_model_display, resolve_model_ref
+from aru.providers import MODEL_ALIASES, get_model_display, get_provider, resolve_model_ref
 
 # Default model reference (provider/model format)
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-5"
@@ -577,11 +577,25 @@ class Session:
         suffix convention plus any future provider that adopts the same
         naming. None of the major paid models contain "free" in their id,
         so false positives are negligible.
+
+        ChatGPT Plus/Pro via Codex OAuth is a flat-rate subscription — usage
+        is bounded by the plan's session quotas, not per-token charges — so
+        all four prices are zero whenever the active openai credential is an
+        OAuth token (``provider.codex_oauth``). The user disconnecting via
+        ``/connect logout`` clears the flag and the regular gpt-5 pricing
+        kicks back in for any subsequent turns.
         """
         ref = (self.model_ref or "").lower()
         mid = (self.model_id or "").lower()
         if "free" in ref or "free" in mid:
             return (0.0, 0.0, 0.0, 0.0)
+        try:
+            provider_key, _ = resolve_model_ref(self.model_ref or "")
+            provider = get_provider(provider_key)
+            if provider is not None and getattr(provider, "codex_oauth", False):
+                return (0.0, 0.0, 0.0, 0.0)
+        except Exception:
+            pass
         model_id = self.model_id
         # Try exact match, then prefix match, then fallback
         for prefix, pricing in MODEL_PRICING.items():

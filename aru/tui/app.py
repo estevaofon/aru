@@ -212,7 +212,14 @@ class AruApp(App):
         # path doesn't propagate.
         Binding("ctrl+c", "ctrl_c", "Copy/Interrupt", show=True, priority=True),
         Binding("ctrl+l", "clear_chat", "Clear chat", show=True),
-        Binding("ctrl+a", "cycle_mode", "Mode", show=True),
+        # ``priority=True`` so the cycle fires from the default focused
+        # widget (``PromptArea`` → ``TextArea``), which binds ``ctrl+a``
+        # to its own select-all action. Without priority the TextArea
+        # consumed the key and the only way to reach yolo was to first
+        # press shift+tab to focus-cycle off the prompt. Mode-cycling is
+        # the higher-value mapping; select-all on a short prompt buffer
+        # is rarely needed (triple-click still works in any terminal).
+        Binding("ctrl+a", "cycle_mode", "Mode", show=True, priority=True),
         Binding("ctrl+p", "toggle_plan", "Plan mode", show=True),
         Binding("ctrl+f", "search_chat", "Search", show=True),
         Binding("ctrl+t", "toggle_tasklist", "Tasklist", show=True),
@@ -1056,15 +1063,8 @@ class AruApp(App):
                 self.ctx.model_id = session.model_id
                 small_ref = config_aliases.get("small")
                 if not small_ref:
-                    sp_key, _ = resolve_model_ref(session.model_ref)
-                    _small_defaults = {
-                        "anthropic": "anthropic/claude-haiku-4-5",
-                        "openai": "openai/gpt-4o-mini",
-                        "groq": "groq/llama-3.1-8b-instant",
-                        "deepseek": "deepseek/deepseek-chat",
-                        "ollama": "ollama/llama3.1",
-                    }
-                    small_ref = _small_defaults.get(sp_key, session.model_ref)
+                    from aru.providers import default_small_model_ref
+                    small_ref = default_small_model_ref(session.model_ref)
                 self.ctx.small_model_ref = small_ref
             status = self.query_one(StatusPane)
             status._refresh_from_session()
@@ -1122,8 +1122,6 @@ class AruApp(App):
         # the RuntimeContext + status bar so the next turn uses it.
         if new_ref and self.session is not None:
             try:
-                from aru.providers import resolve_model_ref
-
                 config_aliases = (
                     getattr(self.config, "model_aliases", None) or {}
                 ) if self.config else {}
@@ -1131,15 +1129,8 @@ class AruApp(App):
                     self.ctx.model_id = self.session.model_id
                     small_ref = config_aliases.get("small")
                     if not small_ref:
-                        sp_key, _ = resolve_model_ref(self.session.model_ref)
-                        _small_defaults = {
-                            "anthropic": "anthropic/claude-haiku-4-5",
-                            "openai": "openai/gpt-4o-mini",
-                            "groq": "groq/llama-3.1-8b-instant",
-                            "deepseek": "deepseek/deepseek-chat",
-                            "ollama": "ollama/llama3.1",
-                        }
-                        small_ref = _small_defaults.get(sp_key, self.session.model_ref)
+                        from aru.providers import default_small_model_ref
+                        small_ref = default_small_model_ref(self.session.model_ref)
                     self.ctx.small_model_ref = small_ref
                 self.query_one(StatusPane)._refresh_from_session()
             except Exception:
@@ -2399,24 +2390,14 @@ class AruApp(App):
                 self.ctx.session = new_session
                 # Mirror /model logic so the model + small_model_ref
                 # come from the resumed session, not the previous one.
-                from aru.providers import resolve_model_ref
                 self.ctx.model_id = new_session.model_id
                 config_aliases = (
                     getattr(self.config, "model_aliases", None) or {}
                 ) if self.config else {}
                 small_ref = config_aliases.get("small")
                 if not small_ref:
-                    provider_key, _ = resolve_model_ref(new_session.model_ref)
-                    _small_defaults = {
-                        "anthropic": "anthropic/claude-haiku-4-5",
-                        "openai": "openai/gpt-4o-mini",
-                        "groq": "groq/llama-3.1-8b-instant",
-                        "deepseek": "deepseek/deepseek-chat",
-                        "ollama": "ollama/llama3.1",
-                    }
-                    small_ref = _small_defaults.get(
-                        provider_key, new_session.model_ref
-                    )
+                    from aru.providers import default_small_model_ref
+                    small_ref = default_small_model_ref(new_session.model_ref)
                 self.ctx.small_model_ref = small_ref
         except Exception:
             pass
@@ -2665,19 +2646,11 @@ async def run_tui(
     # Update RuntimeContext with the session's model and resolve the
     # small-model reference.
     try:
-        from aru.providers import resolve_model_ref
         ctx.model_id = session.model_id
         small_ref = (config.model_aliases or {}).get("small") if config else None
         if not small_ref:
-            provider_key, _ = resolve_model_ref(session.model_ref)
-            _small_defaults = {
-                "anthropic": "anthropic/claude-haiku-4-5",
-                "openai": "openai/gpt-4o-mini",
-                "groq": "groq/llama-3.1-8b-instant",
-                "deepseek": "deepseek/deepseek-chat",
-                "ollama": "ollama/llama3.1",
-            }
-            small_ref = _small_defaults.get(provider_key, session.model_ref)
+            from aru.providers import default_small_model_ref
+            small_ref = default_small_model_ref(session.model_ref)
         ctx.small_model_ref = small_ref
     except Exception:
         pass
