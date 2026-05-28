@@ -217,10 +217,11 @@ async def run_oneshot(prompt: str, print_only: bool = False, skip_permissions: b
             instructions=build_instructions("general", extra_instructions),
             markdown=True,
         )
-        response = await agent.arun(prompt)
-        if response and response.content:
+        from aru.runner import arun_text_only
+        content = await arun_text_only(agent, prompt)
+        if content:
             # Print raw text to stdout for piping
-            print(response.content)
+            print(content)
     else:
         # Full mode with tools
         from aru.runner import build_env_context

@@ -135,8 +135,8 @@ async def _run_extractor_agent(prompt: str, model_ref: str) -> str:
         instructions="You curate durable memories. Output only the requested JSON.",
         markdown=False,
     )
-    result = await agent.arun(prompt, stream=False)
-    return (result.content or "") if result else ""
+    from aru.runner import arun_text_only
+    return await arun_text_only(agent, prompt)
 
 
 def _parse_json_array(content: str) -> list[dict]:

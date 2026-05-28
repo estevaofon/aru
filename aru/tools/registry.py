@@ -18,7 +18,6 @@ from aru.tools.file_ops import (
     _list_directory_tool,
     _read_file_tool,
     _write_file_tool,
-    _write_files_tool,
     read_files,
 )
 from aru.tools.plan_mode import enter_plan_mode, exit_plan_mode
@@ -69,7 +68,18 @@ _READ_ONLY_TOOLS = [
 
 _WRITE_TOOLS = [
     _write_file_tool,
-    _write_files_tool,
+    # ``_write_files_tool`` (batch write) intentionally NOT exposed: the
+    # nested ``[{"path", "content"}]`` schema is consistently mis-called by
+    # every model family we tested (GPT-5 included) — it passes a plain dict,
+    # a list of strings, or forgets one of the required keys. The wrapper
+    # used to raise on the malformed input, which left the assistant message
+    # with an unanswered tool_call and broke the next turn on the Codex
+    # backend (``400 No tool output found for function call``). Adding
+    # schema-validation didn't fix the underlying ergonomics — models still
+    # waste calls fighting the schema. Single ``write_file`` works
+    # reliably; batches can be expressed as N sequential calls. The
+    # function and its async wrapper are kept in ``file_ops.py`` for any
+    # custom tool or plugin that imports them directly.
     _edit_file_tool,
     _edit_files_tool,
     _apply_patch_tool,

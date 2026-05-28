@@ -42,9 +42,10 @@ async def review_plan(request: str, plan: str) -> str:
     )
     prompt = f"## User Request\n{request}\n\n## Generated Plan\n{plan}"
     try:
-        response = await reviewer.arun(prompt)
-        if response and response.content and response.content.strip():
-            return response.content.strip()
+        from aru.runner import arun_text_only
+        content = await arun_text_only(reviewer, prompt)
+        if content and content.strip():
+            return content.strip()
     except Exception:
         pass
     return plan

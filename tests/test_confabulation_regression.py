@@ -343,7 +343,12 @@ class TestAgnoMessageTranslation:
         assert "hi" in str(msgs[0].content)
 
     def test_assistant_with_tool_use_populates_tool_calls_attr(self):
-        """Agno's Claude adapter reads tool_calls (not content) for tool_uses."""
+        """Agno's Claude adapter reads tool_calls (not content) for tool_uses.
+
+        Note: ``to_agno_messages`` drops orphan tool_uses (no matching
+        tool_result) defensively, so the history below must include the
+        matching tool_result for the tool_use to survive translation.
+        """
         history = [
             {
                 "role": "assistant",
@@ -351,10 +356,14 @@ class TestAgnoMessageTranslation:
                     text_block("calling tool"),
                     tool_use_block("tu_x", "bash", {"cmd": "ls"}),
                 ],
-            }
+            },
+            {
+                "role": "tool",
+                "content": [tool_result_block("tu_x", "ls output")],
+            },
         ]
         msgs = to_agno_messages(history)
-        assert len(msgs) == 1
+        assert len(msgs) == 2
         msg = msgs[0]
         assert msg.role == "assistant"
         assert msg.tool_calls is not None
@@ -363,29 +372,81 @@ class TestAgnoMessageTranslation:
         assert msg.tool_calls[0]["function"]["name"] == "bash"
 
     def test_tool_role_produces_tool_message_with_tool_call_id(self):
-        """Tool role items become Agno tool messages with tool_call_id set."""
+        """Tool role items become Agno tool messages with tool_call_id set.
+
+        The matching tool_use must exist — orphan tool_results are dropped
+        (both Anthropic and Codex backends reject them).
+        """
         history = [
+            {
+                "role": "assistant",
+                "content": [tool_use_block("tu_y", "read_file", {"path": "x"})],
+            },
             {
                 "role": "tool",
                 "content": [tool_result_block("tu_y", "result text")],
-            }
+            },
         ]
         msgs = to_agno_messages(history)
-        assert len(msgs) == 1
-        assert msgs[0].role == "tool"
-        assert msgs[0].tool_call_id == "tu_y"
-        assert msgs[0].content == "result text"
+        assert len(msgs) == 2
+        tool_msg = next(m for m in msgs if m.role == "tool")
+        assert tool_msg.tool_call_id == "tu_y"
+        assert tool_msg.content == "result text"
 
     def test_user_role_with_tool_result_blocks_emits_tool_messages(self):
-        """Legacy: user msgs carrying tool_results become separate tool messages."""
+        """Legacy: user msgs carrying tool_results become separate tool messages.
+
+        Matching tool_use required so the orphan filter keeps the tool_result.
+        """
         history = [
+            {
+                "role": "assistant",
+                "content": [tool_use_block("tu_z", "read_file", {"path": "x"})],
+            },
             {
                 "role": "user",
                 "content": [tool_result_block("tu_z", "legacy result")],
+            },
+        ]
+        msgs = to_agno_messages(history)
+        tool_msg = next(m for m in msgs if m.role == "tool")
+        assert tool_msg.tool_call_id == "tu_z"
+
+    def test_orphan_tool_use_is_dropped(self):
+        """Assistant tool_use without matching tool_result is filtered out.
+
+        Mirrors a corrupted history (e.g. tool wrapper crashed before
+        producing output). Without this filter the next API call errors
+        with ``No tool output found for function call <id>``.
+        """
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    text_block("calling tool"),
+                    tool_use_block("orphan-1", "bash", {"cmd": "ls"}),
+                ],
             }
         ]
         msgs = to_agno_messages(history)
-        # Expect a single tool-role message (no user text to emit)
         assert len(msgs) == 1
-        assert msgs[0].role == "tool"
-        assert msgs[0].tool_call_id == "tu_z"
+        assert msgs[0].role == "assistant"
+        # tool_calls is None because the only one was orphan.
+        assert msgs[0].tool_calls is None
+
+    def test_orphan_tool_result_is_dropped(self):
+        """tool_result without matching tool_use is filtered out.
+
+        Mirrors a corrupted history (e.g. compaction summarised the
+        assistant turn away). Without this the next API call errors with
+        ``404 tool_use_id not found`` (Anthropic) or ``400 No tool call
+        found for function call output`` (Codex).
+        """
+        history = [
+            {
+                "role": "tool",
+                "content": [tool_result_block("orphan-2", "stale result")],
+            }
+        ]
+        msgs = to_agno_messages(history)
+        assert msgs == []

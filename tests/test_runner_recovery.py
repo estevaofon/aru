@@ -96,11 +96,21 @@ class TestPrepareRecoveryInput:
             "_open": True,
         }
 
+        # The assistant blocks must declare the matching tool_use for ``t1`` —
+        # ``to_agno_messages`` drops orphans (tool_results whose tool_use is
+        # missing) as a safety net against unbalanced history surviving a
+        # botched compaction. In production the streaming loop accumulates the
+        # tool_use into ``assistant_blocks`` before the tool_result lands, so
+        # mirroring that here keeps the test exercising both the recovery-
+        # filter contract and the orphan-filter contract together.
         messages = _prepare_recovery_input(
             agent=None,
             prior_history=[Message(role="user", content="hi")],
             user_message="hi",
-            assistant_blocks=[{"type": "text", "text": "before"}],
+            assistant_blocks=[
+                {"type": "text", "text": "before"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+            ],
             tool_result_msgs=[closed, open_round],
             pending_tool_uses={},
             accumulated_text="before",

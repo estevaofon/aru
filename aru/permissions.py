@@ -444,16 +444,24 @@ def set_permission_mode(mode: str) -> str:
 
 
 def cycle_permission_mode() -> str:
-    """Advance to the next mode and return it."""
+    """Advance to the next mode and return it.
+
+    Delegates the actual mutation to ``set_permission_mode`` so the Ctrl+A
+    path (this function) and the ``/yolo`` slash command path (which calls
+    ``set_permission_mode`` directly) follow the exact same code path —
+    same mutation, same ``permission.mode.changed`` publish, same UI
+    refresh trigger. Historically these two were near-duplicate and the
+    Ctrl+A version skipped the bus publish; this caused subtle drift
+    where the StatusPane visually advanced but downstream subscribers
+    saw stale state.
+    """
     ctx = get_ctx()
     try:
         idx = _MODE_CYCLE.index(ctx.permission_mode)
     except ValueError:
         idx = 0
     next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
-    ctx.permission_mode = next_mode
-    ctx.skip_permissions = (next_mode == "yolo")
-    return next_mode
+    return set_permission_mode(next_mode)
 
 
 def consume_rejection_feedback() -> str:

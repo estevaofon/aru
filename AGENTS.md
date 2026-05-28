@@ -1,6 +1,6 @@
 # Aru — AI Coding Assistant
 
-Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI for interactive use, plus a non-interactive one-shot mode (`aru "prompt"`), where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (19 tools in the full set: 13 core + 5 task-management + 1 skill invocation).
+Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI for interactive use, plus a non-interactive one-shot mode (`aru "prompt"`), where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (18 tools in the full set: 12 core + 5 task-management + 1 skill invocation).
 
 ## Architecture
 
@@ -260,19 +260,19 @@ Composed tool sets (single source of truth — see `CORE_TOOLS`, `_READ_ONLY_TOO
 
 | Set | Size | Contents |
 |-----|------|----------|
-| `CORE_TOOLS` | 13 | read/write/edit × file variants, glob/grep/list, bash, web_search/fetch, delegate_task |
-| `ALL_TOOLS` | 19 | `CORE_TOOLS` + `create_task_list`, `update_task`, `update_plan_step`, `enter_plan_mode`, `exit_plan_mode`, `invoke_skill` |
-| `GENERAL_TOOLS` | 19 | alias for `ALL_TOOLS` (build agent) |
-| `EXECUTOR_TOOLS` | 19 | alias for `ALL_TOOLS` (executor agent) |
+| `CORE_TOOLS` | 12 | read/write/edit × file variants (write_file singular only), glob/grep/list, bash, web_search/fetch, delegate_task |
+| `ALL_TOOLS` | 18 | `CORE_TOOLS` + `create_task_list`, `update_task`, `update_plan_step`, `enter_plan_mode`, `exit_plan_mode`, `invoke_skill` |
+| `GENERAL_TOOLS` | 18 | alias for `ALL_TOOLS` (build agent) |
+| `EXECUTOR_TOOLS` | 18 | alias for `ALL_TOOLS` (executor agent) |
 | `PLANNER_TOOLS` | 5 | read-only subset: `read_file`, `read_files`, `glob_search`, `grep_search`, `list_directory` |
 | `EXPLORER_TOOLS` | 7 | `PLANNER_TOOLS` + `bash` + `rank_files` |
-| `_DEFAULT_SUBAGENT_TOOLS` | 13 | tools passed to delegated sub-agents; excludes `delegate_task` and `invoke_skill` (controller pre-bakes skill content into subagent context) |
+| `_DEFAULT_SUBAGENT_TOOLS` | 12 | tools passed to delegated sub-agents; excludes `delegate_task` and `invoke_skill` (controller pre-bakes skill content into subagent context) |
 
 Tool categories in the file:
 
 | Category | Tools |
 |----------|-------|
-| File I/O | `read_file`, `read_files`, `write_file`, `write_files`, `edit_file`, `edit_files` |
+| File I/O | `read_file`, `read_files`, `write_file`, `edit_file`, `edit_files` |
 | Search | `glob_search`, `grep_search`, `list_directory`, `rank_files` |
 | Shell | `bash` |
 | Web | `web_search`, `web_fetch` |

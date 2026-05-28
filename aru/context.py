@@ -974,8 +974,8 @@ async def compact_conversation(
             markdown=True,
         )
 
-        result = await compactor.arun(prompt, stream=False)
-        summary = result.content if result and result.content else ""
+        from aru.runner import arun_text_only
+        summary = await arun_text_only(compactor, prompt)
 
         if not summary:
             # Fallback: simple mechanical summary

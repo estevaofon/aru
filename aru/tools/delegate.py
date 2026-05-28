@@ -425,10 +425,9 @@ Do not create documentation files unless explicitly asked.
             # Prepend the permission-mode reminder to the subagent's prompt so
             # YOLO mode reaches the spawned agent too — delegate runs through
             # ``agent_instance.arun`` directly, bypassing run_agent_capture's
-            # reminder injection. Without this, the parent skips confirmations
-            # in YOLO mode but the subagent (often the one doing the actual
-            # edits) keeps asking "want me to commit?" because it never saw
-            # the mode signal.
+            # reminder injection. The persistence / task-execution posture
+            # is in BASE_INSTRUCTIONS (subagent's system prompt) so it
+            # propagates without needing a per-spawn reminder.
             from aru.runner import _build_permission_mode_reminder
             _mode_reminder = _build_permission_mode_reminder()
             sub_task = f"{_mode_reminder}\n\n{task}" if _mode_reminder else task

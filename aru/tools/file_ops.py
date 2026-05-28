@@ -199,6 +199,39 @@ def write_files(file_list: list[dict]) -> str:
                    Example: [{"path": "src/main.py", "content": "print('hello')"}, {"path": "src/utils.py", "content": "..."}]
     """
     from aru.runtime import resolve_path as _resolve_path
+    # Defensive schema validation — return a string error instead of raising.
+    # An uncaught TypeError / AttributeError here would propagate through the
+    # async tool wrapper without producing a tool_result, leaving the next
+    # turn with a function_call lacking its function_call_output (Codex
+    # rejects with ``400 No tool output found for function call``).
+    if not isinstance(file_list, list):
+        return (
+            "Error: write_files expects ``file_list`` to be a JSON array of "
+            "objects with 'path' and 'content' keys. Got "
+            f"{type(file_list).__name__!r}."
+        )
+    cleaned: list[dict] = []
+    schema_errors: list[str] = []
+    for i, e in enumerate(file_list):
+        if not isinstance(e, dict):
+            schema_errors.append(
+                f"entry {i}: expected object with 'path' and 'content', got {type(e).__name__}"
+            )
+            continue
+        if "path" not in e or "content" not in e:
+            schema_errors.append(
+                f"entry {i}: missing required key(s) — needs both 'path' and 'content'"
+            )
+            continue
+        cleaned.append(e)
+    if not cleaned:
+        return (
+            "Error: write_files received no valid entries. "
+            + "; ".join(schema_errors)
+            if schema_errors
+            else "Error: write_files received an empty list."
+        )
+    file_list = cleaned
     parts = [Text(f"Write {len(file_list)} files:", style="bold"), Text()]
     for e in file_list:
         p = _resolve_path(e.get("path", "<missing>"))
@@ -311,6 +344,19 @@ def edit_files(edits: list[dict]) -> str:
                Example: [{"path": "src/main.py", "old_string": "foo", "new_string": "bar"}]
     """
     from aru.runtime import resolve_path as _resolve_path
+    # Defensive schema validation — same rationale as write_files: a TypeError
+    # raised here would propagate through the async wrapper without producing
+    # a tool_result, leaving the assistant message with an unanswered tool_use
+    # that the Responses backend rejects on the next turn.
+    if not isinstance(edits, list):
+        return (
+            "Error: edit_files expects ``edits`` to be a JSON array of "
+            "objects with 'path', 'old_string', 'new_string'. Got "
+            f"{type(edits).__name__!r}."
+        )
+    edits = [e for e in edits if isinstance(e, dict)]
+    if not edits:
+        return "Error: edit_files received no valid edit entries."
     original: dict[str, str] = {}
     preview: dict[str, str] = {}
     preview_errors: list[str] = []

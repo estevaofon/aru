@@ -237,10 +237,25 @@ def update_task(index: int, status: str) -> str:
     failed_count = sum(1 for t in all_tasks if t["status"] == "failed")
     total = len(all_tasks)
 
+    # Tool result kept minimal — Codex's update_plan returns the constant
+    # ``"Plan updated"`` (plan.rs:22) and relies on the base-instructions
+    # "Task execution" section (always in the system prompt) to keep GPT-5
+    # going across subtasks. We follow the same shape so the persistence
+    # signal lives in one place (BASE_INSTRUCTIONS) instead of being
+    # duplicated in every tool result. The "all finished" branch is
+    # deliberately worded as "this subtask list is done" (not "the work is
+    # done") so the model doesn't read it as a turn-end signal when there
+    # are still pending plan steps or skill-driven macro Tasks.
     if completed_count + failed_count == total:
-        return f"All subtasks finished ({completed_count} completed, {failed_count} failed). Step done. Output a brief summary of what was created/changed."
+        return (
+            f"This subtask list is done ({completed_count} completed, "
+            f"{failed_count} failed). If more plan steps or skill-driven "
+            "Tasks remain in your request, continue with the next one in "
+            "the same turn (call create_task_list again, dispatch the next "
+            "subagent, or call update_plan_step). Only yield to the user "
+            "when the full request is exhausted."
+        )
 
-    # Find next pending subtask
     next_task = next((t for t in all_tasks if t["status"] == "pending"), None)
     if next_task:
         return f"Subtask {index} → {status}. Next: subtask {next_task['index']} — {next_task['description']}"

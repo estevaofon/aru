@@ -27,6 +27,33 @@ _MAX_TOKENS_RECOVERY_PROMPT = (
 )
 
 
+async def arun_text_only(agent, prompt: str) -> str:
+    """Run a tools-less helper agent and return its final text output.
+
+    Always streams, because the Codex Responses backend rejects non-streaming
+    calls with ``400 'Stream must be set to true'``. The official OpenAI
+    Responses API + every other provider also accept stream=True, so a single
+    code path covers both. Used by the compaction summarizer, memory
+    extractor, and plan reviewer — all of which previously called
+    ``agent.arun(prompt, stream=False)`` and broke for any user on a ChatGPT
+    Plus/Pro OAuth credential.
+
+    Falls back to the empty string when the model returns no content (caller
+    decides what that means — e.g. compaction has its own mechanical
+    fallback).
+    """
+    from agno.run.agent import RunOutput
+
+    final_output = None
+    async for event in agent.arun(prompt, stream=True, yield_run_output=True):
+        if isinstance(event, RunOutput):
+            final_output = event
+            break
+    if final_output and final_output.content:
+        return final_output.content
+    return ""
+
+
 def _prepare_recovery_input(
     *,
     agent,
@@ -207,71 +234,22 @@ def _build_permission_mode_reminder() -> str | None:
     except LookupError:
         return None
     if mode == "yolo":
-        # Wording mirrors Codex's gpt_5_2_prompt.md sections "Autonomy and
-        # Persistence" and "Task execution" verbatim where possible. Those
-        # phrases ("persist until… end-to-end within the current turn",
-        # "keep going until… completely resolved", "persevere even when
-        # function calls fail", "only terminate your turn when you are
-        # sure") are training-time triggers for GPT-5 — the model was
-        # tuned to switch into autonomous-resolution mode when it sees
-        # them. Our previous wording was generic and didn't activate that
-        # posture, which is why the model kept doing report-and-pause.
+        # Persistence / autonomy posture lives in BASE_INSTRUCTIONS (always
+        # in the system prompt, so it covers default / acceptEdits / yolo
+        # alike) — mirrors Codex's design where the "Task execution" /
+        # "Autonomy and Persistence" sections live in the cached base
+        # instructions, not in a per-turn reminder. This reminder is
+        # scoped to the one thing that is mode-specific: permission
+        # gating. Do NOT re-state the persistence rules here; that would
+        # bloat the per-turn cache for no behavioural gain.
         return (
             "<system-reminder>\n"
             "YOLO MODE ACTIVE — equivalent to Codex `approval-policy: "
-            "never`. Every tool call is pre-approved.\n"
-            "\n"
-            "## Autonomy and Persistence\n"
-            "\n"
-            "Persist until the task is fully handled end-to-end within "
-            "the current turn whenever feasible: do not stop at analysis "
-            "or partial fixes; carry changes through implementation, "
-            "verification, and a clear explanation of outcomes unless the "
-            "user explicitly pauses or redirects you. Assume the user "
-            "wants you to make code changes or run tools to solve the "
-            "problem — it is bad to output your proposed solution in a "
-            "message and stop; go ahead and actually implement the "
-            "change. If you encounter challenges or blockers, you should "
-            "attempt to resolve them yourself.\n"
-            "\n"
-            "## Task execution\n"
-            "\n"
-            "You must keep going until the query or task is completely "
-            "resolved before ending your turn and yielding back to the "
-            "user. Persevere even when function calls fail. Only "
-            "terminate your turn when you are sure that the problem is "
-            "solved. Autonomously resolve the query to the best of your "
-            "ability, using the tools available to you, before coming "
-            "back to the user.\n"
-            "\n"
-            "If a review, test run, plan step, or check surfaces concrete "
-            "follow-up work that is clearly in scope, resolve it in the "
-            "same turn. \"More work I identified\" is NOT a blocker — it "
-            "is the next thing to do.\n"
-            "\n"
-            "## What never to do in this mode\n"
-            "\n"
-            "- NEVER ask permission. No \"posso fazer o commit?\", \"want "
-            "me to run the tests?\", \"shall I edit X?\", \"Se quiser, "
-            "faço…\".\n"
-            "- NEVER report-and-pause. Phrases like \"Próximo passo "
-            "objetivo é…\", \"Next step is…\", \"I will now…\" are "
-            "forbidden as turn-end content. If you write them you must "
-            "execute them in the same turn.\n"
-            "- NEVER propose options and wait. Pick the most reasonable "
-            "one and do it.\n"
-            "\n"
-            "## When the turn legitimately ends\n"
-            "\n"
-            "(a) The task is completely resolved and verified.\n"
-            "(b) You hit a real blocker — information only the user has, "
-            "an ambiguity that flips the entire approach, or an external "
-            "system you cannot reach.\n"
-            "(c) The plan / task list is exhausted with every item "
-            "terminal (completed / skipped / failed).\n"
-            "\n"
-            "End your turn by reporting what you DID, not by previewing "
-            "what should happen next.\n"
+            "never`. Every tool call is pre-approved. Do NOT ask permission "
+            "before running tools (\"posso fazer o commit?\", \"want me to "
+            "run the tests?\", \"shall I edit X?\", \"Se quiser, faço…\"). "
+            "Just execute. The autonomy and task-execution rules from your "
+            "system prompt still apply.\n"
             "</system-reminder>"
         )
     if mode == "acceptEdits":

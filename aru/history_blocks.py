@@ -206,8 +206,48 @@ def to_agno_messages(history: list[HistoryItem]) -> list:
     This function is the single translation layer between Aru's storage
     format and the runtime format Agno's Claude adapter expects (see
     `.venv/Lib/site-packages/agno/utils/models/claude.py:334-358`).
+
+    Defensive orphan filtering: both directions of the tool_use / tool_result
+    pair are checked, because each one breaks the API in its own way.
+
+    * ``tool_result`` whose ``tool_use_id`` has no matching ``tool_use``
+      anywhere in the history is dropped. Anthropic rejects with
+      ``404 tool_use_id not found``; the OpenAI Responses backend (Codex)
+      rejects with ``400 No tool call found for function call output``.
+    * ``tool_use`` whose ``id`` has no matching ``tool_result`` anywhere
+      after it is dropped (from the assistant message's ``tool_calls``
+      list). Anthropic accepts trailing unmatched tool_use only if it's
+      the very last turn (because the *next* assistant turn is expected to
+      include the tool_result); but for any older assistant turn an
+      unmatched tool_use leaves the conversation in an "awaiting tool
+      output" state and the Responses API rejects with ``400 No tool
+      output found for function call``. This typically happens when a
+      tool wrapper raised before producing a result (timeout, schema
+      error, Ctrl+C mid-batch) or when a delegated subagent crashed and
+      its tool_result was never recorded.
+
+    Filtering here keeps the API contract intact regardless of how the
+    history got unbalanced upstream (compaction, prune, crash recovery).
     """
     from agno.models.message import Message  # local import to avoid cycles
+
+    declared_tool_use_ids: set[str] = set()
+    answered_tool_use_ids: set[str] = set()
+    for item in history:
+        role = item.get("role")
+        blocks = item.get("content") or []
+        if role == "assistant":
+            for block in blocks:
+                if is_tool_use(block):
+                    tid = block.get("id")
+                    if tid:
+                        declared_tool_use_ids.add(tid)
+        elif role in ("user", "tool"):
+            for block in blocks:
+                if is_tool_result(block):
+                    tid = block.get("tool_use_id")
+                    if tid:
+                        answered_tool_use_ids.add(tid)
 
     out: list[Message] = []
     for item in history:
@@ -220,13 +260,18 @@ def to_agno_messages(history: list[HistoryItem]) -> list:
             text_parts = [b.get("text", "") for b in blocks if is_text(b)]
             tool_result_blocks = [b for b in blocks if is_tool_result(b)]
 
-            # Tool results must be emitted as separate `role="tool"` Messages
+            # Tool results must be emitted as separate `role="tool"` Messages.
+            # Skip orphans — see docstring; both Anthropic and Codex reject
+            # tool_results whose tool_use_id has no declaring tool_use.
             for tr in tool_result_blocks:
+                tid = tr.get("tool_use_id", "")
+                if tid and tid not in declared_tool_use_ids:
+                    continue
                 out.append(
                     Message(
                         role="tool",
                         content=str(tr.get("content", "")),
-                        tool_call_id=tr.get("tool_use_id", ""),
+                        tool_call_id=tid,
                         from_history=True,
                     )
                 )
@@ -245,9 +290,19 @@ def to_agno_messages(history: list[HistoryItem]) -> list:
             for b in blocks:
                 if not is_tool_use(b):
                     continue
+                tid = b.get("id", "")
+                # Drop tool_calls that never produced a tool_result. Without
+                # this, the next API call carries an unanswered function_call
+                # from a prior turn and the Responses backend errors out
+                # ("No tool output found for function call <id>"). The tool
+                # wrapper *should* always produce a result, but defensive
+                # filtering here recovers a stuck history even when the
+                # wrapper failed (timeout/crash/abort).
+                if tid and tid not in answered_tool_use_ids:
+                    continue
                 tool_calls.append(
                     {
-                        "id": b.get("id", ""),
+                        "id": tid,
                         "type": "function",
                         "function": {
                             "name": b.get("name", ""),
@@ -265,15 +320,21 @@ def to_agno_messages(history: list[HistoryItem]) -> list:
 
         elif role == "tool":
             # Explicit tool-role items (we don't produce these ourselves but
-            # support them for forward compat with loaded sessions).
+            # support them for forward compat with loaded sessions). Same
+            # orphan filter as the user-role branch — this is actually the
+            # branch that catches the loaded-session case where a prior
+            # compaction summarised the matching assistant turn away.
             for tr in blocks:
                 if not is_tool_result(tr):
+                    continue
+                tid = tr.get("tool_use_id", "")
+                if tid and tid not in declared_tool_use_ids:
                     continue
                 out.append(
                     Message(
                         role="tool",
                         content=str(tr.get("content", "")),
-                        tool_call_id=tr.get("tool_use_id", ""),
+                        tool_call_id=tid,
                         from_history=True,
                     )
                 )
