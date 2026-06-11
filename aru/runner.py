@@ -249,7 +249,11 @@ def _build_permission_mode_reminder() -> str | None:
             "before running tools (\"posso fazer o commit?\", \"want me to "
             "run the tests?\", \"shall I edit X?\", \"Se quiser, faço…\"). "
             "Just execute. The autonomy and task-execution rules from your "
-            "system prompt still apply.\n"
+            "system prompt still apply. Requirement and design questions "
+            "are NOT permission asks — when you genuinely need the user's "
+            "decision (brainstorming, planning, choosing between "
+            "approaches), still use AskUserQuestion and wait for the "
+            "answer.\n"
             "</system-reminder>"
         )
     if mode == "acceptEdits":

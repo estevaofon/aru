@@ -11,6 +11,7 @@ from __future__ import annotations
 from aru.runtime import get_ctx
 from aru.tools import delegate as _delegate_module
 from aru.tools._shared import _thread_tool
+from aru.tools.ask_user import AskUserQuestion
 from aru.tools.delegate import delegate_task
 from aru.tools.file_ops import (
     _edit_file_tool,
@@ -49,6 +50,15 @@ _rank_files_tool = _thread_tool(rank_files, timeout=45)
 # __name__ == "apply_patch" so the registry key and LLM-facing schema are
 # unchanged.
 _apply_patch_tool = _thread_tool(apply_patch, timeout=60)
+
+# AskUserQuestion blocks on the human's answer — deliberately NO timeout
+# (decision time is unbounded; TuiUI enforces its own modal cap). It still
+# must run on a worker thread: TuiUI bridges to the App loop via
+# threading.Event and would deadlock the event loop if the sync function ran
+# inline. The PascalCase name is intentional — it is the tool name kimi-k2.6
+# and Claude models were trained with (kimi-code / Claude Code toolsets);
+# a snake_case alias gets ignored in favour of plain-text questions.
+_ask_user_tool = _thread_tool(AskUserQuestion)
 
 
 # Tool sets composed from a single core set — avoid duplication and drift.
@@ -101,9 +111,15 @@ _TASK_MGMT_TOOLS = [
 # clarity; excluded from subagent / planner / explorer sets.
 _SKILL_TOOLS = [invoke_skill]
 
+# User-interaction tool — AskUserQuestion blocks until the human answers and
+# returns the answers as the tool result (kimi-code parity). Primary agents
+# only: subagents / planner / explorer must not grab the user's attention
+# mid-delegation.
+_INTERACTION_TOOLS = [_ask_user_tool]
+
 CORE_TOOLS = _READ_ONLY_TOOLS + _WRITE_TOOLS + [bash] + _NET_TOOLS + [delegate_task, memory_write]
 
-ALL_TOOLS = _TASK_MGMT_TOOLS + _SKILL_TOOLS + CORE_TOOLS
+ALL_TOOLS = _TASK_MGMT_TOOLS + _SKILL_TOOLS + _INTERACTION_TOOLS + CORE_TOOLS
 
 # GENERAL_TOOLS and EXECUTOR_TOOLS used to diverge silently; both are now the
 # same canonical set. Keep separate names for callers that reference them.

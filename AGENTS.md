@@ -1,6 +1,6 @@
 # Aru — AI Coding Assistant
 
-Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI for interactive use, plus a non-interactive one-shot mode (`aru "prompt"`), where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (18 tools in the full set: 12 core + 5 task-management + 1 skill invocation).
+Aru is a multi-agent CLI coding assistant supporting multiple LLM providers (Anthropic, OpenAI, Ollama, Groq, OpenRouter, DeepSeek) via the Agno framework. It provides a Textual TUI for interactive use, plus a non-interactive one-shot mode (`aru "prompt"`), where users describe tasks in natural language, and agents plan and execute code changes using a composable tool set (28 tools in the full set: 21 core + 5 task-management + 1 skill invocation + 1 user-interaction).
 
 ## Architecture
 
@@ -116,6 +116,7 @@ aru/
     ├── tasklist.py     # create_task_list / update_task / update_plan_step
     ├── plan_mode.py    # enter_plan_mode / exit_plan_mode — session-flag gate (no nested runner)
     ├── skill.py        # invoke_skill — load another skill's SKILL.md into next-turn context
+    ├── ask_user.py     # AskUserQuestion — block until the user answers; answers return as the tool result
     ├── mcp_client.py   # MCP server gateway for external tool integration
     ├── ast_tools.py    # Tree-sitter Python AST analysis (classes, functions, imports)
     ├── ranker.py       # Multi-factor file relevance scoring
@@ -236,10 +237,10 @@ Single source of truth for native agents. Each entry is an `AgentSpec` with a la
 
 | Spec key | Role | Mode | Tool set | Max tokens |
 |----------|------|------|----------|------------|
-| `build` | general | primary | `GENERAL_TOOLS` (19) | 8192 |
-| `plan` | planner | primary | `PLANNER_TOOLS` (5) | 4096 |
-| `executor` | executor | primary | `EXECUTOR_TOOLS` (19) | 8192 |
-| `explorer` | explorer | subagent | `EXPLORER_TOOLS` (7, small model) | 4096 |
+| `build` | general | primary | `GENERAL_TOOLS` (28) | 8192 |
+| `plan` | planner | primary | `PLANNER_TOOLS` (11) | 4096 |
+| `executor` | executor | primary | `EXECUTOR_TOOLS` (28) | 8192 |
+| `explorer` | explorer | subagent | `EXPLORER_TOOLS` (13, small model) | 4096 |
 
 Custom agents defined via `.agents/agents/*.md` take a separate path through `create_custom_agent_instance` and are not listed in the catalog.
 
@@ -260,13 +261,13 @@ Composed tool sets (single source of truth — see `CORE_TOOLS`, `_READ_ONLY_TOO
 
 | Set | Size | Contents |
 |-----|------|----------|
-| `CORE_TOOLS` | 12 | read/write/edit × file variants (write_file singular only), glob/grep/list, bash, web_search/fetch, delegate_task |
-| `ALL_TOOLS` | 18 | `CORE_TOOLS` + `create_task_list`, `update_task`, `update_plan_step`, `enter_plan_mode`, `exit_plan_mode`, `invoke_skill` |
-| `GENERAL_TOOLS` | 18 | alias for `ALL_TOOLS` (build agent) |
-| `EXECUTOR_TOOLS` | 18 | alias for `ALL_TOOLS` (executor agent) |
-| `PLANNER_TOOLS` | 5 | read-only subset: `read_file`, `read_files`, `glob_search`, `grep_search`, `list_directory` |
-| `EXPLORER_TOOLS` | 7 | `PLANNER_TOOLS` + `bash` + `rank_files` |
-| `_DEFAULT_SUBAGENT_TOOLS` | 12 | tools passed to delegated sub-agents; excludes `delegate_task` and `invoke_skill` (controller pre-bakes skill content into subagent context) |
+| `CORE_TOOLS` | 21 | read/write/edit × file variants (write_file singular only), glob/grep/list, worktree_info, 4× lsp_*, memory_search, bash, web_search/fetch, delegate_task, memory_write |
+| `ALL_TOOLS` | 28 | `CORE_TOOLS` + `create_task_list`, `update_task`, `update_plan_step`, `enter_plan_mode`, `exit_plan_mode`, `invoke_skill`, `AskUserQuestion` |
+| `GENERAL_TOOLS` | 28 | alias for `ALL_TOOLS` (build agent) |
+| `EXECUTOR_TOOLS` | 28 | alias for `ALL_TOOLS` (executor agent) |
+| `PLANNER_TOOLS` | 11 | read-only subset (`_READ_ONLY_TOOLS`): file reads, search, list, worktree_info, lsp reads, memory_search |
+| `EXPLORER_TOOLS` | 13 | `PLANNER_TOOLS` + `bash` + `rank_files` |
+| `_DEFAULT_SUBAGENT_TOOLS` | 20 | tools passed to delegated sub-agents; excludes `delegate_task`, `invoke_skill` (controller pre-bakes skill content into subagent context) and `AskUserQuestion` (subagents must not grab the user's attention) |
 
 Tool categories in the file:
 
@@ -280,6 +281,7 @@ Tool categories in the file:
 | Task mgmt | `create_task_list`, `update_task`, `update_plan_step`, `enter_plan_mode`, `exit_plan_mode` |
 | Skill | `invoke_skill` (load another skill's SKILL.md into next-turn context — used for multi-skill workflow transitions) |
 | Memory | `memory_search` (read/query auto-memory), `memory_write` (explicit save when user asks to remember something) |
+| User interaction | `AskUserQuestion` (blocks until the user answers; answers return as the tool result — refused in non-interactive sessions; works in YOLO) |
 
 ### `tools/skill.py` — Skill Invocation Tool
 
@@ -290,6 +292,48 @@ This is the primary mechanism for **multi-skill workflows** where one skill need
 `invoke_skill.__doc__` is updated at startup via `_update_invoke_skill_docstring(config.skills)` (called from `cli.py:run_oneshot` and `aru.tui.run_tui`) so the LLM-facing schema lists available skill names + descriptions. Skills with `disable_model_invocation: true` in their frontmatter are hidden and refused by the tool.
 
 The tool is part of `GENERAL_TOOLS` / `EXECUTOR_TOOLS` but intentionally excluded from `_DEFAULT_SUBAGENT_TOOLS`, `PLANNER_TOOLS`, `EXPLORER_TOOLS`, and `_PLAN_MODE_BLOCKED_TOOLS` (loading text is side-effect-free; mutating tools stay blocked in plan mode independently).
+
+### `tools/ask_user.py` — Blocking Question Tool
+
+`AskUserQuestion(questions)` is the kimi-code parity tool: each question is a tool call
+whose execution blocks on `ctx.ui` (option menu, or free-text prompt when a question has
+no `options`) until the user answers — the answers come back as the tool result
+(`{"answers": {"<question>": "<answer>"}}` JSON), so *waiting for the user is structural*
+rather than something the model must remember to do.
+
+**The PascalCase name and the `questions: [{question, header, options: [{label,
+description}], multi_select}]` schema are load-bearing**: they match the tool kimi-k2.6
+(kimi-code) and Claude (Claude Code) were trained with. The first iteration used a
+snake_case `ask_user(question, options)` and kimi-k2.6 simply never called it, asking in
+chat text instead (session 9dcec80a). Do not rename. `questions` is annotated as bare
+`list` on purpose — `list[dict]` makes Agno emit `additionalProperties: false` with empty
+`properties`, which strict-schema providers reject. Input is coerced defensively (bare
+string, single dict, options as plain strings, camelCase `multiSelect` all accepted).
+
+Menus get an appended "Other — type a custom answer" entry; `multi_select` questions
+degrade to a free-text prompt with the options listed. While blocked it holds
+`ctx.permission_lock` and marks the permission-wait gate (same machinery as
+`check_permission`: `_thread_tool` timeouts are suspended; question and permission prompts
+never overlap on screen).
+
+**Batch serialization (`runtime.UserQuestionGate`).** Agno executes every tool call of one
+LLM response concurrently (`agno/models/base.py` `arun_function_calls` → `asyncio.gather`),
+and kimi-k2.6 routinely bundles `AskUserQuestion` with other calls — without a latch the
+agent visibly "keeps working" (task panels update, files get read) while the question menu
+is open. The universal tool wrapper (`agent_factory._wrap_tools_with_hooks`) therefore
+holds a per-ctx `UserQuestionGate` while a question is open: tools scheduled *after* the
+question in the batch await the answer; tools scheduled *before* it proceed (provider
+order — kimi-code ToolScheduler parity). The gate is depth-counted for multiple questions
+and re-created fresh in `fork_ctx` so a parent's open question never freezes a subagent. Refused with kimi's "client does not support interactive questions" message in
+non-interactive sessions (piped stdin / `--print`). **YOLO mode does NOT disable it** —
+this deliberately diverges from kimi-code's auto-mode deny policy: aru's YOLO governs
+permission prompts for mutations, not conversation, and users who live in YOLO still
+expect brainstorming/planning questions (the deny made models "decide for themselves"
+mid-brainstorm — session a7fccb5f). The per-turn YOLO reminder in `runner.py` explicitly
+carves out requirement/design questions from its "do not ask permission" instruction. Primary agents only (build/executor) — excluded from planner/explorer/subagent
+sets. `BASE_INSTRUCTIONS` (§ "Waiting for the user") teaches the complementary rule: a
+plain-text question must be the final content of the turn, with bookkeeping tool calls
+(`update_task` etc.) done before the question, never after.
 
 ### `tools/tasklist.py` / `tools/plan_mode.py`
 

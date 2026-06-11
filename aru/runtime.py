@@ -19,6 +19,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import copy
 import os
@@ -222,6 +223,10 @@ class RuntimeContext:
     # ``ask_choice`` / ``confirm`` / ``print`` / ``notify`` uniformly.
     # Set by the bootstrap path; callers prefer this over direct console.
     ui: Any = None
+    # Pause-the-world latch while an AskUserQuestion prompt is open —
+    # created lazily by ``get_user_question_gate``. Forks get their own so
+    # a parent's open question never freezes a subagent (see fork_ctx).
+    user_question_gate: Any = None
 
 
 # ── ContextVar plumbing ──────────────────────────────────────────────
@@ -302,6 +307,10 @@ def fork_ctx() -> RuntimeContext:
     # `delegate_task` (MAX_SUBAGENT_DEPTH gate) as a safety net against a
     # custom agent with `tools: [..., delegate_task]` recursing unchecked.
     forked.subagent_depth = getattr(original, "subagent_depth", 0) + 1
+    # Fresh question latch: a question open in the parent's batch must not
+    # freeze the subagent's tools (and vice versa). Lazily re-created by
+    # ``get_user_question_gate`` on first use in the fork.
+    forked.user_question_gate = None
     # abort_event is deliberately NOT reassigned — shared reference so the
     # primary can cancel forks it has spawned.
     return forked
@@ -438,6 +447,66 @@ def end_permission_wait() -> None:
     gate = _perm_wait_gate.get()
     if gate is not None:
         gate.leave()
+
+
+class UserQuestionGate:
+    """Pause-the-world latch while an ``AskUserQuestion`` prompt is open.
+
+    Agno executes every tool call of one LLM response concurrently
+    (``agno/models/base.py`` ``arun_function_calls`` → ``asyncio.gather``).
+    When one of those calls is ``AskUserQuestion``, the tools scheduled
+    after it in the same batch must NOT run while the user is reading the
+    question — otherwise the agent visibly "keeps working" (panels update,
+    files get read) before the user has answered. Kimi-code gets this from
+    its ToolScheduler resource conflicts (an execution without declared
+    accesses conflicts with everything); this latch is the aru equivalent,
+    applied in ``agent_factory._wrap_tools_with_hooks``.
+
+    Event semantics are inverted ("set" = no question open) so waiters just
+    ``await``. Depth-counted so two questions in one batch hold the latch
+    until both resolve. ``begin``/``end``/``wait_for_no_question`` all run
+    on the event loop (the async tool wrapper), so no locking is needed;
+    ``active`` is also read from prompt threads, which is safe for a plain
+    int read.
+    """
+
+    __slots__ = ("_open_questions", "_no_question")
+
+    def __init__(self) -> None:
+        self._open_questions = 0
+        self._no_question = asyncio.Event()
+        self._no_question.set()
+
+    @property
+    def active(self) -> bool:
+        return self._open_questions > 0
+
+    def begin(self) -> None:
+        self._open_questions += 1
+        self._no_question.clear()
+
+    def end(self) -> None:
+        self._open_questions = max(0, self._open_questions - 1)
+        if self._open_questions == 0:
+            self._no_question.set()
+
+    async def wait_for_no_question(self) -> None:
+        await self._no_question.wait()
+
+
+def get_user_question_gate(ctx: "RuntimeContext | None" = None) -> UserQuestionGate:
+    """Return the current ctx's question latch, creating it lazily.
+
+    Lazy so contexts constructed outside an event loop never pay for the
+    ``asyncio.Event``. The tool wrapper runs single-threaded on the loop,
+    so the check-then-set has no race.
+    """
+    c = ctx if ctx is not None else get_ctx()
+    gate = getattr(c, "user_question_gate", None)
+    if gate is None:
+        gate = UserQuestionGate()
+        c.user_question_gate = gate
+    return gate
 
 
 # ── Shared-state helpers (Stage 4) ───────────────────────────────────

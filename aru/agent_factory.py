@@ -65,29 +65,56 @@ def _wrap_tools_with_hooks(tools: list) -> list:
             decision = evaluate_tool_policy(tool_name)
             if not decision.allowed:
                 return decision.message
-            # Before hook — plugins can mutate args or raise PermissionError to block
+
+            # Question latch (kimi-code ToolScheduler parity). Agno runs
+            # every tool call of one LLM response concurrently via
+            # asyncio.gather, so when the model bundles AskUserQuestion
+            # with other calls, those would execute while the user is
+            # still reading the question. Tools scheduled AFTER the
+            # question wait for the answer; tools scheduled before it
+            # proceed (provider order — begin() runs synchronously on the
+            # question coroutine's first scheduling step, before any
+            # await, so later coroutines in the same gather see it).
+            question_gate = None
             try:
-                before_data = await _fire_hook("tool.execute.before", {
+                from aru.runtime import get_user_question_gate
+                question_gate = get_user_question_gate()
+            except LookupError:
+                question_gate = None
+            is_question_tool = tool_name == "AskUserQuestion"
+            if question_gate is not None:
+                if is_question_tool:
+                    question_gate.begin()
+                else:
+                    await question_gate.wait_for_no_question()
+
+            try:
+                # Before hook — plugins can mutate args or raise PermissionError to block
+                try:
+                    before_data = await _fire_hook("tool.execute.before", {
+                        "tool_name": tool_name,
+                        "args": kwargs,
+                    })
+                    kwargs = before_data.get("args", kwargs)
+                except PermissionError as e:
+                    return f"BLOCKED by plugin: {e}. Do NOT retry this operation."
+
+                # Execute the tool
+                if inspect.iscoroutinefunction(fn):
+                    result = await fn(**kwargs)
+                else:
+                    result = fn(**kwargs)
+
+                # After hook — plugins can mutate the result
+                after_data = await _fire_hook("tool.execute.after", {
                     "tool_name": tool_name,
                     "args": kwargs,
+                    "result": result,
                 })
-                kwargs = before_data.get("args", kwargs)
-            except PermissionError as e:
-                return f"BLOCKED by plugin: {e}. Do NOT retry this operation."
-
-            # Execute the tool
-            if inspect.iscoroutinefunction(fn):
-                result = await fn(**kwargs)
-            else:
-                result = fn(**kwargs)
-
-            # After hook — plugins can mutate the result
-            after_data = await _fire_hook("tool.execute.after", {
-                "tool_name": tool_name,
-                "args": kwargs,
-                "result": result,
-            })
-            return after_data.get("result", result)
+                return after_data.get("result", result)
+            finally:
+                if question_gate is not None and is_question_tool:
+                    question_gate.end()
 
         wrapper._hook_wrapped = True
         return wrapper
