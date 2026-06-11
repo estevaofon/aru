@@ -4,6 +4,7 @@
         "minimax": "openrouter/minimax/minimax-m2.5",
         "minimax-m2.7": "openrouter/minimax/minimax-m2.7",
         "deepseek-v3": "openrouter/deepseek/deepseek-chat-v3-0324",
+        "dolphin": "openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
         "sonnet-4-6": "anthropic/claude-sonnet-4-6",
         "opus-4-6": "anthropic/claude-opus-4-6",
         "qwen-3-6": "alibabacloud/qwen3.6-plus"
@@ -22,7 +23,11 @@
                     "max_tokens": 65536
                 },
                 "minimax/minimax-m2.7": {
-                    "max_tokens": 131072
+                    "max_tokens": 16384,
+                    "context_limit": 196608
+                },
+                "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": {
+                    "max_tokens": 32768
                 }
             }
         },
